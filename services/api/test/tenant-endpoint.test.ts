@@ -1,0 +1,55 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import request from 'supertest';
+import { GenericContainer, type StartedTestContainer } from 'testcontainers';
+import type { INestApplication } from '@nestjs/common';
+import type { PrismaClient as PrismaClientType } from '@ventia/db';
+import { startTestDb } from './helpers';
+
+let db: Awaited<ReturnType<typeof startTestDb>>;
+let redisContainer: StartedTestContainer;
+let app: INestApplication;
+
+beforeAll(async () => {
+  db = await startTestDb();
+  redisContainer = await new GenericContainer('redis:7-alpine').withExposedPorts(6379).start();
+
+  // platformDb (exported by @ventia/db) is constructed at module-evaluation
+  // time from process.env.DATABASE_URL, so env vars must be set BEFORE the
+  // first import (static or dynamic) of @ventia/db or ../src/main.
+  process.env.DATABASE_URL = db.url;
+  process.env.REDIS_URL = `redis://${redisContainer.getHost()}:${redisContainer.getMappedPort(6379)}`;
+
+  const { PrismaClient } = (await import('@ventia/db')) as { PrismaClient: typeof PrismaClientType };
+  const prisma = new PrismaClient({ datasources: { db: { url: db.url } } });
+  const tenant = await prisma.tenant.create({ data: { slug: 'demo', name: 'Demo', status: 'live' } });
+  await prisma.tenantDomain.create({ data: { tenantId: tenant.id, domain: 'demo.ventia.localhost', isPrimary: true } });
+  await prisma.$disconnect();
+
+  const { createApp } = await import('../src/main');
+  app = await createApp();
+  await app.init();
+});
+
+afterAll(async () => {
+  await app.close();
+  await redisContainer.stop();
+  await db.stop();
+});
+
+describe('GET /v1/tenant', () => {
+  it('resolves by Host header', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/tenant')
+      .set('Host', 'demo.ventia.localhost');
+    expect(res.status).toBe(200);
+    expect(res.body.slug).toBe('demo');
+  });
+
+  it('404s for unknown host', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/tenant')
+      .set('Host', 'unknown.ventia.localhost');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('TENANT_NOT_FOUND');
+  });
+});
