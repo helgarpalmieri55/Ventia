@@ -7,6 +7,11 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().int().default(4000),
   API_URL: z.string().url().default('http://api.ventia.localhost'),
   PLATFORM_ROOT_DOMAIN: z.string().min(1).default('ventia.localhost'),
+  S3_ENDPOINT: z.string().url().default('http://localhost:9000'),
+  S3_ACCESS_KEY: z.string().min(1).default('ventia'),
+  S3_SECRET_KEY: z.string().min(1).default('ventia-secret'),
+  S3_BUCKET: z.string().min(1).default('ventia'),
+  S3_PUBLIC_URL: z.string().url().default('http://localhost:9000/ventia'),
 });
 
 export type Env = z.infer<typeof envSchema>;
