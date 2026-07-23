@@ -6,7 +6,7 @@
     "dev": "next dev -p 3001",
     "build": "next build",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint app lib"
+    "lint": "eslint app"
   },
   "dependencies": { "next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0" },
   "devDependencies": {
