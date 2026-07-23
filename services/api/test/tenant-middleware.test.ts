@@ -72,6 +72,24 @@ describe('TenantMiddleware', () => {
     expect(req.tenant).toEqual(tenant);
   });
 
+  it('falls back to Host when x-tenant-domain is an empty string', async () => {
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const resolve = vi.fn().mockResolvedValue(tenant);
+    const stubResolver = { resolve } as unknown as DomainResolver;
+    const middleware = new TenantMiddleware(stubResolver);
+    const req = {
+      headers: { host: 'demo.ventia.localhost', 'x-tenant-domain': '' },
+    } as unknown as Request;
+    const res = {} as Response;
+    const next = vi.fn() as unknown as NextFunction;
+
+    await middleware.use(req, res, next);
+
+    expect(resolve).toHaveBeenCalledWith('demo.ventia.localhost');
+    expect(req.tenant).toEqual(tenant);
+    expect(next).toHaveBeenCalledWith();
+  });
+
   it('uses the first value when x-tenant-domain arrives as an array', async () => {
     const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
     const resolve = vi.fn().mockResolvedValue(tenant);
