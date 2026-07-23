@@ -57,4 +57,14 @@ describe('tenantDb', () => {
     const t2 = await base.product.findFirstOrThrow({ where: { tenantId: T2 } });
     expect(t2.priceCents).toBe(1000);
   });
+
+  it('upsert update branch naming another tenantId throws CrossTenantError', async () => {
+    await expect(
+      tenantDb(T1).product.upsert({
+        where: { tenantId_slug: { tenantId: T1, slug: 't1' } },
+        create: { name: 'x', slug: 'x-upsert', priceCents: 1 },
+        update: { tenantId: T2 },
+      }),
+    ).rejects.toThrow(CrossTenantError);
+  });
 });

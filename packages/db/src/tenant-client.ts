@@ -30,6 +30,10 @@ function scopeArgs(model: string, operation: string, args: AnyArgs, tenantId: st
     const d = next.data as Record<string, unknown> | undefined;
     if (d && 'tenantId' in d && d.tenantId !== tenantId) throw new CrossTenantError(model);
   }
+  if (operation === 'upsert') {
+    const u = next.update as Record<string, unknown> | undefined;
+    if (u && 'tenantId' in u && u.tenantId !== tenantId) throw new CrossTenantError(model);
+  }
   // create/createMany take no `where` at all; findUnique-style ops (and upsert's
   // locator) require the unique where untouched — RLS still filters those at the
   // database level. Every other read/write op gets an AND-scoped where.
