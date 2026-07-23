@@ -1,0 +1,9 @@
+http://api.ventia.localhost {
+	reverse_proxy host.docker.internal:4000
+}
+http://admin.ventia.localhost {
+	reverse_proxy host.docker.internal:3001
+}
+http://ventia.localhost, http://*.ventia.localhost {
+	reverse_proxy host.docker.internal:3000
+}
