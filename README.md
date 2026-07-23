@@ -41,7 +41,7 @@ pnpm install
 
 # 4. Apply migrations
 DATABASE_URL=postgresql://ventia:ventia@localhost:5432/ventia \
-  pnpm --filter @ventia/db exec prisma migrate deploy
+  pnpm --filter @ventia/db migrate:deploy
 # (or `pnpm --filter @ventia/db migrate:dev` in a fresh dev DB)
 
 # 5. Seed two demo tenants (idempotent)
@@ -51,6 +51,7 @@ DATABASE_URL=postgresql://ventia:ventia@localhost:5432/ventia \
 # 6. Run the services (each in its own terminal)
 DATABASE_URL=postgresql://ventia:ventia@localhost:5432/ventia \
 REDIS_URL=redis://localhost:6379 \
+AUTH_SECRET=dev-secret-change-me \
   pnpm --filter @ventia/api dev            # http://localhost:4000
 
 pnpm --filter @ventia/storefront dev       # http://localhost:3000
@@ -67,10 +68,10 @@ With the dev stack, API, and storefront running:
 
 ```bash
 # Known tenant resolves via the API
-curl -s -H "Host: demo-moda.ventia.localhost" http://api.ventia.localhost/v1/tenant
+curl -s -H "x-tenant-domain: demo-moda.ventia.localhost" http://api.ventia.localhost/v1/tenant
 
-# Unknown host -> 404
-curl -s -i -H "Host: unknown.ventia.localhost" http://api.ventia.localhost/v1/tenant
+# Unknown host returns 404 TENANT_NOT_FOUND
+curl -s -i -H "x-tenant-domain: unknown.ventia.localhost" http://api.ventia.localhost/v1/tenant
 
 # Storefront renders the tenant matching its subdomain
 curl -s http://demo-moda.ventia.localhost/
