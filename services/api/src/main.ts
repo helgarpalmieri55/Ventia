@@ -12,6 +12,10 @@ if (require.main === module) {
     const { loadEnv } = await import('@ventia/core');
     const env = loadEnv();
     const app = await createApp();
+    // Only needed for the real runtime process so OS shutdown signals
+    // (SIGTERM/SIGINT) trigger onApplicationShutdown (e.g. Redis .quit()).
+    // Tests call app.close() directly, which always runs these hooks anyway.
+    app.enableShutdownHooks();
     await app.listen(env.API_PORT);
   })();
 }

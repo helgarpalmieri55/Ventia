@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { GenericContainer, type StartedTestContainer } from 'testcontainers';
+import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import type { INestApplication } from '@nestjs/common';
 import type { PrismaClient as PrismaClientType } from '@ventia/db';
 import { startTestDb } from './helpers';
@@ -11,7 +11,10 @@ let app: INestApplication;
 
 beforeAll(async () => {
   db = await startTestDb();
-  redisContainer = await new GenericContainer('redis:7-alpine').withExposedPorts(6379).start();
+  redisContainer = await new GenericContainer('redis:7-alpine')
+    .withExposedPorts(6379)
+    .withWaitStrategy(Wait.forLogMessage(/Ready to accept connections/))
+    .start();
 
   // platformDb (exported by @ventia/db) is constructed at module-evaluation
   // time from process.env.DATABASE_URL, so env vars must be set BEFORE the

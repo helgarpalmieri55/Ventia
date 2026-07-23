@@ -1,4 +1,4 @@
-import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { Inject, MiddlewareConsumer, Module, NestModule, OnApplicationShutdown } from '@nestjs/common';
 import Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
 import { HealthController } from './health/health.controller';
@@ -6,18 +6,44 @@ import { DomainResolver } from './tenants/domain-resolver';
 import { TenantMiddleware } from './tenants/tenant.middleware';
 import { TenantController } from './tenants/tenant.controller';
 
+export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
+
 @Module({
   controllers: [HealthController, TenantController],
   providers: [
     {
+      provide: REDIS_CLIENT,
+      useFactory: () => {
+        const client = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+        // Without this listener, ioredis logs unhandled "error" events straight
+        // to stderr (e.g. connection-refused noise in tests) and, on some
+        // versions/paths, an unhandled 'error' event with no listener can throw.
+        client.on('error', (err) => console.error('[redis]', err.message));
+        return client;
+      },
+    },
+    {
       provide: DomainResolver,
-      useFactory: () =>
-        new DomainResolver(new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379'), platformDb),
+      useFactory: (redis: Redis) => new DomainResolver(redis, platformDb),
+      inject: [REDIS_CLIENT],
     },
     TenantMiddleware,
   ],
 })
-export class AppModule implements NestModule {
+export class AppModule implements NestModule, OnApplicationShutdown {
+  constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
+
+  async onApplicationShutdown() {
+    // Nest calls this from app.close() (tests) as well as from OS shutdown
+    // signals when enableShutdownHooks() is used (runtime) — either way, quit
+    // the client so sockets/reconnect timers don't leak past app shutdown.
+    try {
+      await this.redis.quit();
+    } catch {
+      this.redis.disconnect();
+    }
+  }
+
   configure(consumer: MiddlewareConsumer) {
     // Health checks must not depend on DB/Redis connectivity, so they are
     // excluded from tenant resolution (deviation from the brief's literal

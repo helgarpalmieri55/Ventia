@@ -17,7 +17,17 @@ export class TenantMiddleware implements NestMiddleware {
 
   async use(req: Request, _res: Response, next: NextFunction) {
     const host = normalizeHost(req.headers.host);
-    req.tenant = host ? await this.resolver.resolve(host) : null;
+    try {
+      req.tenant = host ? await this.resolver.resolve(host) : null;
+    } catch (err) {
+      // Express 4 does not catch rejections thrown from async middleware, so
+      // an unguarded await here would become an unhandled rejection and crash
+      // the whole process for every tenant. Catch, log, and hand the error to
+      // Express so it becomes a 500 for THIS request only.
+      console.error('[tenant-middleware]', err);
+      next(err);
+      return;
+    }
     next();
   }
 }
