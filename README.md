@@ -21,7 +21,8 @@ docker/             Dev stack: Postgres (pgvector), Redis, Caddy
 
 ## Prerequisites
 
-- Node.js 22
+- Node.js >= 22.12 (the built API's CJS output requires ESM dependencies via `require(esm)`,
+  stable only from 22.12 onward — pinned in the root `package.json`'s `engines` field)
 - pnpm 9.15.0, via [corepack](https://nodejs.org/api/corepack.html) (pinned in `package.json`'s
   `packageManager` field — run `corepack enable` once if `pnpm` isn't already on your PATH)
 - Docker (for the dev stack, and for running the `db`/`api` test suites, which use
@@ -38,6 +39,10 @@ docker compose -f docker/compose.yaml up -d
 
 # 3. Install dependencies
 pnpm install
+
+# 3b. Generate the Prisma client (migrate:deploy below does NOT generate it —
+#     a fresh clone's typecheck/build/dev will fail without this step)
+pnpm --filter @ventia/db generate
 
 # 4. Apply migrations
 DATABASE_URL=postgresql://ventia:ventia@localhost:5432/ventia \

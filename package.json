@@ -2,7 +2,7 @@
   "name": "ventia",
   "private": true,
   "packageManager": "pnpm@9.15.0",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.12" },
   "scripts": {
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
