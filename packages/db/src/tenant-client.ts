@@ -8,6 +8,15 @@ export class CrossTenantError extends Error {
   }
 }
 
+export class RawQueryOnTenantClientError extends Error {
+  constructor(operation: string) {
+    super(
+      `Raw queries are not allowed on the tenant-scoped client (${operation}); use platformDb explicitly`,
+    );
+    this.name = 'RawQueryOnTenantClientError';
+  }
+}
+
 type AnyArgs = Record<string, unknown> & { where?: Record<string, unknown>; data?: unknown };
 
 function scopeArgs(model: string, operation: string, args: AnyArgs, tenantId: string): AnyArgs {
@@ -48,6 +57,16 @@ function scopeArgs(model: string, operation: string, args: AnyArgs, tenantId: st
 export function createTenantDbFactory(base: PrismaClient) {
   return function tenantDb(tenantId: string) {
     if (!tenantId) throw new Error('tenantDb requires a tenantId');
+    // $queryRaw/$executeRaw(Unsafe) run on the owner connection with no SET
+    // ROLE / GUC applied (they are top-level client operations, not model
+    // operations, so $allModels.$allOperations never sees them) — a silent
+    // tenant-isolation bypass. Reject them outright rather than let them
+    // through unscoped; callers who genuinely need raw SQL must use
+    // platformDb explicitly and take responsibility for scoping it.
+    const rejectRaw = (operation: string) => async () => {
+      throw new RawQueryOnTenantClientError(operation);
+    };
+
     return base.$extends({
       query: {
         $allModels: {
@@ -65,6 +84,10 @@ export function createTenantDbFactory(base: PrismaClient) {
             return result;
           },
         },
+        $queryRaw: rejectRaw('$queryRaw'),
+        $executeRaw: rejectRaw('$executeRaw'),
+        $queryRawUnsafe: rejectRaw('$queryRawUnsafe'),
+        $executeRawUnsafe: rejectRaw('$executeRawUnsafe'),
       },
     });
   };
