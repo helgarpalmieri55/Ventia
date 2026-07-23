@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src",
+    "lint": "eslint src test",
     "test": "vitest run",
     "generate": "prisma generate",
     "migrate:dev": "prisma migrate dev",
