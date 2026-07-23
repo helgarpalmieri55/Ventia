@@ -12,7 +12,10 @@ export async function fetchTenantForHost(
 ): Promise<ResolvedTenant | null> {
   if (!host) return null;
   const res = await fetchImpl(`${apiUrl}/v1/tenant`, {
-    headers: { Host: host },
+    // Node's fetch (undici) ignores a caller-set Host header, so the tenant
+    // subdomain is forwarded via this internal header instead; the API
+    // middleware prefers it and falls back to Host for direct requests.
+    headers: { 'x-tenant-domain': host },
     cache: 'no-store',
   });
   if (!res.ok) return null;

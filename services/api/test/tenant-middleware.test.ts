@@ -38,6 +38,55 @@ describe('TenantMiddleware', () => {
     expect(next).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledWith();
   });
+
+  it('prefers x-tenant-domain over a different Host header', async () => {
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const resolve = vi.fn().mockResolvedValue(tenant);
+    const stubResolver = { resolve } as unknown as DomainResolver;
+    const middleware = new TenantMiddleware(stubResolver);
+    const req = {
+      headers: { host: 'localhost:4000', 'x-tenant-domain': 'demo.ventia.localhost' },
+    } as unknown as Request;
+    const res = {} as Response;
+    const next = vi.fn() as unknown as NextFunction;
+
+    await middleware.use(req, res, next);
+
+    expect(resolve).toHaveBeenCalledWith('demo.ventia.localhost');
+    expect(req.tenant).toEqual(tenant);
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it('falls back to Host when x-tenant-domain is absent', async () => {
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const resolve = vi.fn().mockResolvedValue(tenant);
+    const stubResolver = { resolve } as unknown as DomainResolver;
+    const middleware = new TenantMiddleware(stubResolver);
+    const req = { headers: { host: 'demo.ventia.localhost' } } as Request;
+    const res = {} as Response;
+    const next = vi.fn() as unknown as NextFunction;
+
+    await middleware.use(req, res, next);
+
+    expect(resolve).toHaveBeenCalledWith('demo.ventia.localhost');
+    expect(req.tenant).toEqual(tenant);
+  });
+
+  it('uses the first value when x-tenant-domain arrives as an array', async () => {
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const resolve = vi.fn().mockResolvedValue(tenant);
+    const stubResolver = { resolve } as unknown as DomainResolver;
+    const middleware = new TenantMiddleware(stubResolver);
+    const req = {
+      headers: { host: 'localhost:4000', 'x-tenant-domain': ['demo.ventia.localhost', 'other.ventia.localhost'] },
+    } as unknown as Request;
+    const res = {} as Response;
+    const next = vi.fn() as unknown as NextFunction;
+
+    await middleware.use(req, res, next);
+
+    expect(resolve).toHaveBeenCalledWith('demo.ventia.localhost');
+  });
 });
 
 // Integration-level coverage: a real Nest/Express pipeline, with the resolver

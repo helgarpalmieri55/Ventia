@@ -55,4 +55,16 @@ describe('GET /v1/tenant', () => {
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('TENANT_NOT_FOUND');
   });
+
+  it('resolves by x-tenant-domain, taking precedence over a different/absent Host', async () => {
+    // No .set('Host', ...) at all — supertest/superagent will still send some
+    // Host header for the underlying HTTP request (pointing at the test
+    // server), which is deliberately NOT 'demo.ventia.localhost'. This proves
+    // x-tenant-domain wins over whatever Host actually arrives.
+    const res = await request(app.getHttpServer())
+      .get('/v1/tenant')
+      .set('x-tenant-domain', 'demo.ventia.localhost');
+    expect(res.status).toBe(200);
+    expect(res.body.slug).toBe('demo');
+  });
 });

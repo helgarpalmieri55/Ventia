@@ -9,7 +9,7 @@ describe('fetchTenantForHost', () => {
     const t = await fetchTenantForHost('demo.ventia.localhost', 'http://api', fetchImpl);
     expect(t?.name).toBe('Demo');
     expect(fetchImpl).toHaveBeenCalledWith('http://api/v1/tenant', {
-      headers: { Host: 'demo.ventia.localhost' },
+      headers: { 'x-tenant-domain': 'demo.ventia.localhost' },
       cache: 'no-store',
     });
   });

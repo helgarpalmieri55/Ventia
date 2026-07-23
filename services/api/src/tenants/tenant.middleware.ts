@@ -16,7 +16,12 @@ export class TenantMiddleware implements NestMiddleware {
   constructor(@Inject(DomainResolver) private readonly resolver: DomainResolver) {}
 
   async use(req: Request, _res: Response, next: NextFunction) {
-    const host = normalizeHost(req.headers.host);
+    // Node's fetch (undici) ignores caller-set Host headers, so the storefront
+    // forwards the visitor's subdomain via this internal header instead. Fall
+    // back to Host for direct calls (e.g. curl, browsers) that never sent it.
+    const domainHeader = req.headers['x-tenant-domain'];
+    const rawHost = (Array.isArray(domainHeader) ? domainHeader[0] : domainHeader) ?? req.headers.host;
+    const host = normalizeHost(rawHost);
     try {
       req.tenant = host ? await this.resolver.resolve(host) : null;
     } catch (err) {
