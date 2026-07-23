@@ -1,0 +1,19 @@
+{
+  "name": "ventia",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "build": "turbo run build"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.0",
+    "eslint": "^9.15.0",
+    "typescript-eslint": "^8.15.0",
+    "prettier": "^3.3.0"
+  }
+}
