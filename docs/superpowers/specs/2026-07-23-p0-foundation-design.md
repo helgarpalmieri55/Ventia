@@ -82,7 +82,14 @@ locally; a cross-tenant read attempt fails in an automated test; CI green.
 
 - Middleware (storefront + API): read `Host` → look up `tenant_domains`
   (Redis-cached, 60 s TTL) → attach `tenantId` to request context. Unknown
-  host → platform landing page. Suspended tenant handling arrives with tenant
+  host → platform landing page.
+- **Amendment (found during P0 implementation):** Node's `fetch` (undici)
+  ignores caller-set `Host` headers, so the storefront cannot forward the
+  visitor's subdomain that way. The API middleware prefers an internal
+  `x-tenant-domain` header (falling back to `Host`), and the storefront
+  sends that header on its server-side tenant lookup. Security-equivalent
+  to trusting `Host` (both client-supplied; domain resolution grants no
+  cross-tenant data access). Suspended tenant handling arrives with tenant
   lifecycle work (P6); the resolver returns tenant status from day one.
 - Seed script creates two `live` tenants (e.g. `demo-moda`, `demo-tech`) with
   their `{slug}.ventia.localhost` domains.
