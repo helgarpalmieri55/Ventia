@@ -43,7 +43,10 @@ export class OnboardingService {
    * client could ever perform.
    */
   async provisionTenant(session: SessionContext, body: unknown) {
-    if (session.tenantId) {
+    const existingMembership = await platformDb.membership.findFirst({
+      where: { userId: session.userId },
+    });
+    if (existingMembership) {
       throw new HttpException({ error: 'ALREADY_HAS_TENANT' }, 409);
     }
     const input = parseOr400(tenantProvisionSchema, body);

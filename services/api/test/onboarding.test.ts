@@ -98,6 +98,30 @@ describe('POST /v1/admin/onboarding/tenant', () => {
     expect(res.body).toEqual({ error: 'ALREADY_HAS_TENANT' });
   });
 
+  it('409 ALREADY_HAS_TENANT for a platform_admin with no tenantId', async () => {
+    const cookie = await signUpAndGetCookie('provision-platform-admin@demo.co');
+
+    // Create a user via signup helper
+    const user = await platformDb.user.findFirstOrThrow({
+      where: { email: 'provision-platform-admin@demo.co' }
+    });
+
+    // Create a platform_admin membership (tenantId: null)
+    await platformDb.membership.create({
+      data: { userId: user.id, tenantId: null, role: 'platform_admin' },
+    });
+
+    // Attempt to provision should fail with 409
+    const res = await provisionTenant(cookie, { storeName: 'Admin Tenant' });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'ALREADY_HAS_TENANT' });
+
+    // Verify no tenant was created with this slug
+    const tenantCount = await platformDb.tenant.count({ where: { slug: 'admin-tenant' } });
+    expect(tenantCount).toBe(0);
+  });
+
   it('dedups the slug across tenants: same storeName from two users gets x, then x-2', async () => {
     const cookieA = await signUpAndGetCookie('provision-dedup-a@demo.co');
     const cookieB = await signUpAndGetCookie('provision-dedup-b@demo.co');
