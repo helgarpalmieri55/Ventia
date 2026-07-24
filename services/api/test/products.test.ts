@@ -201,6 +201,43 @@ describe('/v1/admin/products', () => {
     expect(c.status).toBe(201);
   });
 
+  it('re-archiving to non-archived via PATCH respects the plan limit: 402 when at capacity', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('prod-unarchive-limit@demo.co', 'owner');
+    await platformDb.tenantLimits.create({
+      data: { tenantId, productsMax: 1, aiMessagesMonth: 1000, staffSeats: 3 },
+    });
+
+    const a = await createProduct(cookie, { name: 'Producto A Unarchive' });
+    expect(a.status).toBe(201);
+
+    // at the limit already: a second create is rejected
+    const bBlocked = await createProduct(cookie, { name: 'Producto B Unarchive' });
+    expect(bBlocked.status).toBe(402);
+
+    // archive A: frees up the slot
+    const archived = await request(app.getHttpServer())
+      .delete(`/v1/admin/products/${a.body.id}`)
+      .set('cookie', cookie);
+    expect(archived.status).toBe(204);
+
+    // now a create succeeds (A no longer counts while archived)
+    const b = await createProduct(cookie, { name: 'Producto B Unarchive' });
+    expect(b.status).toBe(201);
+
+    // un-archiving A via PATCH would push the tenant back over the limit -> 402
+    const patched = await request(app.getHttpServer())
+      .patch(`/v1/admin/products/${a.body.id}`)
+      .set('cookie', cookie)
+      .send({ status: 'active' });
+    expect(patched.status).toBe(402);
+    expect(patched.body.error).toBe('PLAN_LIMIT_EXCEEDED');
+
+    const after = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${a.body.id}`)
+      .set('cookie', cookie);
+    expect(after.body.status).toBe('archived');
+  });
+
   it('allows the staff role to create products', async () => {
     const { cookie } = await signUpWithTenant('prod-staff@demo.co', 'staff');
 
@@ -307,6 +344,99 @@ describe('/v1/admin/products', () => {
     expect(after.body.categoryIds).toEqual([]);
   });
 
+  it('rejects a cross-tenant categoryId on create: 400 VALIDATION_FAILED, product not created', async () => {
+    const tenantA = await signUpWithTenant('prod-cross-cat-create-a@demo.co', 'owner');
+    const tenantB = await signUpWithTenant('prod-cross-cat-create-b@demo.co', 'owner');
+
+    const catA = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', tenantA.cookie)
+      .send({ name: 'Category Tenant A' });
+    expect(catA.status).toBe(201);
+
+    const created = await createProduct(tenantB.cookie, {
+      name: 'Producto Cross Tenant Cat',
+      categoryIds: [catA.body.id],
+    });
+    expect(created.status).toBe(400);
+    expect(created.body).toEqual({
+      error: 'VALIDATION_FAILED',
+      details: { categoryIds: 'categoría inexistente' },
+    });
+
+    const list = await request(app.getHttpServer())
+      .get('/v1/admin/products?search=Producto Cross Tenant Cat')
+      .set('cookie', tenantB.cookie);
+    expect(list.body.total).toBe(0);
+  });
+
+  it('rejects a cross-tenant categoryId on update: 400 VALIDATION_FAILED, product unchanged', async () => {
+    const tenantA = await signUpWithTenant('prod-cross-cat-update-a@demo.co', 'owner');
+    const tenantB = await signUpWithTenant('prod-cross-cat-update-b@demo.co', 'owner');
+
+    const catA = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', tenantA.cookie)
+      .send({ name: 'Category Tenant A Update' });
+    expect(catA.status).toBe(201);
+
+    const productB = await createProduct(tenantB.cookie, { name: 'Producto Tenant B Update' });
+    expect(productB.status).toBe(201);
+
+    const patched = await request(app.getHttpServer())
+      .patch(`/v1/admin/products/${productB.body.id}`)
+      .set('cookie', tenantB.cookie)
+      .send({ categoryIds: [catA.body.id] });
+    expect(patched.status).toBe(400);
+    expect(patched.body).toEqual({
+      error: 'VALIDATION_FAILED',
+      details: { categoryIds: 'categoría inexistente' },
+    });
+
+    const after = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${productB.body.id}`)
+      .set('cookie', tenantB.cookie);
+    expect(after.body.categoryIds).toEqual([]);
+  });
+
+  it('dedupes duplicate categoryIds in one request into a single link (create and update)', async () => {
+    const { cookie } = await signUpWithTenant('prod-dup-cat@demo.co', 'owner');
+
+    const cat = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', cookie)
+      .send({ name: 'Dup Category' });
+    expect(cat.status).toBe(201);
+
+    const created = await createProduct(cookie, {
+      name: 'Producto Dup Cat',
+      categoryIds: [cat.body.id, cat.body.id],
+    });
+    expect(created.status).toBe(201);
+
+    const afterCreate = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${created.body.id}`)
+      .set('cookie', cookie);
+    expect(afterCreate.body.categoryIds).toEqual([cat.body.id]);
+
+    const cat2 = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', cookie)
+      .send({ name: 'Dup Category 2' });
+    expect(cat2.status).toBe(201);
+
+    const patched = await request(app.getHttpServer())
+      .patch(`/v1/admin/products/${created.body.id}`)
+      .set('cookie', cookie)
+      .send({ categoryIds: [cat2.body.id, cat2.body.id] });
+    expect(patched.status).toBe(200);
+
+    const afterPatch = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${created.body.id}`)
+      .set('cookie', cookie);
+    expect(afterPatch.body.categoryIds).toEqual([cat2.body.id]);
+  });
+
   it('PATCH sending a product its own current slug is a no-op, not a collision: 200', async () => {
     const { cookie } = await signUpWithTenant('prod-self-slug@demo.co', 'owner');
 
@@ -321,6 +451,28 @@ describe('/v1/admin/products', () => {
     expect(patched.status).toBe(200);
     expect(patched.body.slug).toBe('producto-propio');
     expect(patched.body.name).toBe('Producto Propio Renombrado');
+  });
+
+  it('rejects a duplicate sku within the same tenant: 409 SKU_TAKEN (not misreported as SLUG_TAKEN)', async () => {
+    const { cookie } = await signUpWithTenant('prod-dup-sku@demo.co', 'owner');
+
+    const first = await createProduct(cookie, { name: 'Producto Sku Uno', sku: 'DUP-SKU-1' });
+    expect(first.status).toBe(201);
+
+    const second = await createProduct(cookie, { name: 'Producto Sku Dos', sku: 'DUP-SKU-1' });
+    expect(second.status).toBe(409);
+    expect(second.body).toEqual({ error: 'SKU_TAKEN' });
+  });
+
+  it('rejects a malformed uuid path param with a typed 404 (not a Prisma P2023 500)', async () => {
+    const { cookie } = await signUpWithTenant('prod-bad-uuid@demo.co', 'owner');
+
+    const res = await request(app.getHttpServer())
+      .get('/v1/admin/products/not-a-uuid')
+      .set('cookie', cookie);
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'NOT_FOUND' });
   });
 
   it('is invisible across tenants: GET /:id of another tenant product -> 404', async () => {

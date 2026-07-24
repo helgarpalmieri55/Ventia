@@ -3,6 +3,7 @@ import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession } from '../admin/roles.decorator';
 import type { SessionContext } from '../auth/session-context';
 import { ProductsService, type ProductListQuery } from './products.service';
+import { assertUuidOr404 } from './uuid';
 
 // AdminSessionGuard rejects any session without a tenantId before a request
 // reaches here (see admin-session.guard.ts: `!session.tenantId` -> 403), so
@@ -30,17 +31,20 @@ export class ProductsController {
 
   @Get(':id')
   async findOne(@AdminSession() session: SessionContext, @Param('id') id: string) {
+    assertUuidOr404(id);
     return this.products.findOne(session, id);
   }
 
   @Patch(':id')
   async update(@AdminSession() session: SessionContext, @Param('id') id: string, @Body() body: unknown) {
+    assertUuidOr404(id);
     return this.products.update(session, id, body);
   }
 
   @Delete(':id')
   @HttpCode(204)
   async archive(@AdminSession() session: SessionContext, @Param('id') id: string): Promise<void> {
+    assertUuidOr404(id);
     await this.products.archive(session, id);
   }
 }

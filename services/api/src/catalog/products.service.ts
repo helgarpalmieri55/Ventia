@@ -109,6 +109,36 @@ function isUniqueConstraintError(err: unknown): err is Prisma.PrismaClientKnownR
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 }
 
+// Product now has two (tenantId, X) unique constraints (`slug`, and — since
+// the sku uniqueness migration — `sku`), so a P2002 is ambiguous: treating
+// every P2002 as SLUG_TAKEN (the old behavior) misreports a genuine
+// duplicate-sku conflict.
+//
+// The obvious fix would be Prisma's `error.meta.target` (it names the
+// violated index's columns), but that doesn't work here: every write in this
+// file runs as the `ventia_app` role (via tenantDb, or the manual `SET LOCAL
+// ROLE` escape in update()'s transaction), and Postgres only includes a
+// constraint's identity in a unique-violation error for roles with
+// sufficient privilege on the table — measured directly against this exact
+// schema/role, `meta.target` comes back `null` for every P2002 raised under
+// `ventia_app`, where the identical write as the unrestricted owner role
+// reports the real `["tenantId","sku"]`/`["tenantId","slug"]` array. So
+// instead of trusting meta.target, re-query for whichever field actually
+// collides: if the request touched `sku` and that sku is already taken by a
+// different row in this tenant, it's SKU_TAKEN; otherwise it's SLUG_TAKEN.
+async function skuAlreadyTaken(
+  db: ReturnType<typeof tenantDb>,
+  sku: string | null | undefined,
+  excludeId?: string,
+): Promise<boolean> {
+  if (!sku) return false;
+  const clash = await db.product.findFirst({
+    where: excludeId ? { sku, id: { not: excludeId } } : { sku },
+    select: { id: true },
+  });
+  return clash !== null;
+}
+
 function isNotFoundError(err: unknown): err is Prisma.PrismaClientKnownRequestError {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025';
 }
@@ -182,7 +212,29 @@ export class ProductsService {
     const tenantId = session.tenantId!;
     const db = tenantDb(tenantId);
     const slug = await this.uniqueSlug(tenantId, input.slug ?? slugify(input.name));
-    const { categoryIds, taxRate, ...rest } = input;
+    const { categoryIds: rawCategoryIds, taxRate, ...rest } = input;
+    // Dedupe first: a caller-supplied duplicate id would otherwise produce
+    // two ProductCategory rows with the same (productId, categoryId) pair,
+    // tripping the unique constraint and getting misreported as SLUG_TAKEN
+    // by the catch below.
+    const categoryIds = [...new Set(rawCategoryIds)];
+
+    // Tenant-scoped existence check BEFORE the insert: tenantDb's RLS scoping
+    // means this count only ever sees this tenant's categories, so a
+    // cross-tenant (or simply nonexistent) categoryId can never sneak
+    // through. Doing this as a pre-check (rather than letting the nested
+    // `categories: { create: ... }` hit a foreign-key violation) avoids the
+    // unhandled P2003 -> 500 this path used to produce, and keeps create()
+    // consistent with update()'s same check.
+    if (categoryIds.length) {
+      const count = await db.category.count({ where: { id: { in: categoryIds } } });
+      if (count !== categoryIds.length) {
+        throw new HttpException(
+          { error: 'VALIDATION_FAILED', details: { categoryIds: 'categoría inexistente' } },
+          400,
+        );
+      }
+    }
 
     try {
       const product = await db.product.create({
@@ -200,7 +252,10 @@ export class ProductsService {
       await writeAudit(session, 'product.create', 'Product', product.id, input);
       return serialize(product);
     } catch (err) {
-      if (isUniqueConstraintError(err)) throw new HttpException({ error: 'SLUG_TAKEN' }, 409);
+      if (isUniqueConstraintError(err)) {
+        const skuTaken = await skuAlreadyTaken(db, rest.sku);
+        throw new HttpException({ error: skuTaken ? 'SKU_TAKEN' : 'SLUG_TAKEN' }, 409);
+      }
       throw err;
     }
   }
@@ -220,12 +275,27 @@ export class ProductsService {
     const tenantId = session.tenantId!;
     const db = tenantDb(tenantId);
 
-    const existing = await db.product.findFirst({ where: { id }, select: { id: true } });
+    const existing = await db.product.findFirst({ where: { id }, select: { id: true, status: true } });
     if (!existing) throw new HttpException({ error: 'NOT_FOUND' }, 404);
 
-    const { categoryIds, taxRate, slug: inputSlug, ...rest } = input;
+    const { categoryIds: rawCategoryIds, taxRate, slug: inputSlug, ...rest } = input;
+    // Dedupe first — same reasoning as create(): a caller-supplied duplicate
+    // id would otherwise produce two ProductCategory rows with the same
+    // (productId, categoryId) pair, tripping the unique constraint and
+    // getting misreported as SLUG_TAKEN by the catch below.
+    const categoryIds = rawCategoryIds !== undefined ? [...new Set(rawCategoryIds)] : undefined;
     const data: Prisma.ProductUpdateInput = { ...rest };
     if (taxRate !== undefined) data.taxRate = TAX_RATE_TO_DB[taxRate];
+
+    // Un-archive plan-limit check: a PATCH that moves an archived product to
+    // any non-archived status grows the tenant's non-archived product count
+    // by exactly one (assertProductLimit's own count still excludes this
+    // product while it's archived, so `+1` is exact — no double counting).
+    // Must run BEFORE the transaction below: we want the 402 to land with
+    // nothing written yet, not to unwind a transaction.
+    if (input.status !== undefined && input.status !== 'archived' && existing.status === 'archived') {
+      await assertProductLimit(session, 1);
+    }
 
     try {
       // The category replace (deleteMany+createMany) and the product update
@@ -253,6 +323,23 @@ export class ProductsService {
         if (inputSlug !== undefined) data.slug = inputSlug;
 
         if (categoryIds !== undefined) {
+          if (categoryIds.length) {
+            // Tenant-scoped existence check BEFORE the insert (see create()'s
+            // identical check): the manual RLS escape above (SET LOCAL ROLE +
+            // tenant GUC) means this count is scoped to this tenant exactly
+            // like tenantDb would be, so a cross-tenant (or nonexistent)
+            // categoryId is rejected here with a typed 400 instead of falling
+            // through to the createMany below and tripping a foreign-key
+            // violation (the isForeignKeyError catch stays as a defense-in-
+            // depth net, but this pre-check is what actually fires now).
+            const count = await tx.category.count({ where: { id: { in: categoryIds }, tenantId } });
+            if (count !== categoryIds.length) {
+              throw new HttpException(
+                { error: 'VALIDATION_FAILED', details: { categoryIds: 'categoría inexistente' } },
+                400,
+              );
+            }
+          }
           await tx.productCategory.deleteMany({ where: { productId: id, tenantId } });
           if (categoryIds.length) {
             await tx.productCategory.createMany({
@@ -271,7 +358,10 @@ export class ProductsService {
       return serialize(product);
     } catch (err) {
       if (isNotFoundError(err)) throw new HttpException({ error: 'NOT_FOUND' }, 404);
-      if (isUniqueConstraintError(err)) throw new HttpException({ error: 'SLUG_TAKEN' }, 409);
+      if (isUniqueConstraintError(err)) {
+        const skuTaken = await skuAlreadyTaken(db, rest.sku, id);
+        throw new HttpException({ error: skuTaken ? 'SKU_TAKEN' : 'SLUG_TAKEN' }, 409);
+      }
       if (isForeignKeyError(err)) {
         throw new HttpException(
           { error: 'VALIDATION_FAILED', details: { categoryIds: 'categoría inexistente' } },

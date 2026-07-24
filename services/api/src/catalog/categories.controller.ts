@@ -17,6 +17,7 @@ import { AdminSession } from '../admin/roles.decorator';
 import type { SessionContext } from '../auth/session-context';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
+import { assertUuidOr404 } from './uuid';
 
 const categoryUpdateSchema = categoryInputSchema.partial();
 
@@ -65,6 +66,7 @@ export class CategoriesController {
 
   @Patch(':id')
   async update(@AdminSession() session: SessionContext, @Param('id') id: string, @Body() body: unknown) {
+    assertUuidOr404(id);
     const input = parseOr400(categoryUpdateSchema, body);
 
     try {
@@ -84,6 +86,7 @@ export class CategoriesController {
   @Delete(':id')
   @HttpCode(204)
   async remove(@AdminSession() session: SessionContext, @Param('id') id: string): Promise<void> {
+    assertUuidOr404(id);
     try {
       await tenantDb(session.tenantId!).category.delete({ where: { id } });
     } catch (err) {

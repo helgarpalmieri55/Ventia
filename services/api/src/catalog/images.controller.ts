@@ -7,6 +7,7 @@ import type { SessionContext } from '../auth/session-context';
 import { StorageService } from '../storage/storage.service';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
+import { assertUuidOr404 } from './uuid';
 
 const MAX_IMAGE_COUNT = 8;
 // Mirrors presignRequestSchema's `size` cap (packages/core/src/catalog-schemas.ts):
@@ -18,6 +19,13 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 // Reuses presignRequestSchema's contentType enum rather than duplicating the
 // allowlist.
 const ALLOWED_CONTENT_TYPES = new Set<string>(presignRequestSchema.shape.contentType.options);
+
+// The exact shape StorageService.presignProductImage mints for the part of
+// the key after the tenant/product prefix: a bare `{uuid}.{ext}`, nothing
+// else. Enforced here (not just the prefix check below) so a caller can't
+// smuggle a path-traversal segment (`../`) or extra path segments into an
+// otherwise-valid-prefixed key.
+const KEY_SUFFIX_RE = /^[0-9a-f-]{36}\.(jpg|png|webp)$/;
 
 // AdminSessionGuard rejects any session without a tenantId before a request
 // reaches here (see admin-session.guard.ts), so tenantId is guaranteed
@@ -37,6 +45,7 @@ export class ImagesController {
     @Param('id') productId: string,
     @Body() body: unknown,
   ) {
+    assertUuidOr404(productId);
     const input = parseOr400(presignRequestSchema, body);
     const tenantId = session.tenantId!;
     const db = tenantDb(tenantId);
@@ -61,6 +70,7 @@ export class ImagesController {
     @Param('id') productId: string,
     @Body() body: unknown,
   ) {
+    assertUuidOr404(productId);
     const input = parseOr400(imageConfirmSchema, body);
     const tenantId = session.tenantId!;
     const db = tenantDb(tenantId);
@@ -73,6 +83,16 @@ export class ImagesController {
     // (their own or another tenant's) must not be able to attach it here.
     const expectedPrefix = `tenants/${tenantId}/products/${productId}/`;
     if (!input.key.startsWith(expectedPrefix)) {
+      throw new HttpException({ error: 'INVALID_UPLOAD' }, 400);
+    }
+
+    // SECURITY GATE (a2): the remainder after the prefix must be exactly
+    // `{uuid}.{ext}` — no extra path segments, and critically no `../`
+    // traversal. Passing the prefix check alone doesn't rule out a key like
+    // `tenants/T/products/P/../../../other/secret.jpg`, whose *string*
+    // prefix still matches even though it resolves elsewhere once the S3
+    // client or any downstream consumer normalizes the path.
+    if (!KEY_SUFFIX_RE.test(input.key.slice(expectedPrefix.length))) {
       throw new HttpException({ error: 'INVALID_UPLOAD' }, 400);
     }
 
@@ -131,6 +151,8 @@ export class ImagesController {
     @Param('id') productId: string,
     @Param('imageId') imageId: string,
   ): Promise<void> {
+    assertUuidOr404(productId);
+    assertUuidOr404(imageId);
     const tenantId = session.tenantId!;
     const db = tenantDb(tenantId);
 

@@ -6,6 +6,7 @@ import { AdminSession } from '../admin/roles.decorator';
 import type { SessionContext } from '../auth/session-context';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
+import { assertUuidOr404 } from './uuid';
 
 // AdminSessionGuard rejects any session without a tenantId before a request
 // reaches here (see admin-session.guard.ts), so tenantId is guaranteed
@@ -20,6 +21,7 @@ export class StockController {
     @Param('id') productId: string,
     @Body() body: unknown,
   ): Promise<{ stock: number }> {
+    assertUuidOr404(productId);
     const input = parseOr400(stockAdjustSchema, body);
     const tenantId = session.tenantId!;
     const db = tenantDb(tenantId);

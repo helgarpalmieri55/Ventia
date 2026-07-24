@@ -156,6 +156,40 @@ describe('/v1/admin/categories', () => {
     expect(patchAsB.body).toEqual({ error: 'NOT_FOUND' });
   });
 
+  it('deletes a category that has products attached: 204, only the join row cascades, products still exist', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('cat-with-products@demo.co', 'owner');
+
+    const category = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', cookie)
+      .send({ name: 'Con Productos' });
+    expect(category.status).toBe(201);
+
+    const product = await request(app.getHttpServer())
+      .post('/v1/admin/products')
+      .set('cookie', cookie)
+      .send({ name: 'Producto Categorizado', priceCents: 1000, categoryIds: [category.body.id] });
+    expect(product.status).toBe(201);
+
+    const del = await request(app.getHttpServer())
+      .delete(`/v1/admin/categories/${category.body.id}`)
+      .set('cookie', cookie);
+    expect(del.status).toBe(204);
+
+    // the product itself is untouched — only the ProductCategory join row cascades
+    const after = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${product.body.id}`)
+      .set('cookie', cookie);
+    expect(after.status).toBe(200);
+    expect(after.body.name).toBe('Producto Categorizado');
+    expect(after.body.categoryIds).toEqual([]);
+
+    const joinRows = await platformDb.productCategory.findMany({
+      where: { tenantId, productId: product.body.id },
+    });
+    expect(joinRows).toHaveLength(0);
+  });
+
   it('writeAudit is best-effort: invalid tenantId does not throw', async () => {
     // Attempt to write audit with an invalid UUID tenantId. The Postgres uuid
     // cast will reject this, but writeAudit must swallow the error and resolve.

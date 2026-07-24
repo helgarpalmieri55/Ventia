@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import { S3Client, CreateBucketCommand, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
@@ -201,6 +202,24 @@ describe('Product images', () => {
     expect(confirm.body).toEqual({ error: 'INVALID_UPLOAD' });
   });
 
+  it('rejects a confirm key with path traversal after a valid tenant/product prefix -> 400 INVALID_UPLOAD', async () => {
+    const { cookie } = await signUpWithTenant('images-traversal@demo.co', 'owner');
+    const created = await createProduct(cookie, { name: 'Producto Traversal' });
+
+    // The string prefix check alone would pass this key (it does start with
+    // the expected tenants/{t}/products/{p}/ prefix) -- the suffix regex is
+    // what has to catch the `../` segment.
+    const key = `tenants/${created.body.tenantId}/products/${created.body.id}/../../../etc/passwd.jpg`;
+
+    const confirm = await request(app.getHttpServer())
+      .post(`/v1/admin/products/${created.body.id}/images`)
+      .set('cookie', cookie)
+      .send({ key, position: 0 });
+
+    expect(confirm.status).toBe(400);
+    expect(confirm.body).toEqual({ error: 'INVALID_UPLOAD' });
+  });
+
   it('rejects confirm of an oversized object -> 400 INVALID_UPLOAD, and deletes the object', async () => {
     const { cookie } = await signUpWithTenant('images-oversized@demo.co', 'owner');
     const created = await createProduct(cookie, { name: 'Producto Oversized' });
@@ -209,7 +228,11 @@ describe('Product images', () => {
     // URL doesn't sign ContentLength (see storage.service.ts), so an
     // over-the-limit PUT would otherwise succeed at upload time — the size
     // gate has to be enforced by HeadObject-ing the object at confirm time.
-    const key = `tenants/${created.body.tenantId}/products/${created.body.id}/oversized.jpg`;
+    // A real-shaped key (`{uuid}.jpg`, matching what StorageService.presignProductImage
+    // mints) -- this test is exercising the SIZE gate specifically, not the
+    // key-suffix-format gate (see the path-traversal test above), so the key
+    // itself must pass that check to reach the size check below.
+    const key = `tenants/${created.body.tenantId}/products/${created.body.id}/${randomUUID()}.jpg`;
     const bigBody = Buffer.alloc(6 * 1024 * 1024, 1);
     await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: bigBody, ContentType: 'image/jpeg' }));
 

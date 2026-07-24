@@ -7,6 +7,7 @@ import type { SessionContext } from '../auth/session-context';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
 import { ProductsService } from './products.service';
+import { assertUuidOr404 } from './uuid';
 
 function isNotFoundError(err: unknown): err is Prisma.PrismaClientKnownRequestError {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025';
@@ -26,6 +27,7 @@ export class VariantsController {
 
   @Put(':id/variants')
   async replace(@AdminSession() session: SessionContext, @Param('id') id: string, @Body() body: unknown) {
+    assertUuidOr404(id);
     const input = parseOr400(variantsReplaceSchema, body);
     const tenantId = session.tenantId!;
     const db = tenantDb(tenantId);
