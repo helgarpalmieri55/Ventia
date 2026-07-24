@@ -6,7 +6,13 @@ import { getSessionContext } from '../auth/session-context';
 import { ROLES_KEY, type AdminSessionContext } from './roles.decorator';
 import { AUTH_INSTANCE, type AuthInstance } from './auth-instance';
 
-type RequestWithAdminSession = Request & { adminSession?: AdminSessionContext };
+// Exported so AdminMeController can read `emailVerified` off the request
+// without it being part of AdminSessionContext (see roles.decorator.ts's
+// AdminSessionContext doc comment: it's the narrowed, guaranteed-shape
+// session used by every catalog/csv-import handler, and emailVerified is
+// per-request response data for /me specifically, not identity every
+// downstream handler needs).
+export type RequestWithAdminSession = Request & { adminSession?: AdminSessionContext; emailVerified?: boolean };
 
 @Injectable()
 export class AdminSessionGuard implements CanActivate {
@@ -48,6 +54,7 @@ export class AdminSessionGuard implements CanActivate {
       role: session.role,
     };
     req.adminSession = adminSession;
+    req.emailVerified = session.emailVerified;
     return true;
   }
 }

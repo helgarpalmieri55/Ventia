@@ -517,6 +517,43 @@ describe('POST /v1/admin/import/commit', () => {
     expect(list.body.total).toBe(0);
   });
 
+  it('rejects a row whose category name has exhausted all 20 slug suffixes: 422 CSV_INVALID row error', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('csv-cat-suffix-cap@demo.co', 'owner');
+
+    // Mirrors the emoji/literal collision test above (line ~402): "🔥🔥"
+    // slugifies empty, so its categoria-N fallback claims the literal slug
+    // "categoria-1" (nothing else in this fresh tenant has used the
+    // fallback yet). "Categoria 1" then slugifies to that exact same
+    // "categoria-1" string, landing it in the suffix-collision branch,
+    // which tries "categoria-1-2", "categoria-1-3", ... Pre-seeding real
+    // categories at every one of "categoria-1-2".."categoria-1-20" (19
+    // slugs — the full -2..-20 range the product path also caps at) means
+    // there is no free candidate left within MAX_SLUG_SUFFIX.
+    await platformDb.category.createMany({
+      data: Array.from({ length: 19 }, (_, i) => ({
+        tenantId,
+        name: `Bloqueo ${i + 2}`,
+        slug: `categoria-1-${i + 2}`,
+        position: 0,
+      })),
+    });
+
+    const csv = csvOf(
+      { name: 'Producto Emoji', price_cents: '1000', sku: 'CAT-OVERFLOW-1', categories: '🔥🔥' },
+      { name: 'Producto Literal', price_cents: '2000', sku: 'CAT-OVERFLOW-2', categories: 'Categoria 1' },
+    );
+    const res = await commit(cookie, csv);
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('CSV_INVALID');
+    expect(res.body.details.errors).toEqual([
+      { row: 2, column: 'categories', message: 'no hay slug disponible para la categoría' },
+    ]);
+
+    const list = await request(app.getHttpServer()).get('/v1/admin/products').set('cookie', cookie);
+    expect(list.body.total).toBe(0);
+  });
+
   it('is idempotent: committing the same file twice makes the second run all updates, product count unchanged', async () => {
     const { cookie } = await signUpWithTenant('csv-commit-idempotent@demo.co', 'owner');
 

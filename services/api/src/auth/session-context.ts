@@ -4,6 +4,7 @@ import type { createAuth } from './auth';
 export interface SessionContext {
   userId: string;
   email: string;
+  emailVerified: boolean;
   tenantId: string | null;
   role: 'owner' | 'staff' | 'platform_admin' | null;
 }
@@ -28,6 +29,7 @@ export async function getSessionContext(
   return {
     userId: session.user.id,
     email: session.user.email,
+    emailVerified: session.user.emailVerified,
     tenantId: membership?.tenantId ?? null,
     role: membership?.role ?? null,
   };

@@ -183,7 +183,7 @@ export class CsvImportService {
       const emptySlugCategoryCache = new Map<string, string>();
       let emptySlugCounter = 0;
 
-      async function resolveCategoryId(name: string): Promise<string> {
+      async function resolveCategoryId(name: string, rowNumber: number): Promise<string> {
         const baseSlug = slugify(name);
         const cacheKey = baseSlug ? undefined : name.toLowerCase();
         const cached = baseSlug ? categoryCache.get(baseSlug) : emptySlugCategoryCache.get(cacheKey!);
@@ -225,6 +225,24 @@ export class CsvImportService {
           let candidate = slug;
           do {
             suffix += 1;
+            if (suffix > MAX_SLUG_SUFFIX) {
+              // Row-level error (not a top-level 409 like the product path):
+              // this only surfaces from inside commit()'s transaction, so it
+              // reports as a CSV_INVALID row error rather than a bare 409 —
+              // consistent with how every other row-level problem in this
+              // file is reported.
+              throw new HttpException(
+                {
+                  error: 'CSV_INVALID',
+                  details: {
+                    errors: [
+                      { row: rowNumber, column: 'categories', message: 'no hay slug disponible para la categoría' },
+                    ],
+                  },
+                },
+                422,
+              );
+            }
             candidate = `${slug}-${suffix}`;
           } while (takenCategorySlugs.has(candidate));
           slug = candidate;
@@ -261,7 +279,7 @@ export class CsvImportService {
         if (isCreate || row.provided.categoryNames) {
           categoryIds = [];
           for (const name of row.categoryNames) {
-            categoryIds.push(await resolveCategoryId(name));
+            categoryIds.push(await resolveCategoryId(name, row.row));
           }
         }
 

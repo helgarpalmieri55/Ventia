@@ -196,6 +196,8 @@ describe('/v1/admin/categories', () => {
     const session: AdminSessionContext = {
       tenantId: 'not-a-uuid',
       userId: 'user-123',
+      email: 'x@y.co',
+      role: 'owner',
     } as AdminSessionContext;
 
     // This must not throw, even though the audit insert will fail.
