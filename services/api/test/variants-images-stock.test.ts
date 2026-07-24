@@ -273,6 +273,48 @@ describe('Product images', () => {
     expect(rows).toHaveLength(1);
   });
 
+  it('never lets concurrent confirms exceed the 8-image cap (no lost update on the count check)', async () => {
+    const { cookie } = await signUpWithTenant('images-race@demo.co', 'owner');
+    const created = await createProduct(cookie, { name: 'Producto Imagenes Race' });
+
+    for (let i = 0; i < 7; i++) {
+      const { key } = await presignAndUpload(cookie, created.body.id);
+      const confirm = await request(app.getHttpServer())
+        .post(`/v1/admin/products/${created.body.id}/images`)
+        .set('cookie', cookie)
+        .send({ key, position: i });
+      expect(confirm.status).toBe(201);
+    }
+
+    // Two presigned+uploaded objects, confirmed concurrently at count=7: only
+    // one can land (7 -> 8 is allowed, 8 -> 9 must be rejected). Checking the
+    // count without serializing against a concurrent confirm would let both
+    // requests observe count=7 and both insert, landing at 9 images with no
+    // rejection anywhere.
+    const [first, second] = await Promise.all([
+      presignAndUpload(cookie, created.body.id),
+      presignAndUpload(cookie, created.body.id),
+    ]);
+
+    const [a, b] = await Promise.all([
+      request(app.getHttpServer())
+        .post(`/v1/admin/products/${created.body.id}/images`)
+        .set('cookie', cookie)
+        .send({ key: first.key, position: 7 }),
+      request(app.getHttpServer())
+        .post(`/v1/admin/products/${created.body.id}/images`)
+        .set('cookie', cookie)
+        .send({ key: second.key, position: 7 }),
+    ]);
+
+    expect([a.status, b.status].sort()).toEqual([201, 409]);
+
+    const product = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${created.body.id}`)
+      .set('cookie', cookie);
+    expect(product.body.images).toHaveLength(8);
+  });
+
   it('writes an audit row for product.image_add', async () => {
     const { cookie, tenantId } = await signUpWithTenant('images-audit@demo.co', 'owner');
     const created = await createProduct(cookie, { name: 'Producto Audit Image' });
@@ -393,6 +435,35 @@ describe('POST /v1/admin/products/:id/stock', () => {
 
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'NOT_FOUND' });
+  });
+
+  it('never lets concurrent adjustments both succeed past the floor (no lost update)', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('stock-race@demo.co', 'owner');
+    const created = await createProduct(cookie, { name: 'Producto Stock Race', stock: 10 });
+
+    const adjust = (delta: number) =>
+      request(app.getHttpServer())
+        .post(`/v1/admin/products/${created.body.id}/stock`)
+        .set('cookie', cookie)
+        .send({ delta, reason: 'manual_adjust' });
+
+    // Two concurrent -6 adjustments against a stock of 10: only one can land
+    // (10-6=4, then 4-6=-2 must be rejected). A read-then-write lost-update
+    // bug would let both requests read stock=10, both compute nextStock=4,
+    // and both succeed — losing one adjustment's effect entirely.
+    const [a, b] = await Promise.all([adjust(-6), adjust(-6)]);
+    expect([a.status, b.status].sort()).toEqual([201, 422]);
+
+    const product = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${created.body.id}`)
+      .set('cookie', cookie);
+    expect(product.body.stock).toBe(4);
+
+    const movements = await platformDb.inventoryMovement.findMany({
+      where: { tenantId, productId: created.body.id },
+    });
+    expect(movements).toHaveLength(1);
+    expect(movements[0]).toMatchObject({ delta: -6 });
   });
 
   it('writes an audit row for product.stock_adjust', async () => {

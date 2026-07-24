@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, HttpCode, HttpException, Inject, Param, Post, UseGuards } from '@nestjs/common';
-import { tenantDb } from '@ventia/db';
+import { platformDb, tenantDb } from '@ventia/db';
 import { imageConfirmSchema, presignRequestSchema } from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession } from '../admin/roles.decorator';
@@ -95,14 +95,30 @@ export class ImagesController {
       throw new HttpException({ error: 'INVALID_UPLOAD' }, 400);
     }
 
-    const image = await db.productImage.create({
-      data: {
-        tenantId,
-        productId,
-        url: this.storage.publicUrlFor(input.key),
-        alt: input.alt,
-        position: input.position,
-      },
+    // Manual RLS transaction escape (see ProductsService.update after
+    // e48e49f / StockController): `presign`'s count check alone isn't
+    // enough to enforce the 8-image cap under concurrency — two confirms
+    // racing at count=7 can each observe "7 < 8" and both insert, landing at
+    // 9. Locking the product row for the duration of the count-then-insert
+    // serializes concurrent confirms for the same product so the recheck
+    // below is actually atomic with the insert.
+    const image = await platformDb.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      await tx.$executeRaw`SELECT id FROM "Product" WHERE id = ${productId}::uuid AND "tenantId" = ${tenantId}::uuid FOR UPDATE`;
+
+      const count = await tx.productImage.count({ where: { productId, tenantId } });
+      if (count >= MAX_IMAGE_COUNT) throw new HttpException({ error: 'IMAGE_LIMIT' }, 409);
+
+      return tx.productImage.create({
+        data: {
+          tenantId,
+          productId,
+          url: this.storage.publicUrlFor(input.key),
+          alt: input.alt,
+          position: input.position,
+        },
+      });
     });
     await writeAudit(session, 'product.image_add', 'ProductImage', image.id, input);
     return image;
