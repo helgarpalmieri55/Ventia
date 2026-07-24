@@ -104,6 +104,17 @@ pnpm turbo run test                   # unit/integration tests, all packages (ne
 The `db` and `api` test suites use Testcontainers and spin up throwaway Postgres containers on the
 local Docker daemon — no manual DB setup is required to run them, only a running Docker daemon.
 
+The dev stack (`docker/compose.yaml`) also runs MinIO (S3-compatible storage) for product images,
+on ports `9000` (S3 API) and `9001` (web console, login `ventia` / `ventia-secret`). The API reads
+`S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, and `S3_PUBLIC_URL` (see
+`.env.example`) to talk to it.
+
+### Catalog API
+
+The `/v1/admin/*` endpoints (products, categories, variants, images, stock) provide the merchant
+catalog CRUD, plus bulk CSV import at `/v1/admin/import/{template,dry-run,commit}` — fetch a
+starter file from `GET /v1/admin/import/template`.
+
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and on every
