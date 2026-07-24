@@ -52,10 +52,6 @@ function assertCsvSize(csv: string): void {
   }
 }
 
-function isUniqueConstraintError(err: unknown): err is Prisma.PrismaClientKnownRequestError {
-  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
-}
-
 @Injectable()
 export class CsvImportService {
   /** `GET /v1/admin/import/template` body: header line + one example row. */
@@ -73,19 +69,27 @@ export class CsvImportService {
 
     const skus = [...new Set(rows.map((r) => r.sku))];
     const existing = skus.length
-      ? await db.product.findMany({ where: { sku: { in: skus } }, select: { sku: true } })
+      ? await db.product.findMany({ where: { sku: { in: skus } }, select: { sku: true, status: true } })
       : [];
-    const existingSkus = new Set(existing.map((p) => p.sku));
+    const existingBySku = new Map(existing.map((p) => [p.sku, p]));
 
-    const creates = rows.filter((r) => !existingSkus.has(r.sku)).length;
+    const creates = rows.filter((r) => !existingBySku.has(r.sku)).length;
     const updates = rows.length - creates;
     const invalid = new Set(errors.map((e) => e.row)).size;
+
+    // Same un-archive accounting as commit(): a row that explicitly sets
+    // `status` on a currently-archived product will un-archive it, which
+    // grows the tenant's non-archived count exactly like a create does.
+    const unArchives = rows.filter((r) => {
+      const existingRow = existingBySku.get(r.sku);
+      return existingRow !== undefined && existingRow.status === 'archived' && r.provided.status;
+    }).length;
 
     const limits = await db.tenantLimits.findUnique({ where: { tenantId } });
     let limitExceeded = false;
     if (limits) {
       const nonArchivedCount = await db.product.count({ where: { status: { not: 'archived' } } });
-      limitExceeded = nonArchivedCount + creates > limits.productsMax;
+      limitExceeded = nonArchivedCount + creates + unArchives > limits.productsMax;
     }
 
     return {
@@ -117,16 +121,23 @@ export class CsvImportService {
     const db = tenantDb(tenantId);
     const skus = rows.map((r) => r.sku);
 
-    // Plan-limit check counts only CREATE rows (an update never grows the
-    // tenant's product count) and must happen before the transaction below —
-    // assertProductLimit throws 402, and we want that to happen with nothing
-    // written yet, not to unwind a transaction.
+    // Plan-limit check counts CREATE rows plus UN-ARCHIVE rows: an update never
+    // grows the tenant's product count UNLESS it moves an archived product to
+    // a non-archived status (draft/active — CSV import can never set
+    // 'archived', so any row that explicitly sets `status` on a currently-
+    // archived product is an un-archive). Both must be counted before the
+    // transaction below — assertProductLimit throws 402, and we want that to
+    // happen with nothing written yet, not to unwind a transaction.
     const preExisting = skus.length
-      ? await db.product.findMany({ where: { sku: { in: skus } }, select: { sku: true } })
+      ? await db.product.findMany({ where: { sku: { in: skus } }, select: { sku: true, status: true } })
       : [];
-    const preExistingSkus = new Set(preExisting.map((p) => p.sku));
-    const createsCount = rows.filter((r) => !preExistingSkus.has(r.sku)).length;
-    await assertProductLimit(session, createsCount);
+    const preExistingBySku = new Map(preExisting.map((p) => [p.sku, p]));
+    const createsCount = rows.filter((r) => !preExistingBySku.has(r.sku)).length;
+    const unArchivesCount = rows.filter((r) => {
+      const existing = preExistingBySku.get(r.sku);
+      return existing !== undefined && existing.status === 'archived' && r.provided.status;
+    }).length;
+    await assertProductLimit(session, createsCount + unArchivesCount);
 
     const result = await platformDb.$transaction(async (tx) => {
       // Manual RLS transaction escape (see ProductsService.update /
@@ -143,9 +154,10 @@ export class CsvImportService {
 
       const existingProducts = await tx.product.findMany({
         where: { tenantId, sku: { in: skus } },
-        select: { id: true, sku: true },
+        select: { id: true, sku: true, stock: true },
       });
       const existingBySku = new Map(existingProducts.map((p) => [p.sku, p.id]));
+      const existingStockBySku = new Map(existingProducts.map((p) => [p.sku, p.stock]));
 
       // Category cache keyed by SLUG (not by lowercased name): slugify()
       // already lowercases and strips diacritics, so keying by slug is what
@@ -157,6 +169,12 @@ export class CsvImportService {
       // commit with an unhandled P2002 partway through the row loop.
       const existingCategories = await tx.category.findMany({ where: { tenantId } });
       const categoryCache = new Map<string, string>(existingCategories.map((c) => [c.slug, c.id]));
+      // Every slug already taken in this tenant (pre-existing rows), used
+      // below to pick a free `categoria-N` fallback slug BEFORE attempting
+      // the create — see the comment on the fallback loop for why this has
+      // to be checked up front rather than recovered from after a failed
+      // insert.
+      const takenCategorySlugs = new Set(existingCategories.map((c) => c.slug));
       // Secondary cache for the rare category name that slugifies to ''
       // (punctuation/emoji-only, e.g. "!!!"): keyed by the raw lowercased
       // name so repeats of that exact name within one file still resolve to
@@ -171,24 +189,36 @@ export class CsvImportService {
         const cached = baseSlug ? categoryCache.get(baseSlug) : emptySlugCategoryCache.get(cacheKey!);
         if (cached) return cached;
 
-        const slug = baseSlug || `categoria-${++emptySlugCounter}`;
-        try {
-          const category = await tx.category.create({ data: { tenantId, name, slug, position: 0 } });
-          if (baseSlug) categoryCache.set(baseSlug, category.id);
-          else emptySlugCategoryCache.set(cacheKey!, category.id);
-          return category.id;
-        } catch (err) {
-          if (!isUniqueConstraintError(err)) throw err;
-          // A race is impossible within one transaction's sequential
-          // statements, but two distinct in-file names slugifying to the
-          // same value is not — fall back to whichever category is actually
-          // there rather than aborting the commit.
-          const existing = await tx.category.findFirst({ where: { tenantId, slug } });
-          if (!existing) throw err;
-          if (baseSlug) categoryCache.set(baseSlug, existing.id);
-          else emptySlugCategoryCache.set(cacheKey!, existing.id);
-          return existing.id;
+        // categoryCache is pre-populated from every category that already
+        // existed in this tenant before the transaction started, so a
+        // non-empty baseSlug can only reach this line when no row with that
+        // slug exists yet — the create below is safe as-is.
+        //
+        // The empty-slug fallback is different: `categoria-N`'s counter is
+        // local to THIS commit, with nothing stopping it from landing on a
+        // value some EARLIER, unrelated import already used (a previous
+        // file's "!!!" became `categoria-1`; this file's "???" would also
+        // want `categoria-1` if we just incremented blindly). A prior
+        // version of this code let that create() attempt fail and tried to
+        // recover in the catch block — but a failed statement aborts the
+        // whole Postgres transaction, so every subsequent statement
+        // (including the "recovery" read) fails too; there's no meaningful
+        // catch-and-continue once that happens. Pre-checking against
+        // `takenCategorySlugs` (and reserving each candidate as we go) means
+        // the create below always targets a slug nothing else — past or
+        // present — already holds.
+        let slug = baseSlug;
+        if (!slug) {
+          do {
+            slug = `categoria-${++emptySlugCounter}`;
+          } while (takenCategorySlugs.has(slug));
         }
+        takenCategorySlugs.add(slug);
+
+        const category = await tx.category.create({ data: { tenantId, name, slug, position: 0 } });
+        if (baseSlug) categoryCache.set(baseSlug, category.id);
+        else emptySlugCategoryCache.set(cacheKey!, category.id);
+        return category.id;
       }
 
       // Slug dedup state: every tenant product's current slug, checked
@@ -269,13 +299,23 @@ export class CsvImportService {
           });
           created += 1;
         } else {
-          await this.updateExistingProduct(tx, tenantId, existingId, row, slug, categoryIds);
+          const currentStock = existingStockBySku.get(row.sku)!;
+          await this.updateExistingProduct(
+            tx,
+            tenantId,
+            existingId,
+            row,
+            slug,
+            categoryIds,
+            currentStock,
+            session.userId,
+          );
           updated += 1;
         }
       }
 
       return { created, updated };
-    });
+    }, { timeout: 60_000 });
 
     // AuditLog.entityId is nullable in the schema, but writeAudit's signature
     // requires a string — there's no single Product this bulk operation is
@@ -299,6 +339,8 @@ export class CsvImportService {
     row: ParsedRow,
     slug: string | undefined,
     categoryIds: string[] | undefined,
+    currentStock: number,
+    actor: string,
   ): Promise<void> {
     const data: Prisma.ProductUpdateInput = {
       name: row.name,
@@ -314,6 +356,23 @@ export class CsvImportService {
     if (row.provided.status) data.status = row.status;
 
     await tx.product.update({ where: { id: productId }, data });
+
+    // Stock ledger policy (phase-review amendment): CSV updates that change
+    // stock must write an InventoryMovement for the delta, same as the
+    // POST /:id/stock endpoint — CREATE rows set an initial baseline (no
+    // movement), but an UPDATE that actually changes an existing product's
+    // stock needs an audit trail entry, not a silent overwrite.
+    if (row.provided.stock && row.stock !== currentStock) {
+      await tx.inventoryMovement.create({
+        data: {
+          tenantId,
+          productId,
+          delta: row.stock - currentStock,
+          reason: 'csv_import',
+          actor,
+        },
+      });
+    }
 
     if (row.provided.imageUrls) {
       await tx.productImage.deleteMany({ where: { productId, tenantId } });

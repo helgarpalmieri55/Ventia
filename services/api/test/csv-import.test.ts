@@ -503,6 +503,93 @@ describe('POST /v1/admin/import/commit', () => {
     expect(list.body.total).toBe(2);
   });
 
+  it('writes an InventoryMovement for a stock change on an update row, with the right delta', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('csv-commit-stock-movement@demo.co', 'owner');
+
+    const existing = await request(app.getHttpServer())
+      .post('/v1/admin/products')
+      .set('cookie', cookie)
+      .send({ name: 'Producto Stock CSV', priceCents: 1000, sku: 'STOCK-CSV-1', stock: 10 });
+    expect(existing.status).toBe(201);
+
+    const csv = csvOf({ name: 'Producto Stock CSV', price_cents: '1000', sku: 'STOCK-CSV-1', stock: '17' });
+
+    const res = await commit(cookie, csv);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ created: 0, updated: 1 });
+
+    const after = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${existing.body.id}`)
+      .set('cookie', cookie);
+    expect(after.body.stock).toBe(17);
+
+    const movements = await platformDb.inventoryMovement.findMany({
+      where: { tenantId, productId: existing.body.id },
+    });
+    expect(movements).toHaveLength(1);
+    expect(movements[0]).toMatchObject({ delta: 7, reason: 'csv_import' });
+    expect(movements[0]!.actor).toBeTruthy();
+  });
+
+  it('does not write an InventoryMovement when a create row sets the initial stock baseline', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('csv-commit-stock-create@demo.co', 'owner');
+
+    const csv = csvOf({ name: 'Producto Stock Nuevo', price_cents: '1000', sku: 'STOCK-CSV-NEW', stock: '30' });
+    const res = await commit(cookie, csv);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ created: 1, updated: 0 });
+
+    const movements = await platformDb.inventoryMovement.findMany({ where: { tenantId } });
+    expect(movements).toHaveLength(0);
+  });
+
+  it('returns 402 PLAN_LIMIT_EXCEEDED when a CSV update would un-archive a product past productsMax, nothing persisted', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('csv-commit-unarchive-limit@demo.co', 'owner');
+
+    // Both products are created BEFORE the plan limit is set, so creation
+    // itself is never blocked -- the limit only needs to apply once the
+    // tenant is in its target state (1 active, 1 archived) so the CSV
+    // un-archive below is what trips it, not either create.
+    const active = await request(app.getHttpServer())
+      .post('/v1/admin/products')
+      .set('cookie', cookie)
+      .send({ name: 'Producto Activo', priceCents: 1000, sku: 'UNARC-ACTIVE', status: 'active' });
+    expect(active.status).toBe(201);
+
+    const archived = await request(app.getHttpServer())
+      .post('/v1/admin/products')
+      .set('cookie', cookie)
+      .send({ name: 'Producto Archivado', priceCents: 1000, sku: 'UNARC-ARCHIVED' });
+    expect(archived.status).toBe(201);
+    const archiveRes = await request(app.getHttpServer())
+      .delete(`/v1/admin/products/${archived.body.id}`)
+      .set('cookie', cookie);
+    expect(archiveRes.status).toBe(204);
+
+    // Now cap the tenant at exactly its current non-archived count (1: just
+    // "Producto Activo") -- un-archiving the second product would push it to 2.
+    await platformDb.tenantLimits.create({
+      data: { tenantId, productsMax: 1, aiMessagesMonth: 1000, staffSeats: 3 },
+    });
+
+    // Un-archiving via CSV (status column explicitly set) would push the
+    // tenant from 1 non-archived product back to 2, over the productsMax=1 cap.
+    const csv = csvOf({
+      name: 'Producto Archivado',
+      price_cents: '1000',
+      sku: 'UNARC-ARCHIVED',
+      status: 'active',
+    });
+    const res = await commit(cookie, csv);
+    expect(res.status).toBe(402);
+    expect(res.body.error).toBe('PLAN_LIMIT_EXCEEDED');
+
+    const after = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${archived.body.id}`)
+      .set('cookie', cookie);
+    expect(after.body.status).toBe('archived');
+  });
+
   it('returns 402 PLAN_LIMIT_EXCEEDED when creates would exceed productsMax, nothing persisted', async () => {
     const { cookie, tenantId } = await signUpWithTenant('csv-commit-limit@demo.co', 'owner');
     await platformDb.tenantLimits.create({

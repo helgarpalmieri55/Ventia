@@ -27,7 +27,13 @@ export const productInputSchema = z.object({
   categoryIds: z.array(z.string().uuid()).max(20).default([]),
   seo: z.object({ title: z.string().max(70), description: z.string().max(160) }).partial().optional(),
 });
-export const productUpdateSchema = productInputSchema.partial();
+// `stock` is deliberately excluded here (unlike productInputSchema, where it
+// sets the create-time baseline): all post-create stock changes must go
+// through POST /:id/stock (or the CSV import's dedicated movement-writing
+// path), which guarantees an InventoryMovement audit row for every change.
+// Allowing PATCH to silently overwrite `stock` would create a second,
+// un-audited path to the same field.
+export const productUpdateSchema = productInputSchema.omit({ stock: true }).partial();
 
 export const variantsReplaceSchema = z.object({
   options: z.array(z.string().min(1).max(30)).min(1).max(3),
