@@ -1,0 +1,5 @@
+@import '@ventia/ui/styles.css';
+
+/* Admin's own app/ source isn't under @ventia/ui's @source scan — declare it
+   explicitly so Tailwind picks up utility classes used in this app's pages. */
+@source './**/*.{ts,tsx}';
