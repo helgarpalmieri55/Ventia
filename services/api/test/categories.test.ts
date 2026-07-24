@@ -5,12 +5,20 @@ import type { INestApplication } from '@nestjs/common';
 import type { PrismaClient as PrismaClientType } from '@ventia/db';
 import { startTestDb } from './helpers';
 import type { signUpWithTenant as SignUpWithTenant } from './admin-helpers';
+import type { SessionContext } from '../src/auth/session-context';
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
 let redisContainer: StartedTestContainer;
 let app: INestApplication;
 let signUpWithTenant: typeof SignUpWithTenant;
 let platformDb: PrismaClientType;
+let writeAudit: (
+  session: SessionContext,
+  action: string,
+  entity: string,
+  entityId: string,
+  data?: unknown,
+) => Promise<void>;
 
 beforeAll(async () => {
   db = await startTestDb();
@@ -32,6 +40,7 @@ beforeAll(async () => {
 
   ({ signUpWithTenant } = await import('./admin-helpers'));
   ({ platformDb } = await import('@ventia/db'));
+  ({ writeAudit } = await import('../src/catalog/audit'));
 });
 
 afterAll(async () => {
@@ -145,5 +154,17 @@ describe('/v1/admin/categories', () => {
       .send({ name: 'Hijacked' });
     expect(patchAsB.status).toBe(404);
     expect(patchAsB.body).toEqual({ error: 'NOT_FOUND' });
+  });
+
+  it('writeAudit is best-effort: invalid tenantId does not throw', async () => {
+    // Attempt to write audit with an invalid UUID tenantId. The Postgres uuid
+    // cast will reject this, but writeAudit must swallow the error and resolve.
+    const session: SessionContext = {
+      tenantId: 'not-a-uuid',
+      userId: 'user-123',
+    } as SessionContext;
+
+    // This must not throw, even though the audit insert will fail.
+    await expect(writeAudit(session, 'test.action', 'Test', 'entity-id')).resolves.toBeUndefined();
   });
 });

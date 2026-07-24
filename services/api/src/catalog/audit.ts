@@ -18,14 +18,25 @@ export async function writeAudit(
   entityId: string,
   data?: unknown,
 ): Promise<void> {
-  await platformDb.auditLog.create({
-    data: {
-      tenantId: session.tenantId,
-      actorUserId: session.userId,
+  try {
+    await platformDb.auditLog.create({
+      data: {
+        tenantId: session.tenantId,
+        actorUserId: session.userId,
+        action,
+        entity,
+        entityId,
+        ...(data !== undefined ? { data: data as Prisma.InputJsonValue } : {}),
+      },
+    });
+  } catch (err) {
+    // Audit writes must never fail the already-committed business mutation.
+    // Loud log so ops can spot audit-trail gaps (spec §9 requires audit rows).
+    console.error('[audit] failed to write audit log entry', {
       action,
       entity,
       entityId,
-      ...(data !== undefined ? { data: data as Prisma.InputJsonValue } : {}),
-    },
-  });
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
