@@ -115,6 +115,20 @@ The `/v1/admin/*` endpoints (products, categories, variants, images, stock) prov
 catalog CRUD, plus bulk CSV import at `/v1/admin/import/{template,dry-run,commit}` — fetch a
 starter file from `GET /v1/admin/import/template`.
 
+### Onboarding, staff & launch
+
+A signed-up user provisions their tenant via `POST /v1/admin/onboarding/tenant`, then drives the
+wizard with `GET`/`PATCH /v1/admin/onboarding` (steps: `store_info`, `branding`, `products`,
+`payments`). `POST /v1/admin/launch` (owner-only) flips the tenant to `live` once the checklist —
+store info, verified email, an active product, payments — is complete, else `422
+LAUNCH_CHECKLIST_INCOMPLETE`. Owners invite staff via `POST /v1/admin/staff/invites`; the invitee
+accepts with `POST /v1/staff/accept`. Staff share `/v1/admin/products` etc. with owners but get
+`403 FORBIDDEN_ROLE` on `/v1/admin/settings`, `/v1/admin/staff/*`, and `/v1/admin/launch`.
+
+**Mailer:** dev/test use a console transport (`ConsoleMailer`) that logs `[mail] to=... subject=...`
+plus the body — including verification and staff-invite links — to stdout instead of sending real
+email; grep the API's dev log for the token/URL when testing these flows locally.
+
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and on every
