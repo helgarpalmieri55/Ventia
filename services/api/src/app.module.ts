@@ -4,6 +4,7 @@ import { platformDb } from '@ventia/db';
 import { AdminModule } from './admin/admin.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { HealthController } from './health/health.controller';
+import { OnboardingModule } from './onboarding/onboarding.module';
 import { DomainResolver } from './tenants/domain-resolver';
 import { TenantMiddleware } from './tenants/tenant.middleware';
 import { TenantController } from './tenants/tenant.controller';
@@ -11,7 +12,7 @@ import { TenantController } from './tenants/tenant.controller';
 export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
 
 @Module({
-  imports: [AdminModule, CatalogModule],
+  imports: [AdminModule, CatalogModule, OnboardingModule],
   controllers: [HealthController, TenantController],
   providers: [
     {

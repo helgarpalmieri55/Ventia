@@ -4,6 +4,7 @@ import { createAuth } from '../auth/auth';
 import { MAILER, type Mailer } from '../mailer/mailer';
 import { MailerModule } from '../mailer/mailer.module';
 import { AdminSessionGuard, type RequestWithAdminSession } from './admin-session.guard';
+import { AuthenticatedGuard } from './authenticated.guard';
 import { AdminSession, type AdminSessionContext } from './roles.decorator';
 import { AUTH_INSTANCE } from './auth-instance';
 
@@ -39,7 +40,8 @@ export class AdminMeController {
         }),
     },
     AdminSessionGuard,
+    AuthenticatedGuard,
   ],
-  exports: [AUTH_INSTANCE, AdminSessionGuard],
+  exports: [AUTH_INSTANCE, AdminSessionGuard, AuthenticatedGuard],
 })
 export class AdminModule {}
