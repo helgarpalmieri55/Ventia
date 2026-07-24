@@ -44,6 +44,21 @@ export class AdminSessionGuard implements CanActivate {
       throw new HttpException({ error: 'FORBIDDEN_ROLE' }, 403);
     }
 
+    // Suspended-tenant semantics (P1b-6): a suspended tenant may still be
+    // read (GET) — e.g. an owner checking settings to see why they're
+    // suspended — but every mutation across /v1/admin/* is rejected. The
+    // extra lookup is skipped entirely for GET requests (the common case),
+    // so the perf cost of this indexed PK read lands only on writes.
+    if (req.method !== 'GET') {
+      const tenant = await platformDb.tenant.findUnique({
+        where: { id: session.tenantId },
+        select: { status: true },
+      });
+      if (tenant?.status === 'suspended') {
+        throw new HttpException({ error: 'TENANT_SUSPENDED' }, 403);
+      }
+    }
+
     // Narrowed after the check above: tenantId is a non-null string and role
     // is 'owner' | 'staff' (never null, never 'platform_admin') for every
     // handler downstream of this guard.

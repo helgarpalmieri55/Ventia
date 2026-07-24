@@ -122,27 +122,72 @@ export class OnboardingService {
   }
 
   async getOnboarding(session: AdminSessionContext, emailVerified: boolean) {
-    const tenant = await tenantDb(session.tenantId).tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
+    const db = tenantDb(session.tenantId);
+    const tenant = await db.tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
+    const hasActiveProduct = (await db.product.count({ where: { status: 'active' } })) > 0;
+    const checklist = this.buildChecklist(tenant, emailVerified, hasActiveProduct);
+
+    return { steps: asRecord(tenant.settings).onboarding ?? {}, checklist };
+  }
+
+  /**
+   * Shared checklist computation behind both GET /v1/admin/onboarding and
+   * POST /v1/admin/launch (task-6 brief: "REUSE the existing service method,
+   * don't duplicate"). `emailVerified` is passed in rather than looked up
+   * here because both callers already have it cheaply on hand: the
+   * onboarding GET reads it off `req.emailVerified` (set by AdminSessionGuard
+   * from the caller's own session), and launch does the same — launch is
+   * @Roles('owner')-only, so the calling session IS the owner whose
+   * verification state the checklist needs.
+   */
+  private buildChecklist(
+    tenant: { name: string; settings: Prisma.JsonValue | null },
+    emailVerified: boolean,
+    hasActiveProduct: boolean,
+  ): LaunchChecklist {
     const settings = asRecord(tenant.settings);
 
     const storeInfoSettings = asRecord(settings.storeInfo as Prisma.JsonValue | undefined);
     const storeInfo = Boolean(tenant.name) && typeof storeInfoSettings.contactEmail === 'string';
 
-    const hasActiveProduct =
-      (await tenantDb(session.tenantId).product.count({ where: { status: 'active' } })) > 0;
-
     const paymentsSettings = asRecord(settings.payments as Prisma.JsonValue | undefined);
     const paymentsReady = paymentsSettings.codEnabled === true;
 
-    const checklist: LaunchChecklist = {
+    return {
       storeInfo,
       emailVerified,
       hasActiveProduct,
       paymentsReady,
       ready: storeInfo && emailVerified && hasActiveProduct && paymentsReady,
     };
+  }
 
-    return { steps: settings.onboarding ?? {}, checklist };
+  /**
+   * POST /v1/admin/launch: not ready -> 422 LAUNCH_CHECKLIST_INCOMPLETE with
+   * the checklist as `details`; ready -> flips tenant.status to 'live',
+   * writes the 'tenant.launch' audit row, and returns the checklist.
+   * Idempotent: a tenant already 'live' short-circuits to `{ status: 'live' }`
+   * before touching the checklist or writing a second audit row.
+   */
+  async launch(session: AdminSessionContext, emailVerified: boolean) {
+    const db = tenantDb(session.tenantId);
+    const tenant = await db.tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
+
+    if (tenant.status === 'live') {
+      return { status: 'live' as const };
+    }
+
+    const hasActiveProduct = (await db.product.count({ where: { status: 'active' } })) > 0;
+    const checklist = this.buildChecklist(tenant, emailVerified, hasActiveProduct);
+
+    if (!checklist.ready) {
+      throw new HttpException({ error: 'LAUNCH_CHECKLIST_INCOMPLETE', details: checklist }, 422);
+    }
+
+    await db.tenant.update({ where: { id: session.tenantId }, data: { status: 'live' } });
+    await writeAudit(session, 'tenant.launch', 'Tenant', session.tenantId, checklist);
+
+    return { status: 'live' as const, checklist };
   }
 
   async patchOnboarding(session: AdminSessionContext, body: unknown) {
