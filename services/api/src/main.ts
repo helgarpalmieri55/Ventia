@@ -3,19 +3,17 @@ import { NestFactory } from '@nestjs/core';
 import type { INestApplication } from '@nestjs/common';
 import express from 'express';
 import { toNodeHandler } from 'better-auth/node';
-import { platformDb } from '@ventia/db';
 import { AppModule } from './app.module';
-import { createAuth } from './auth/auth';
+import { AUTH_INSTANCE, type AuthInstance } from './admin/auth-instance';
 
 export async function createApp(): Promise<INestApplication> {
   // bodyParser: false — better-auth's toNodeHandler needs the raw (unparsed)
   // request stream for /v1/auth/*; express.json() is mounted after it below
   // so every other route still gets a parsed body.
   const app = await NestFactory.create(AppModule, { logger: ['error', 'warn'], bodyParser: false });
-  const auth = createAuth(platformDb, {
-    secret: process.env.AUTH_SECRET ?? 'dev-secret-change-me',
-    baseURL: process.env.API_URL ?? 'http://api.ventia.localhost',
-  });
+  // Reuse the single better-auth instance created by AdminModule's AUTH_INSTANCE
+  // provider (one instance, not a second one built here) — see src/admin/auth-instance.ts.
+  const auth = app.get<AuthInstance>(AUTH_INSTANCE);
   const httpAdapter = app.getHttpAdapter().getInstance() as express.Express;
   httpAdapter.all('/v1/auth/*', toNodeHandler(auth));
   httpAdapter.use(express.json());

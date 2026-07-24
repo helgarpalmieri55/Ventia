@@ -1,6 +1,7 @@
 import { Inject, MiddlewareConsumer, Module, NestModule, OnApplicationShutdown } from '@nestjs/common';
 import Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
+import { AdminModule } from './admin/admin.module';
 import { HealthController } from './health/health.controller';
 import { DomainResolver } from './tenants/domain-resolver';
 import { TenantMiddleware } from './tenants/tenant.middleware';
@@ -9,6 +10,7 @@ import { TenantController } from './tenants/tenant.controller';
 export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
 
 @Module({
+  imports: [AdminModule],
   controllers: [HealthController, TenantController],
   providers: [
     {

@@ -1,0 +1,44 @@
+import { CanActivate, ExecutionContext, HttpException, Inject, Injectable } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import type { Request } from 'express';
+import { platformDb } from '@ventia/db';
+import { getSessionContext, type SessionContext } from '../auth/session-context';
+import { ROLES_KEY } from './roles.decorator';
+import { AUTH_INSTANCE, type AuthInstance } from './auth-instance';
+
+type RequestWithAdminSession = Request & { adminSession?: SessionContext };
+
+@Injectable()
+export class AdminSessionGuard implements CanActivate {
+  // Explicit @Inject on both params: esbuild (vitest's default TS transform)
+  // does not emit TypeScript's `design:paramtypes` decorator metadata, so
+  // Nest's implicit constructor-injection cannot resolve Reflector by type
+  // alone (see the same caution in tenant.middleware.ts).
+  constructor(
+    @Inject(Reflector) private readonly reflector: Reflector,
+    @Inject(AUTH_INSTANCE) private readonly auth: AuthInstance,
+  ) {}
+
+  async canActivate(ctx: ExecutionContext): Promise<boolean> {
+    const req = ctx.switchToHttp().getRequest<RequestWithAdminSession>();
+    const headers = new Headers();
+    if (req.headers.cookie) headers.set('cookie', req.headers.cookie);
+
+    const session = await getSessionContext(this.auth, platformDb, headers);
+    if (!session) throw new HttpException({ error: 'UNAUTHENTICATED' }, 401);
+    if (!session.tenantId || !session.role || session.role === 'platform_admin') {
+      throw new HttpException({ error: 'NO_TENANT' }, 403);
+    }
+
+    const required = this.reflector.getAllAndOverride<Array<'owner' | 'staff'> | undefined>(ROLES_KEY, [
+      ctx.getHandler(),
+      ctx.getClass(),
+    ]);
+    if (required && !required.includes(session.role)) {
+      throw new HttpException({ error: 'FORBIDDEN_ROLE' }, 403);
+    }
+
+    req.adminSession = session;
+    return true;
+  }
+}
