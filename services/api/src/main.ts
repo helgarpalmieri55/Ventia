@@ -16,7 +16,14 @@ export async function createApp(): Promise<INestApplication> {
   const auth = app.get<AuthInstance>(AUTH_INSTANCE);
   const httpAdapter = app.getHttpAdapter().getInstance() as express.Express;
   httpAdapter.all('/v1/auth/*', toNodeHandler(auth));
-  httpAdapter.use(express.json());
+  // limit: '10mb' — express.json()'s 100kb default is well under the CSV
+  // import feature's own 2 MB cap (Task 8's `POST /v1/admin/import/*`,
+  // enforced in csv-import.service.ts's assertCsvSize), so a body-parser
+  // rejection would preempt our own 413 CSV_TOO_LARGE response with express's
+  // generic error page instead. 10mb leaves headroom for the 2 MB CSV string
+  // plus its JSON-string-escaping overhead while still bounding the body
+  // size overall.
+  httpAdapter.use(express.json({ limit: '10mb' }));
   return app;
 }
 
