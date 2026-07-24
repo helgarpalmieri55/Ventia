@@ -248,6 +248,65 @@ describe('/v1/admin/products', () => {
     expect(afterPatch.body.categoryIds).toEqual([catC.body.id]);
   });
 
+  it('atomic update: a slug-collision PATCH that also carries categoryIds rolls back the category change (409, categories unchanged)', async () => {
+    const { cookie } = await signUpWithTenant('prod-atomic-slug@demo.co', 'owner');
+
+    const catA = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', cookie)
+      .send({ name: 'Atomic Category A' });
+    const catB = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', cookie)
+      .send({ name: 'Atomic Category B' });
+
+    const other = await createProduct(cookie, { name: 'Producto Otro', slug: 'producto-otro' });
+    expect(other.status).toBe(201);
+
+    const target = await createProduct(cookie, {
+      name: 'Producto Objetivo',
+      categoryIds: [catA.body.id],
+    });
+    expect(target.status).toBe(201);
+
+    const patched = await request(app.getHttpServer())
+      .patch(`/v1/admin/products/${target.body.id}`)
+      .set('cookie', cookie)
+      .send({ slug: 'producto-otro', categoryIds: [catB.body.id] });
+    expect(patched.status).toBe(409);
+    expect(patched.body).toEqual({ error: 'SLUG_TAKEN' });
+
+    const after = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${target.body.id}`)
+      .set('cookie', cookie);
+    expect(after.status).toBe(200);
+    expect(after.body.slug).not.toBe('producto-otro');
+    expect(after.body.categoryIds).toEqual([catA.body.id]);
+  });
+
+  it('atomic update: a bogus categoryId -> 400 VALIDATION_FAILED, product untouched', async () => {
+    const { cookie } = await signUpWithTenant('prod-atomic-fk@demo.co', 'owner');
+
+    const created = await createProduct(cookie, { name: 'Producto FK' });
+    expect(created.status).toBe(201);
+
+    const patched = await request(app.getHttpServer())
+      .patch(`/v1/admin/products/${created.body.id}`)
+      .set('cookie', cookie)
+      .send({ categoryIds: ['00000000-0000-0000-0000-000000000099'] });
+    expect(patched.status).toBe(400);
+    expect(patched.body).toEqual({
+      error: 'VALIDATION_FAILED',
+      details: { categoryIds: 'categoría inexistente' },
+    });
+
+    const after = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${created.body.id}`)
+      .set('cookie', cookie);
+    expect(after.status).toBe(200);
+    expect(after.body.categoryIds).toEqual([]);
+  });
+
   it('is invisible across tenants: GET /:id of another tenant product -> 404', async () => {
     const tenantA = await signUpWithTenant('prod-tenant-a@demo.co', 'owner');
     const tenantB = await signUpWithTenant('prod-tenant-b@demo.co', 'owner');

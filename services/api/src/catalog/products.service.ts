@@ -1,5 +1,5 @@
 import { Injectable, HttpException } from '@nestjs/common';
-import { Prisma, tenantDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
+import { Prisma, platformDb, tenantDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
 import {
   productInputSchema,
   productUpdateSchema,
@@ -112,6 +112,10 @@ function isNotFoundError(err: unknown): err is Prisma.PrismaClientKnownRequestEr
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025';
 }
 
+function isForeignKeyError(err: unknown): err is Prisma.PrismaClientKnownRequestError {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003';
+}
+
 function serialize(product: ProductWithRelations | ProductWithCategories): ProductDTO {
   // Cast-then-destructure rather than a runtime `'categories' in product`
   // narrow: `categories` is simply `undefined` on the plain-list shape
@@ -221,30 +225,58 @@ export class ProductsService {
     const { categoryIds, taxRate, slug: inputSlug, ...rest } = input;
     const data: Prisma.ProductUpdateInput = { ...rest };
     if (taxRate !== undefined) data.taxRate = TAX_RATE_TO_DB[taxRate];
-    if (inputSlug !== undefined) {
-      data.slug = await this.uniqueSlug(tenantId, inputSlug, id);
-    }
-
-    if (categoryIds !== undefined) {
-      await db.productCategory.deleteMany({ where: { productId: id } });
-      if (categoryIds.length) {
-        await db.productCategory.createMany({
-          data: categoryIds.map((categoryId) => ({ productId: id, categoryId, tenantId })),
-        });
-      }
-    }
 
     try {
-      const product = await db.product.update({
-        where: { id },
-        data,
-        include: PRODUCT_INCLUDE_WITH_CATEGORIES,
+      // The category replace (deleteMany+createMany) and the product update
+      // itself must commit-or-rollback together: a PATCH carrying both
+      // `categoryIds` and other fields (e.g. slug) must never leave
+      // categories changed while the product update itself fails (slug
+      // collision, bad categoryId, or anything else). The tenantDb extension
+      // can't span a multi-op transaction (each call opens its own), so we
+      // escape to platformDb.$transaction and set the RLS role + tenant GUC
+      // ourselves for its lifetime — Postgres RLS remains the enforcement
+      // layer for every statement below, we're just manually re-establishing
+      // the scoping tenantDb would normally do per call.
+      const product = await platformDb.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+
+        // Deliberately no pre-check/dedup here (unlike create()'s
+        // auto-slugify convenience): an explicit `slug` in a PATCH is a
+        // precise request, not a name-derived suggestion, so a collision
+        // should reject with 409 rather than silently rename to `-2`. Set
+        // it as-is and let the DB's (tenantId, slug) unique index enforce
+        // it atomically at the actual write below — a pre-check-then-write
+        // would just reopen the same TOCTOU race this transaction exists
+        // to close.
+        if (inputSlug !== undefined) data.slug = inputSlug;
+
+        if (categoryIds !== undefined) {
+          await tx.productCategory.deleteMany({ where: { productId: id, tenantId } });
+          if (categoryIds.length) {
+            await tx.productCategory.createMany({
+              data: categoryIds.map((categoryId) => ({ productId: id, categoryId, tenantId })),
+            });
+          }
+        }
+
+        return tx.product.update({
+          where: { id },
+          data,
+          include: PRODUCT_INCLUDE_WITH_CATEGORIES,
+        });
       });
       await writeAudit(session, 'product.update', 'Product', id, input);
       return serialize(product);
     } catch (err) {
       if (isNotFoundError(err)) throw new HttpException({ error: 'NOT_FOUND' }, 404);
       if (isUniqueConstraintError(err)) throw new HttpException({ error: 'SLUG_TAKEN' }, 409);
+      if (isForeignKeyError(err)) {
+        throw new HttpException(
+          { error: 'VALIDATION_FAILED', details: { categoryIds: 'categoría inexistente' } },
+          400,
+        );
+      }
       throw err;
     }
   }
@@ -262,15 +294,17 @@ export class ProductsService {
   }
 
   /** Finds a tenant-unique slug: `base`, then `base-2`, `base-3`, ... `base-20`.
-   * `excludeId` lets an update ignore the product's own current row when
-   * re-checking its (possibly unchanged) slug. Throws 409 SLUG_TAKEN if all
-   * 20 candidates are taken. */
-  private async uniqueSlug(tenantId: string, base: string, excludeId?: string): Promise<string> {
+   * Used only by create()'s auto-slugify convenience (deriving a slug from
+   * the name, or gently deduping a caller-supplied one) — update() treats an
+   * explicit `slug` as a precise request instead (see the comment in
+   * `update()`), so it doesn't call this. Throws 409 SLUG_TAKEN if all 20
+   * candidates are taken. */
+  private async uniqueSlug(tenantId: string, base: string): Promise<string> {
     const db = tenantDb(tenantId);
     for (let suffix = 1; suffix <= MAX_SLUG_SUFFIX; suffix++) {
       const candidate = suffix === 1 ? base : `${base}-${suffix}`;
       const clash = await db.product.findFirst({
-        where: { slug: candidate, ...(excludeId ? { id: { not: excludeId } } : {}) },
+        where: { slug: candidate },
         select: { id: true },
       });
       if (!clash) return candidate;
