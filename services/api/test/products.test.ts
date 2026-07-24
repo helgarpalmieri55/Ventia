@@ -307,6 +307,22 @@ describe('/v1/admin/products', () => {
     expect(after.body.categoryIds).toEqual([]);
   });
 
+  it('PATCH sending a product its own current slug is a no-op, not a collision: 200', async () => {
+    const { cookie } = await signUpWithTenant('prod-self-slug@demo.co', 'owner');
+
+    const created = await createProduct(cookie, { name: 'Producto Propio', slug: 'producto-propio' });
+    expect(created.status).toBe(201);
+
+    const patched = await request(app.getHttpServer())
+      .patch(`/v1/admin/products/${created.body.id}`)
+      .set('cookie', cookie)
+      .send({ slug: 'producto-propio', name: 'Producto Propio Renombrado' });
+
+    expect(patched.status).toBe(200);
+    expect(patched.body.slug).toBe('producto-propio');
+    expect(patched.body.name).toBe('Producto Propio Renombrado');
+  });
+
   it('is invisible across tenants: GET /:id of another tenant product -> 404', async () => {
     const tenantA = await signUpWithTenant('prod-tenant-a@demo.co', 'owner');
     const tenantB = await signUpWithTenant('prod-tenant-b@demo.co', 'owner');

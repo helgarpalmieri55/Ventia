@@ -216,6 +216,10 @@ model Product {
   taxRate        TaxRate       @default(NINETEEN)
   status         ProductStatus @default(draft)
   seo            Json?
+  // Variant option LABELS (e.g. ["Talla", "Color"]), max 3 — enforced at the
+  // API layer (variantsReplaceSchema), not the DB. Variant rows themselves
+  // carry the option VALUES in option1..3. See task-7-report.md.
+  options        String[]      @default([])
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)

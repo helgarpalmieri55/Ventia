@@ -90,6 +90,7 @@ export interface ProductDTO {
   taxRate: TaxRateValue;
   status: 'draft' | 'active' | 'archived';
   seo: Prisma.JsonValue;
+  options: string[];
   createdAt: Date;
   updatedAt: Date;
   images: ProductImageDTO[];

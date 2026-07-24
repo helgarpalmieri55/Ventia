@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { presignRequestSchema } from '@ventia/core';
 
@@ -80,5 +80,32 @@ export class StorageService {
 
   publicUrlFor(key: string): string {
     return `${this.publicUrl}/${key}`;
+  }
+
+  /** Inverse of publicUrlFor: recovers the S3 key from a stored public url,
+   * or null if the url doesn't match this instance's publicUrl prefix
+   * (e.g. it was never one of ours). Used by the image-delete flow, which
+   * only persists `url` on ProductImage, not the raw key. */
+  keyFromPublicUrl(url: string): string | null {
+    const prefix = `${this.publicUrl}/`;
+    return url.startsWith(prefix) ? url.slice(prefix.length) : null;
+  }
+
+  /** HEADs an object in the bucket. Returns null if it doesn't exist (rather
+   * than throwing) so callers can treat "never uploaded" and "uploaded but
+   * gone" uniformly as a confirm-time validation failure. */
+  async headObject(key: string): Promise<{ contentLength: number; contentType: string } | null> {
+    try {
+      const res = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      return { contentLength: res.ContentLength ?? 0, contentType: res.ContentType ?? '' };
+    } catch (err) {
+      const name = err instanceof Error ? err.name : '';
+      if (name === 'NotFound' || name === 'NoSuchKey') return null;
+      throw err;
+    }
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 }
