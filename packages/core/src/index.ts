@@ -4,3 +4,4 @@ export * from './slug.js';
 export * from './catalog-schemas.js';
 export * from './onboarding-schemas.js';
 export * from './settings-schemas.js';
+export * from './staff-schemas.js';

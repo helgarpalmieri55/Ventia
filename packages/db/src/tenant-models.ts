@@ -5,5 +5,5 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   'ProductVariant', 'ProductImage', 'InventoryMovement', 'Cart', 'CartItem',
   'Customer', 'Order', 'OrderItem', 'OrderEvent', 'Payment', 'Conversation',
   'Message', 'AgentUsage', 'TenantContent', 'NotificationLog', 'Subscription',
-  'Shipment', 'Invoice',
+  'Shipment', 'Invoice', 'StaffInvite',
 ]);
