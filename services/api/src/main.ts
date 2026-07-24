@@ -16,14 +16,19 @@ export async function createApp(): Promise<INestApplication> {
   const auth = app.get<AuthInstance>(AUTH_INSTANCE);
   const httpAdapter = app.getHttpAdapter().getInstance() as express.Express;
   httpAdapter.all('/v1/auth/*', toNodeHandler(auth));
-  // limit: '10mb' — express.json()'s 100kb default is well under the CSV
-  // import feature's own 2 MB cap (Task 8's `POST /v1/admin/import/*`,
-  // enforced in csv-import.service.ts's assertCsvSize), so a body-parser
-  // rejection would preempt our own 413 CSV_TOO_LARGE response with express's
-  // generic error page instead. 10mb leaves headroom for the 2 MB CSV string
-  // plus its JSON-string-escaping overhead while still bounding the body
-  // size overall.
-  httpAdapter.use(express.json({ limit: '10mb' }));
+  // Path-scoped '10mb' limit ONLY for the CSV import routes (Task 8's
+  // POST /v1/admin/import/*, whose own 2 MB cap is enforced in
+  // csv-import.service.ts's assertCsvSize) — express.json()'s 100kb default
+  // would otherwise 413 those requests at the body-parser layer with
+  // express's generic error page, before our own 413 CSV_TOO_LARGE response
+  // gets a chance to run. This must be mounted BEFORE the global
+  // express.json() below: body-parser's json middleware skips re-parsing a
+  // request whose body it (or an earlier body-parser instance) already
+  // parsed, so a /v1/admin/import/* request gets the raised limit here and
+  // the global middleware just passes it through, while every other route
+  // still gets the conservative 100kb default.
+  httpAdapter.use('/v1/admin/import', express.json({ limit: '10mb' }));
+  httpAdapter.use(express.json());
   return app;
 }
 

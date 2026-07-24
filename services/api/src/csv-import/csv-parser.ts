@@ -8,11 +8,36 @@ import { CSV_ROW_MESSAGES, csvProductRowSchema, type CsvProductRow, type TaxRate
 // dependency of this package would reintroduce. This module only calls
 // `.safeParse()` on the schema core already built.
 
-/** One row-level validation problem, in Spanish (es-CO) per the product spec. */
+/** One row-level validation problem, in Spanish (es-CO) per the product spec.
+ * `row: 0` is reserved for file-level problems (papaparse's own tokenizer
+ * errors — a malformed CSV, not a bad value in an otherwise well-formed
+ * row), since data rows are numbered from 1. */
 export interface RowError {
   row: number;
   column: string;
   message: string;
+}
+
+/** Which optional columns this row's CSV cell actually carried a value for,
+ * as opposed to being blank/omitted. The commit path (csv-import.service.ts)
+ * needs this distinction for its PATCH-like update semantics: on an existing
+ * SKU, a blank cell means "leave the current product value alone", not
+ * "reset it to this column's create-time default". `stock`/`trackInventory`/
+ * `taxRate`/`status`/`descriptionMd` all have a baked-in default on
+ * `ParsedRow` itself (so `rows[]` stays directly usable for the CREATE path
+ * unchanged), which is exactly why those five need an explicit flag here —
+ * once defaulted, the row's own field can no longer tell "not provided"
+ * apart from "explicitly set to the default value". `slug`/`compareAtCents`/
+ * `barcode` don't need a flag: they carry no baked-in default and stay
+ * `undefined` when blank, so `!== undefined` already means "provided". */
+export interface ProvidedColumns {
+  descriptionMd: boolean;
+  stock: boolean;
+  trackInventory: boolean;
+  taxRate: boolean;
+  status: boolean;
+  categoryNames: boolean;
+  imageUrls: boolean;
 }
 
 /** A single successfully-validated CSV row, normalized into the shape the
@@ -33,7 +58,10 @@ export interface ParsedRow {
   status: 'draft' | 'active';
   categoryNames: string[];
   imageUrls: string[];
+  provided: ProvidedColumns;
 }
+
+const MALFORMED_CSV_MESSAGE = 'archivo CSV malformado';
 
 function splitPipeList(value: string | undefined): string[] {
   if (!value) return [];
@@ -68,6 +96,15 @@ function toParsedRow(raw: CsvProductRow, rowNumber: number): ParsedRow {
     status: raw.status ?? 'draft',
     categoryNames: splitPipeList(raw.categories),
     imageUrls: splitPipeList(raw.image_urls),
+    provided: {
+      descriptionMd: raw.description !== undefined,
+      stock: raw.stock !== undefined,
+      trackInventory: raw.track_inventory !== undefined,
+      taxRate: raw.tax_rate !== undefined,
+      status: raw.status !== undefined,
+      categoryNames: raw.categories !== undefined,
+      imageUrls: raw.image_urls !== undefined,
+    },
   };
 }
 
@@ -83,6 +120,15 @@ export function parseProductsCsv(text: string): { rows: ParsedRow[]; errors: Row
   const errors: RowError[] = [];
   const rows: ParsedRow[] = [];
   const seenSkus = new Set<string>();
+
+  // papaparse's own tokenizer errors (e.g. an unterminated quote, or a row
+  // with a wildly different field count than the header) are file-level
+  // problems, not a bad value in an otherwise well-formed row — surfaced as
+  // one row:0 error rather than silently dropped or spread across whatever
+  // row numbers papaparse happened to attribute them to.
+  if (parsed.errors.length > 0) {
+    errors.push({ row: 0, column: 'csv', message: MALFORMED_CSV_MESSAGE });
+  }
 
   parsed.data.forEach((raw, index) => {
     const rowNumber = index + 1;
@@ -102,6 +148,14 @@ export function parseProductsCsv(text: string): { rows: ParsedRow[]; errors: Row
       rowHasError = true;
     }
 
+    // Known gap (noted in task-8-report.md): a row that fails validation for
+    // an unrelated reason (bad image URL, etc.) still claims its sku in
+    // `seenSkus` below, so a LATER row repeating that sku is flagged as a
+    // duplicate even though the earlier row was never going to be imported
+    // anyway. Left as-is — fixing it means deferring dup-detection to a
+    // second pass over only the rows that survive every other check, which
+    // is more churn than this edge case (duplicate sku sharing a row with a
+    // second, unrelated error) warrants right now.
     if (seenSkus.has(row.sku)) {
       errors.push({ row: rowNumber, column: 'sku', message: CSV_ROW_MESSAGES.duplicateSku });
       rowHasError = true;

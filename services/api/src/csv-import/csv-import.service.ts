@@ -1,11 +1,11 @@
 import { HttpException, Injectable } from '@nestjs/common';
-import { platformDb, tenantDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
+import { Prisma, platformDb, tenantDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
 import { csvImportRequestSchema, slugify, type TaxRateValue } from '@ventia/core';
 import type { SessionContext } from '../auth/session-context';
 import { parseOr400 } from '../catalog/parse';
 import { writeAudit } from '../catalog/audit';
 import { assertProductLimit } from '../catalog/plan-limits';
-import { parseProductsCsv, type RowError } from './csv-parser';
+import { parseProductsCsv, type ParsedRow, type RowError } from './csv-parser';
 
 // Same translation table as ProductsService (products.service.ts) — kept in
 // sync there rather than shared, since the two files' domains (single-product
@@ -50,6 +50,10 @@ function assertCsvSize(csv: string): void {
   if (Buffer.byteLength(csv, 'utf8') > MAX_CSV_BYTES) {
     throw new HttpException({ error: 'CSV_TOO_LARGE' }, 413);
   }
+}
+
+function isUniqueConstraintError(err: unknown): err is Prisma.PrismaClientKnownRequestError {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 }
 
 @Injectable()
@@ -143,12 +147,49 @@ export class CsvImportService {
       });
       const existingBySku = new Map(existingProducts.map((p) => [p.sku, p.id]));
 
-      // Category cache, keyed by lowercased name — resolves/creates
-      // categories case-insensitively and, just as importantly, makes sure
-      // two rows in the same file naming the same category (any casing)
-      // reuse one Category row instead of racing each other into duplicates.
+      // Category cache keyed by SLUG (not by lowercased name): slugify()
+      // already lowercases and strips diacritics, so keying by slug is what
+      // actually makes "resolved/created case-insensitively by name" true
+      // even across accents — "Café" and "Cafe" both slugify to "cafe".
+      // Keying by name.toLowerCase() instead would treat those as two
+      // different categories, and creating both would then collide on
+      // Category's (tenantId, slug) unique index and blow up the whole
+      // commit with an unhandled P2002 partway through the row loop.
       const existingCategories = await tx.category.findMany({ where: { tenantId } });
-      const categoryCache = new Map<string, string>(existingCategories.map((c) => [c.name.toLowerCase(), c.id]));
+      const categoryCache = new Map<string, string>(existingCategories.map((c) => [c.slug, c.id]));
+      // Secondary cache for the rare category name that slugifies to ''
+      // (punctuation/emoji-only, e.g. "!!!"): keyed by the raw lowercased
+      // name so repeats of that exact name within one file still resolve to
+      // one category, without ever handing Prisma an empty string as the
+      // slug column (a deterministic `categoria-N` fallback is used instead).
+      const emptySlugCategoryCache = new Map<string, string>();
+      let emptySlugCounter = 0;
+
+      async function resolveCategoryId(name: string): Promise<string> {
+        const baseSlug = slugify(name);
+        const cacheKey = baseSlug ? undefined : name.toLowerCase();
+        const cached = baseSlug ? categoryCache.get(baseSlug) : emptySlugCategoryCache.get(cacheKey!);
+        if (cached) return cached;
+
+        const slug = baseSlug || `categoria-${++emptySlugCounter}`;
+        try {
+          const category = await tx.category.create({ data: { tenantId, name, slug, position: 0 } });
+          if (baseSlug) categoryCache.set(baseSlug, category.id);
+          else emptySlugCategoryCache.set(cacheKey!, category.id);
+          return category.id;
+        } catch (err) {
+          if (!isUniqueConstraintError(err)) throw err;
+          // A race is impossible within one transaction's sequential
+          // statements, but two distinct in-file names slugifying to the
+          // same value is not — fall back to whichever category is actually
+          // there rather than aborting the commit.
+          const existing = await tx.category.findFirst({ where: { tenantId, slug } });
+          if (!existing) throw err;
+          if (baseSlug) categoryCache.set(baseSlug, existing.id);
+          else emptySlugCategoryCache.set(cacheKey!, existing.id);
+          return existing.id;
+        }
+      }
 
       // Slug dedup state: every tenant product's current slug, checked
       // against both this transaction's writes and each other (mirrors
@@ -163,82 +204,73 @@ export class CsvImportService {
 
       for (const row of rows) {
         const existingId = existingBySku.get(row.sku);
+        const isCreate = !existingId;
 
-        const categoryIds: string[] = [];
-        for (const name of row.categoryNames) {
-          const key = name.toLowerCase();
-          let categoryId = categoryCache.get(key);
-          if (!categoryId) {
-            const category = await tx.category.create({
-              data: { tenantId, name, slug: slugify(name) || key, position: 0 },
-            });
-            categoryId = category.id;
-            categoryCache.set(key, categoryId);
+        // Categories: resolved for every CREATE row, but for an UPDATE row
+        // only when the `categories` column was actually non-blank — a
+        // blank cell on an update means "leave this product's existing
+        // category links alone", not "clear them" (see the PATCH-like
+        // semantics note on ParsedRow.provided in csv-parser.ts).
+        let categoryIds: string[] | undefined;
+        if (isCreate || row.provided.categoryNames) {
+          categoryIds = [];
+          for (const name of row.categoryNames) {
+            categoryIds.push(await resolveCategoryId(name));
           }
-          categoryIds.push(categoryId);
         }
 
-        const base = row.slug ?? slugify(row.name);
-        const ownCurrentSlug = existingId ? ownSlugByProductId.get(existingId) : undefined;
-        let slug = base;
-        if (slug !== ownCurrentSlug) {
-          let suffix = 1;
-          while (takenSlugs.has(slug)) {
-            suffix += 1;
-            if (suffix > MAX_SLUG_SUFFIX) {
-              throw new HttpException({ error: 'SLUG_TAKEN', details: { row: row.row, slug: base } }, 409);
+        // Slug: resolved/deduped for every CREATE row (explicit column or
+        // slugify(name)), but for an UPDATE row only when the `slug` column
+        // was itself explicitly provided — a blank slug on an update means
+        // "keep the current slug", and must NOT re-derive one from `name`
+        // (a CSV re-importing a renamed product without touching `slug`
+        // would otherwise get a surprise slug change on every commit).
+        let slug: string | undefined;
+        if (isCreate || row.slug !== undefined) {
+          const base = row.slug ?? slugify(row.name);
+          const ownCurrentSlug = existingId ? ownSlugByProductId.get(existingId) : undefined;
+          slug = base;
+          if (slug !== ownCurrentSlug) {
+            let suffix = 1;
+            while (takenSlugs.has(slug)) {
+              suffix += 1;
+              if (suffix > MAX_SLUG_SUFFIX) {
+                throw new HttpException({ error: 'SLUG_TAKEN', details: { row: row.row, slug: base } }, 409);
+              }
+              slug = `${base}-${suffix}`;
             }
-            slug = `${base}-${suffix}`;
           }
+          takenSlugs.add(slug);
         }
-        takenSlugs.add(slug);
 
-        const data = {
-          name: row.name,
-          slug,
-          descriptionMd: row.descriptionMd,
-          priceCents: row.priceCents,
-          compareAtCents: row.compareAtCents ?? null,
-          barcode: row.barcode ?? null,
-          stock: row.stock,
-          trackInventory: row.trackInventory,
-          taxRate: TAX_RATE_TO_DB[row.taxRate],
-          status: row.status,
-        };
-
-        if (existingId) {
-          await tx.product.update({ where: { id: existingId }, data });
-
-          await tx.productImage.deleteMany({ where: { productId: existingId, tenantId } });
-          if (row.imageUrls.length) {
-            await tx.productImage.createMany({
-              data: row.imageUrls.map((url, position) => ({ tenantId, productId: existingId, url, position })),
-            });
-          }
-
-          await tx.productCategory.deleteMany({ where: { productId: existingId, tenantId } });
-          if (categoryIds.length) {
-            await tx.productCategory.createMany({
-              data: categoryIds.map((categoryId) => ({ productId: existingId, categoryId, tenantId })),
-            });
-          }
-
-          updated += 1;
-        } else {
+        if (isCreate) {
           await tx.product.create({
             data: {
               tenantId,
-              ...data,
               sku: row.sku,
+              name: row.name,
+              slug: slug!,
+              descriptionMd: row.descriptionMd,
+              priceCents: row.priceCents,
+              compareAtCents: row.compareAtCents ?? null,
+              barcode: row.barcode ?? null,
+              stock: row.stock,
+              trackInventory: row.trackInventory,
+              taxRate: TAX_RATE_TO_DB[row.taxRate],
+              status: row.status,
               images: row.imageUrls.length
                 ? { create: row.imageUrls.map((url, position) => ({ tenantId, url, position })) }
                 : undefined,
-              categories: categoryIds.length
-                ? { create: categoryIds.map((categoryId) => ({ categoryId, tenantId })) }
-                : undefined,
+              categories:
+                categoryIds && categoryIds.length
+                  ? { create: categoryIds.map((categoryId) => ({ categoryId, tenantId })) }
+                  : undefined,
             },
           });
           created += 1;
+        } else {
+          await this.updateExistingProduct(tx, tenantId, existingId, row, slug, categoryIds);
+          updated += 1;
         }
       }
 
@@ -247,8 +279,58 @@ export class CsvImportService {
 
     // AuditLog.entityId is nullable in the schema, but writeAudit's signature
     // requires a string — there's no single Product this bulk operation is
-    // "about", so the tenant id stands in as the audited entity.
-    await writeAudit(session, 'csv_import', 'Product', tenantId, result);
+    // "about", so the tenant id stands in as the audited entity. Entity
+    // label is 'CsvImport' (not 'Product'): this audit row describes the
+    // bulk operation itself, not any one product it touched.
+    await writeAudit(session, 'csv_import', 'CsvImport', tenantId, result);
     return result;
+  }
+
+  /** PATCH-like update for one existing-sku row: `name`/`price_cents` are
+   * always applied (the parser requires both on every row), every other
+   * column is applied ONLY if its CSV cell was non-blank (see
+   * ParsedRow.provided) — a blank cell means "leave this field as it is on
+   * the existing product", not "reset it to a default". Images/categories
+   * follow the same rule: replaced only when their column was non-blank. */
+  private async updateExistingProduct(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    productId: string,
+    row: ParsedRow,
+    slug: string | undefined,
+    categoryIds: string[] | undefined,
+  ): Promise<void> {
+    const data: Prisma.ProductUpdateInput = {
+      name: row.name,
+      priceCents: row.priceCents,
+    };
+    if (slug !== undefined) data.slug = slug;
+    if (row.provided.descriptionMd) data.descriptionMd = row.descriptionMd;
+    if (row.compareAtCents !== undefined) data.compareAtCents = row.compareAtCents;
+    if (row.barcode !== undefined) data.barcode = row.barcode;
+    if (row.provided.stock) data.stock = row.stock;
+    if (row.provided.trackInventory) data.trackInventory = row.trackInventory;
+    if (row.provided.taxRate) data.taxRate = TAX_RATE_TO_DB[row.taxRate];
+    if (row.provided.status) data.status = row.status;
+
+    await tx.product.update({ where: { id: productId }, data });
+
+    if (row.provided.imageUrls) {
+      await tx.productImage.deleteMany({ where: { productId, tenantId } });
+      if (row.imageUrls.length) {
+        await tx.productImage.createMany({
+          data: row.imageUrls.map((url, position) => ({ tenantId, productId, url, position })),
+        });
+      }
+    }
+
+    if (row.provided.categoryNames) {
+      await tx.productCategory.deleteMany({ where: { productId, tenantId } });
+      if (categoryIds && categoryIds.length) {
+        await tx.productCategory.createMany({
+          data: categoryIds.map((categoryId) => ({ productId, categoryId, tenantId })),
+        });
+      }
+    }
   }
 }

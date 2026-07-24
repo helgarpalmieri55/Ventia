@@ -53,6 +53,18 @@ describe('parseProductsCsv', () => {
       imageUrls: ['https://example.com/a.jpg', 'https://example.com/b.jpg'],
       descriptionMd: '',
     });
+    // Every optional column that has a create-time default was explicitly
+    // provided here, so `provided` should be all true — see the PATCH-like
+    // update-semantics test below for the all-blank counterpart.
+    expect(rows[0].provided).toEqual({
+      descriptionMd: false, // description column itself was left blank
+      stock: true,
+      trackInventory: true,
+      taxRate: true,
+      status: true,
+      categoryNames: true,
+      imageUrls: true,
+    });
   });
 
   it('applies defaults when optional columns are blank: stock 0, trackInventory true, taxRate 19, status draft', () => {
@@ -67,6 +79,18 @@ describe('parseProductsCsv', () => {
       status: 'draft',
       categoryNames: [],
       imageUrls: [],
+    });
+    // `provided` distinguishes "defaulted because blank" from "explicitly
+    // set to the default value" — the commit path's PATCH-like update
+    // semantics depend on this (csv-import.service.ts).
+    expect(rows[0].provided).toEqual({
+      descriptionMd: false,
+      stock: false,
+      trackInventory: false,
+      taxRate: false,
+      status: false,
+      categoryNames: false,
+      imageUrls: false,
     });
   });
 
@@ -155,6 +179,16 @@ describe('parseProductsCsv', () => {
 
     expect(rows.map((r) => r.row)).toEqual([1, 3]);
     expect(errors).toEqual([{ row: 2, column: 'sku', message: 'sku es obligatorio' }]);
+  });
+
+  it('surfaces a file-level error (row 0) for a structurally malformed CSV, e.g. a row with the wrong field count', () => {
+    // papaparse itself flags this (FieldMismatch/TooFewFields) rather than
+    // csvProductRowSchema — a mismatched field count is a tokenizing
+    // problem, not a bad value in an otherwise well-formed row.
+    const malformed = `${TEMPLATE_HEADER}\nProducto Incompleto,solo-dos-campos`;
+    const { errors } = parseProductsCsv(malformed);
+
+    expect(errors).toContainEqual({ row: 0, column: 'csv', message: 'archivo CSV malformado' });
   });
 });
 
@@ -334,6 +368,100 @@ describe('POST /v1/admin/import/commit', () => {
     ).body;
     expect(created.categoryIds).toHaveLength(2);
     expect(created.images.map((i: { url: string }) => i.url)).toEqual(['https://example.com/new.jpg']);
+  });
+
+  it('resolves accent/case-variant category names in the same file to ONE category instead of a slug-collision crash', async () => {
+    const { cookie } = await signUpWithTenant('csv-commit-category-accents@demo.co', 'owner');
+
+    // "Café" and "Cafe" both slugify to "cafe" (slugify strips diacritics
+    // and lowercases) — resolving categories by lowercased NAME instead of
+    // by slug would treat these as two different categories, and creating
+    // both would then collide on Category's (tenantId, slug) unique index.
+    const csv = csvOf(
+      { name: 'Producto Cafe Uno', price_cents: '1000', sku: 'CAT-ACCENT-1', categories: 'Café' },
+      { name: 'Producto Cafe Dos', price_cents: '2000', sku: 'CAT-ACCENT-2', categories: 'Cafe' },
+    );
+
+    const res = await commit(cookie, csv);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ created: 2, updated: 0 });
+
+    const categories = await request(app.getHttpServer()).get('/v1/admin/categories').set('cookie', cookie);
+    expect(categories.body).toHaveLength(1);
+
+    const list = await request(app.getHttpServer()).get('/v1/admin/products').set('cookie', cookie);
+    const p1 = list.body.items.find((p: { sku: string }) => p.sku === 'CAT-ACCENT-1');
+    const p2 = list.body.items.find((p: { sku: string }) => p.sku === 'CAT-ACCENT-2');
+    const p1Full = (await request(app.getHttpServer()).get(`/v1/admin/products/${p1.id}`).set('cookie', cookie)).body;
+    const p2Full = (await request(app.getHttpServer()).get(`/v1/admin/products/${p2.id}`).set('cookie', cookie)).body;
+
+    expect(p1Full.categoryIds).toEqual([categories.body[0].id]);
+    expect(p2Full.categoryIds).toEqual([categories.body[0].id]);
+  });
+
+  it('update semantics are PATCH-like: a blank cell means "keep the current value", not "reset to default"', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('csv-commit-patch@demo.co', 'owner');
+
+    const category = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', cookie)
+      .send({ name: 'Preexistente' });
+    expect(category.status).toBe(201);
+
+    // Every non-default value here is deliberately NOT the CSV row-default
+    // (stock 0, trackInventory true, taxRate '19', status 'draft') so the
+    // assertions below can actually tell "kept" apart from "reset".
+    const existing = await request(app.getHttpServer())
+      .post('/v1/admin/products')
+      .set('cookie', cookie)
+      .send({
+        name: 'Nombre Viejo',
+        priceCents: 1000,
+        sku: 'PATCH-1',
+        stock: 25,
+        trackInventory: false,
+        taxRate: '5',
+        status: 'active',
+        barcode: 'BC-ORIGINAL',
+        compareAtCents: 2000,
+        descriptionMd: 'Descripcion original',
+        categoryIds: [category.body.id],
+      });
+    expect(existing.status).toBe(201);
+
+    // ProductImage row created directly (not through the presign/confirm
+    // flow, which needs S3/minio — not set up in this test file) purely to
+    // have a pre-existing image to assert is left untouched.
+    await platformDb.productImage.create({
+      data: { tenantId, productId: existing.body.id, url: 'https://example.com/original.jpg', position: 0 },
+    });
+
+    // Only name/price_cents/sku are set (both required on every row per the
+    // parser) — every other column is blank.
+    const csv = csvOf({ name: 'Nombre Nuevo', price_cents: '5000', sku: 'PATCH-1' });
+
+    const res = await commit(cookie, csv);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ created: 0, updated: 1 });
+
+    const after = await request(app.getHttpServer())
+      .get(`/v1/admin/products/${existing.body.id}`)
+      .set('cookie', cookie);
+    expect(after.status).toBe(200);
+    expect(after.body.name).toBe('Nombre Nuevo');
+    expect(after.body.priceCents).toBe(5000);
+    // Everything else: unchanged from the pre-existing product, not reset
+    // to the CSV row's create-time defaults.
+    expect(after.body.stock).toBe(25);
+    expect(after.body.trackInventory).toBe(false);
+    expect(after.body.taxRate).toBe('5');
+    expect(after.body.status).toBe('active');
+    expect(after.body.barcode).toBe('BC-ORIGINAL');
+    expect(after.body.compareAtCents).toBe(2000);
+    expect(after.body.descriptionMd).toBe('Descripcion original');
+    expect(after.body.slug).toBe(existing.body.slug);
+    expect(after.body.images.map((i: { url: string }) => i.url)).toEqual(['https://example.com/original.jpg']);
+    expect(after.body.categoryIds).toEqual([category.body.id]);
   });
 
   it('rejects a file with any row error: 422 CSV_INVALID, nothing persisted', async () => {
