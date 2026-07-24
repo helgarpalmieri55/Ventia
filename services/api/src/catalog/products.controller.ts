@@ -1,7 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, Inject, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
-import { AdminSession } from '../admin/roles.decorator';
-import type { SessionContext } from '../auth/session-context';
+import { AdminSession, type AdminSessionContext } from '../admin/roles.decorator';
 import { ProductsService, type ProductListQuery } from './products.service';
 import { assertUuidOr404 } from './uuid';
 
@@ -19,31 +18,31 @@ export class ProductsController {
   constructor(@Inject(ProductsService) private readonly products: ProductsService) {}
 
   @Get()
-  async list(@AdminSession() session: SessionContext, @Query() query: ProductListQuery) {
+  async list(@AdminSession() session: AdminSessionContext, @Query() query: ProductListQuery) {
     return this.products.list(session, query);
   }
 
   @Post()
   @HttpCode(201)
-  async create(@AdminSession() session: SessionContext, @Body() body: unknown) {
+  async create(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
     return this.products.create(session, body);
   }
 
   @Get(':id')
-  async findOne(@AdminSession() session: SessionContext, @Param('id') id: string) {
+  async findOne(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
     assertUuidOr404(id);
     return this.products.findOne(session, id);
   }
 
   @Patch(':id')
-  async update(@AdminSession() session: SessionContext, @Param('id') id: string, @Body() body: unknown) {
+  async update(@AdminSession() session: AdminSessionContext, @Param('id') id: string, @Body() body: unknown) {
     assertUuidOr404(id);
     return this.products.update(session, id, body);
   }
 
   @Delete(':id')
   @HttpCode(204)
-  async archive(@AdminSession() session: SessionContext, @Param('id') id: string): Promise<void> {
+  async archive(@AdminSession() session: AdminSessionContext, @Param('id') id: string): Promise<void> {
     assertUuidOr404(id);
     await this.products.archive(session, id);
   }

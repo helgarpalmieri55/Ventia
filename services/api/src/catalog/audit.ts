@@ -1,5 +1,5 @@
 import { platformDb, Prisma } from '@ventia/db';
-import type { SessionContext } from '../auth/session-context';
+import type { AdminSessionContext } from '../admin/roles.decorator';
 
 /**
  * AuditLog writes always go through platformDb (the unscoped, owner-role
@@ -12,7 +12,7 @@ import type { SessionContext } from '../auth/session-context';
  * through tenantDb" rule.
  */
 export async function writeAudit(
-  session: SessionContext,
+  session: AdminSessionContext,
   action: string,
   entity: string,
   entityId: string,

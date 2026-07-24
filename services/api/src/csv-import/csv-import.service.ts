@@ -1,7 +1,7 @@
 import { HttpException, Injectable } from '@nestjs/common';
 import { Prisma, platformDb, tenantDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
 import { csvImportRequestSchema, slugify, type TaxRateValue } from '@ventia/core';
-import type { SessionContext } from '../auth/session-context';
+import type { AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from '../catalog/parse';
 import { writeAudit } from '../catalog/audit';
 import { assertProductLimit } from '../catalog/plan-limits';
@@ -59,12 +59,12 @@ export class CsvImportService {
     return `${CSV_TEMPLATE_HEADER}\n${CSV_TEMPLATE_EXAMPLE_ROW}\n`;
   }
 
-  async dryRun(session: SessionContext, body: unknown): Promise<DryRunResult> {
+  async dryRun(session: AdminSessionContext, body: unknown): Promise<DryRunResult> {
     const { csv } = parseOr400(csvImportRequestSchema, body);
     assertCsvSize(csv);
 
     const { rows, errors } = parseProductsCsv(csv);
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
 
     const skus = [...new Set(rows.map((r) => r.sku))];
@@ -102,7 +102,7 @@ export class CsvImportService {
     };
   }
 
-  async commit(session: SessionContext, body: unknown): Promise<CommitResult> {
+  async commit(session: AdminSessionContext, body: unknown): Promise<CommitResult> {
     const { csv } = parseOr400(csvImportRequestSchema, body);
     assertCsvSize(csv);
 
@@ -117,7 +117,7 @@ export class CsvImportService {
       );
     }
 
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
     const skus = rows.map((r) => r.sku);
 
@@ -212,6 +212,22 @@ export class CsvImportService {
           do {
             slug = `categoria-${++emptySlugCounter}`;
           } while (takenCategorySlugs.has(slug));
+        } else if (takenCategorySlugs.has(slug)) {
+          // The base path isn't immune to the same cross-pool collision: a
+          // literal name can slugify to exactly the deterministic
+          // `categoria-N` value some OTHER (empty-slugifying) name in this
+          // same file already claimed — e.g. "🔥🔥" -> 'categoria-1' via the
+          // fallback above, and a later "Categoria 1" row slugifies to
+          // 'categoria-1' too. Suffixing (mirroring the product-slug -2..-20
+          // dedup below) keeps both as distinct categories instead of
+          // handing Prisma a slug it already just inserted.
+          let suffix = 1;
+          let candidate = slug;
+          do {
+            suffix += 1;
+            candidate = `${slug}-${suffix}`;
+          } while (takenCategorySlugs.has(candidate));
+          slug = candidate;
         }
         takenCategorySlugs.add(slug);
 

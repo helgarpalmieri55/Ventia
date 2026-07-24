@@ -50,4 +50,40 @@ describe('auth', () => {
   it('returns null without a session', async () => {
     expect(await getSessionContext(auth, prisma, new Headers())).toBeNull();
   });
+
+  it('resolves a user with two memberships to the OLDEST membership, deterministically', async () => {
+    const signUp = await auth.api.signUpEmail({
+      body: { email: 'multi-membership@demo.co', password: 'Secret123!', name: 'Multi' },
+    });
+
+    // Two tenants; the membership for `newerTenant` is inserted FIRST (so it
+    // would win under Postgres's undefined "no ORDER BY" row order, which in
+    // practice tends to follow insertion order), but its createdAt is set to
+    // a LATER timestamp than `olderTenant`'s. Only an explicit
+    // `orderBy: { createdAt: 'asc' }` in getSessionContext picks the truly
+    // oldest membership (olderTenant) regardless of insertion order.
+    const newerTenant = await prisma.tenant.create({ data: { slug: 'newer-tenant', name: 'Newer', status: 'live' } });
+    const olderTenant = await prisma.tenant.create({ data: { slug: 'older-tenant', name: 'Older', status: 'live' } });
+
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    // Inserted first, but the NEWER createdAt.
+    await prisma.membership.create({
+      data: { userId: signUp.user.id, tenantId: newerTenant.id, role: 'owner', createdAt: now },
+    });
+    // Inserted second, but the OLDER createdAt.
+    await prisma.membership.create({
+      data: { userId: signUp.user.id, tenantId: olderTenant.id, role: 'staff', createdAt: yesterday },
+    });
+
+    const signIn = await auth.api.signInEmail({
+      body: { email: 'multi-membership@demo.co', password: 'Secret123!' },
+      returnHeaders: true,
+    });
+    const cookie = signIn.headers.get('set-cookie')!;
+    const ctx = await getSessionContext(auth, prisma, new Headers({ cookie }));
+    expect(ctx?.tenantId).toBe(olderTenant.id);
+    expect(ctx?.role).toBe('staff');
+  });
 });

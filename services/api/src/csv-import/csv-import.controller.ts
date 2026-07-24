@@ -1,7 +1,6 @@
 import { Body, Controller, Get, Header, HttpCode, Inject, Post, UseGuards } from '@nestjs/common';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
-import { AdminSession } from '../admin/roles.decorator';
-import type { SessionContext } from '../auth/session-context';
+import { AdminSession, type AdminSessionContext } from '../admin/roles.decorator';
 import { CsvImportService } from './csv-import.service';
 
 // AdminSessionGuard rejects any session without a tenantId before a request
@@ -25,13 +24,13 @@ export class CsvImportController {
 
   @Post('dry-run')
   @HttpCode(200)
-  async dryRun(@AdminSession() session: SessionContext, @Body() body: unknown) {
+  async dryRun(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
     return this.csvImport.dryRun(session, body);
   }
 
   @Post('commit')
   @HttpCode(200)
-  async commit(@AdminSession() session: SessionContext, @Body() body: unknown) {
+  async commit(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
     return this.csvImport.commit(session, body);
   }
 }

@@ -13,8 +13,7 @@ import {
 import { Prisma, tenantDb } from '@ventia/db';
 import { categoryInputSchema, slugify } from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
-import { AdminSession } from '../admin/roles.decorator';
-import type { SessionContext } from '../auth/session-context';
+import { AdminSession, type AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
 import { assertUuidOr404 } from './uuid';
@@ -36,21 +35,21 @@ function isNotFoundError(err: unknown): err is Prisma.PrismaClientKnownRequestEr
 @UseGuards(AdminSessionGuard)
 export class CategoriesController {
   @Get()
-  async list(@AdminSession() session: SessionContext) {
-    return tenantDb(session.tenantId!).category.findMany({
+  async list(@AdminSession() session: AdminSessionContext) {
+    return tenantDb(session.tenantId).category.findMany({
       orderBy: [{ position: 'asc' }, { name: 'asc' }],
     });
   }
 
   @Post()
-  async create(@AdminSession() session: SessionContext, @Body() body: unknown) {
+  async create(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
     const input = parseOr400(categoryInputSchema, body);
     const slug = input.slug ?? slugify(input.name);
 
     try {
-      const category = await tenantDb(session.tenantId!).category.create({
+      const category = await tenantDb(session.tenantId).category.create({
         data: {
-          tenantId: session.tenantId!,
+          tenantId: session.tenantId,
           name: input.name,
           slug,
           position: input.position ?? 0,
@@ -65,12 +64,12 @@ export class CategoriesController {
   }
 
   @Patch(':id')
-  async update(@AdminSession() session: SessionContext, @Param('id') id: string, @Body() body: unknown) {
+  async update(@AdminSession() session: AdminSessionContext, @Param('id') id: string, @Body() body: unknown) {
     assertUuidOr404(id);
     const input = parseOr400(categoryUpdateSchema, body);
 
     try {
-      const category = await tenantDb(session.tenantId!).category.update({
+      const category = await tenantDb(session.tenantId).category.update({
         where: { id },
         data: input,
       });
@@ -85,10 +84,10 @@ export class CategoriesController {
 
   @Delete(':id')
   @HttpCode(204)
-  async remove(@AdminSession() session: SessionContext, @Param('id') id: string): Promise<void> {
+  async remove(@AdminSession() session: AdminSessionContext, @Param('id') id: string): Promise<void> {
     assertUuidOr404(id);
     try {
-      await tenantDb(session.tenantId!).category.delete({ where: { id } });
+      await tenantDb(session.tenantId).category.delete({ where: { id } });
     } catch (err) {
       if (isNotFoundError(err)) throw new HttpException({ error: 'NOT_FOUND' }, 404);
       throw err;

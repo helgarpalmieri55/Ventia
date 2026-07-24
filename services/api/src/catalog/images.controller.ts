@@ -2,8 +2,7 @@ import { Body, Controller, Delete, HttpCode, HttpException, Inject, Param, Post,
 import { platformDb, tenantDb } from '@ventia/db';
 import { imageConfirmSchema, presignRequestSchema } from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
-import { AdminSession } from '../admin/roles.decorator';
-import type { SessionContext } from '../auth/session-context';
+import { AdminSession, type AdminSessionContext } from '../admin/roles.decorator';
 import { StorageService } from '../storage/storage.service';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
@@ -41,13 +40,13 @@ export class ImagesController {
 
   @Post(':id/images/presign')
   async presign(
-    @AdminSession() session: SessionContext,
+    @AdminSession() session: AdminSessionContext,
     @Param('id') productId: string,
     @Body() body: unknown,
   ) {
     assertUuidOr404(productId);
     const input = parseOr400(presignRequestSchema, body);
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
 
     // SECURITY GATE: tenantId comes only from the session; productId is
@@ -66,13 +65,13 @@ export class ImagesController {
   @Post(':id/images')
   @HttpCode(201)
   async confirm(
-    @AdminSession() session: SessionContext,
+    @AdminSession() session: AdminSessionContext,
     @Param('id') productId: string,
     @Body() body: unknown,
   ) {
     assertUuidOr404(productId);
     const input = parseOr400(imageConfirmSchema, body);
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
 
     const product = await db.product.findFirst({ where: { id: productId }, select: { id: true } });
@@ -147,13 +146,13 @@ export class ImagesController {
   @Delete(':id/images/:imageId')
   @HttpCode(204)
   async remove(
-    @AdminSession() session: SessionContext,
+    @AdminSession() session: AdminSessionContext,
     @Param('id') productId: string,
     @Param('imageId') imageId: string,
   ): Promise<void> {
     assertUuidOr404(productId);
     assertUuidOr404(imageId);
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
 
     const image = await db.productImage.findFirst({ where: { id: imageId, productId } });

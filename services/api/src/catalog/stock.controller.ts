@@ -2,8 +2,7 @@ import { Body, Controller, HttpCode, HttpException, Param, Post, UseGuards } fro
 import { platformDb, tenantDb } from '@ventia/db';
 import { stockAdjustSchema } from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
-import { AdminSession } from '../admin/roles.decorator';
-import type { SessionContext } from '../auth/session-context';
+import { AdminSession, type AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
 import { assertUuidOr404 } from './uuid';
@@ -17,13 +16,13 @@ export class StockController {
   @Post(':id/stock')
   @HttpCode(201)
   async adjust(
-    @AdminSession() session: SessionContext,
+    @AdminSession() session: AdminSessionContext,
     @Param('id') productId: string,
     @Body() body: unknown,
   ): Promise<{ stock: number }> {
     assertUuidOr404(productId);
     const input = parseOr400(stockAdjustSchema, body);
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
 
     const product = await db.product.findFirst({ where: { id: productId }, select: { id: true } });

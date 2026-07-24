@@ -2,8 +2,7 @@ import { Body, Controller, HttpException, Inject, Param, Put, UseGuards } from '
 import { Prisma, platformDb, tenantDb } from '@ventia/db';
 import { variantsReplaceSchema } from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
-import { AdminSession } from '../admin/roles.decorator';
-import type { SessionContext } from '../auth/session-context';
+import { AdminSession, type AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
 import { ProductsService } from './products.service';
@@ -26,10 +25,10 @@ export class VariantsController {
   constructor(@Inject(ProductsService) private readonly products: ProductsService) {}
 
   @Put(':id/variants')
-  async replace(@AdminSession() session: SessionContext, @Param('id') id: string, @Body() body: unknown) {
+  async replace(@AdminSession() session: AdminSessionContext, @Param('id') id: string, @Body() body: unknown) {
     assertUuidOr404(id);
     const input = parseOr400(variantsReplaceSchema, body);
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
 
     const existing = await db.product.findFirst({ where: { id }, select: { id: true } });

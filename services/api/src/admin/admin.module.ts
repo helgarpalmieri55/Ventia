@@ -1,9 +1,8 @@
 import { Controller, Get, Module, UseGuards } from '@nestjs/common';
 import { platformDb } from '@ventia/db';
 import { createAuth } from '../auth/auth';
-import type { SessionContext } from '../auth/session-context';
 import { AdminSessionGuard } from './admin-session.guard';
-import { AdminSession } from './roles.decorator';
+import { AdminSession, type AdminSessionContext } from './roles.decorator';
 import { AUTH_INSTANCE } from './auth-instance';
 
 export { AUTH_INSTANCE };
@@ -12,7 +11,7 @@ export { AUTH_INSTANCE };
 @UseGuards(AdminSessionGuard)
 export class AdminMeController {
   @Get()
-  me(@AdminSession() session: SessionContext): SessionContext {
+  me(@AdminSession() session: AdminSessionContext): AdminSessionContext {
     return session;
   }
 }

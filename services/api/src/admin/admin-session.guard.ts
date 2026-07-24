@@ -2,11 +2,11 @@ import { CanActivate, ExecutionContext, HttpException, Inject, Injectable } from
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { platformDb } from '@ventia/db';
-import { getSessionContext, type SessionContext } from '../auth/session-context';
-import { ROLES_KEY } from './roles.decorator';
+import { getSessionContext } from '../auth/session-context';
+import { ROLES_KEY, type AdminSessionContext } from './roles.decorator';
 import { AUTH_INSTANCE, type AuthInstance } from './auth-instance';
 
-type RequestWithAdminSession = Request & { adminSession?: SessionContext };
+type RequestWithAdminSession = Request & { adminSession?: AdminSessionContext };
 
 @Injectable()
 export class AdminSessionGuard implements CanActivate {
@@ -38,7 +38,16 @@ export class AdminSessionGuard implements CanActivate {
       throw new HttpException({ error: 'FORBIDDEN_ROLE' }, 403);
     }
 
-    req.adminSession = session;
+    // Narrowed after the check above: tenantId is a non-null string and role
+    // is 'owner' | 'staff' (never null, never 'platform_admin') for every
+    // handler downstream of this guard.
+    const adminSession: AdminSessionContext = {
+      userId: session.userId,
+      email: session.email,
+      tenantId: session.tenantId,
+      role: session.role,
+    };
+    req.adminSession = adminSession;
     return true;
   }
 }

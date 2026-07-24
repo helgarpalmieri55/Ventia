@@ -8,7 +8,7 @@ import {
   type ProductUpdate,
   type TaxRateValue,
 } from '@ventia/core';
-import type { SessionContext } from '../auth/session-context';
+import type { AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
 import { assertProductLimit } from './plan-limits';
@@ -172,8 +172,8 @@ const MAX_PAGE_SIZE = 100;
 
 @Injectable()
 export class ProductsService {
-  async list(session: SessionContext, query: ProductListQuery): Promise<ProductListResult> {
-    const tenantId = session.tenantId!;
+  async list(session: AdminSessionContext, query: ProductListQuery): Promise<ProductListResult> {
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
 
     const page = Math.max(1, Math.trunc(Number(query.page)) || 1);
@@ -205,11 +205,11 @@ export class ProductsService {
     return { items: items.map((p) => serialize(p)), total, page, pageSize };
   }
 
-  async create(session: SessionContext, body: unknown): Promise<ProductDTO> {
+  async create(session: AdminSessionContext, body: unknown): Promise<ProductDTO> {
     const input = parseOr400(productInputSchema, body);
     await assertProductLimit(session);
 
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
     const slug = await this.uniqueSlug(tenantId, input.slug ?? slugify(input.name));
     const { categoryIds: rawCategoryIds, taxRate, ...rest } = input;
@@ -260,8 +260,8 @@ export class ProductsService {
     }
   }
 
-  async findOne(session: SessionContext, id: string): Promise<ProductDTO> {
-    const tenantId = session.tenantId!;
+  async findOne(session: AdminSessionContext, id: string): Promise<ProductDTO> {
+    const tenantId = session.tenantId;
     const product = await tenantDb(tenantId).product.findFirst({
       where: { id },
       include: PRODUCT_INCLUDE_WITH_CATEGORIES,
@@ -270,9 +270,9 @@ export class ProductsService {
     return serialize(product);
   }
 
-  async update(session: SessionContext, id: string, body: unknown): Promise<ProductDTO> {
+  async update(session: AdminSessionContext, id: string, body: unknown): Promise<ProductDTO> {
     const input = parseOr400(productUpdateSchema, body);
-    const tenantId = session.tenantId!;
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
 
     const existing = await db.product.findFirst({ where: { id }, select: { id: true, status: true } });
@@ -372,8 +372,8 @@ export class ProductsService {
     }
   }
 
-  async archive(session: SessionContext, id: string): Promise<void> {
-    const tenantId = session.tenantId!;
+  async archive(session: AdminSessionContext, id: string): Promise<void> {
+    const tenantId = session.tenantId;
     const db = tenantDb(tenantId);
     try {
       await db.product.update({ where: { id }, data: { status: 'archived' } });

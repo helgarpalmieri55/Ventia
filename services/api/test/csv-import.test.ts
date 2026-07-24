@@ -399,6 +399,40 @@ describe('POST /v1/admin/import/commit', () => {
     expect(p2Full.categoryIds).toEqual([categories.body[0].id]);
   });
 
+  it('handles a category name that slugifies empty AND a literal name colliding with its categoria-N fallback slug', async () => {
+    const { cookie } = await signUpWithTenant('csv-commit-category-emoji-collision@demo.co', 'owner');
+
+    // "🔥🔥" slugifies to '' (punctuation/emoji only), so resolveCategoryId's
+    // empty-slug fallback assigns it the deterministic slug "categoria-1".
+    // "Categoria 1" is a normal, non-empty-slugifying name that ALSO
+    // slugifies to "categoria-1" — a base-path create with that exact slug
+    // must not collide with (nor 500 against) the fallback-path category
+    // already holding it; both must land as two distinct categories.
+    const csv = csvOf(
+      { name: 'Producto Emoji', price_cents: '1000', sku: 'CAT-COLLISION-1', categories: '🔥🔥' },
+      { name: 'Producto Literal', price_cents: '2000', sku: 'CAT-COLLISION-2', categories: 'Categoria 1' },
+    );
+
+    const res = await commit(cookie, csv);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ created: 2, updated: 0 });
+
+    const categories = await request(app.getHttpServer()).get('/v1/admin/categories').set('cookie', cookie);
+    expect(categories.body).toHaveLength(2);
+    const slugs = categories.body.map((c: { slug: string }) => c.slug);
+    expect(new Set(slugs).size).toBe(2);
+
+    const list = await request(app.getHttpServer()).get('/v1/admin/products').set('cookie', cookie);
+    const p1 = list.body.items.find((p: { sku: string }) => p.sku === 'CAT-COLLISION-1');
+    const p2 = list.body.items.find((p: { sku: string }) => p.sku === 'CAT-COLLISION-2');
+    const p1Full = (await request(app.getHttpServer()).get(`/v1/admin/products/${p1.id}`).set('cookie', cookie)).body;
+    const p2Full = (await request(app.getHttpServer()).get(`/v1/admin/products/${p2.id}`).set('cookie', cookie)).body;
+
+    expect(p1Full.categoryIds).toHaveLength(1);
+    expect(p2Full.categoryIds).toHaveLength(1);
+    expect(p1Full.categoryIds[0]).not.toBe(p2Full.categoryIds[0]);
+  });
+
   it('update semantics are PATCH-like: a blank cell means "keep the current value", not "reset to default"', async () => {
     const { cookie, tenantId } = await signUpWithTenant('csv-commit-patch@demo.co', 'owner');
 

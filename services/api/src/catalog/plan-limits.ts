@@ -1,6 +1,6 @@
 import { HttpException } from '@nestjs/common';
 import { tenantDb } from '@ventia/db';
-import type { SessionContext } from '../auth/session-context';
+import type { AdminSessionContext } from '../admin/roles.decorator';
 
 /**
  * Enforces the tenant's plan product limit before `additionalCount` new
@@ -17,8 +17,8 @@ import type { SessionContext } from '../auth/session-context';
  * existing product doesn't grow the tenant's product count), so a 500-row
  * file that's mostly updates isn't blocked by a small plan limit.
  */
-export async function assertProductLimit(session: SessionContext, additionalCount = 1): Promise<void> {
-  const tenantId = session.tenantId!;
+export async function assertProductLimit(session: AdminSessionContext, additionalCount = 1): Promise<void> {
+  const tenantId = session.tenantId;
   const db = tenantDb(tenantId);
 
   const limits = await db.tenantLimits.findUnique({ where: { tenantId } });
