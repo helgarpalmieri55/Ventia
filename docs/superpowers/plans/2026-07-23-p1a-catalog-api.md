@@ -528,6 +528,17 @@ Steps: failing tests (parser unit tests first, then endpoint integration) → im
 
 ---
 
+## Phase-Review Amendments (post-P1a hardening wave)
+
+- **Stock ledger policy:** `stock` is removed from `productUpdateSchema` — all product/variant stock changes go through `POST /:id/stock` (movements guaranteed). CSV updates that change stock write an `InventoryMovement` (reason `csv_import`) for the delta. Initial stock at create (POST or CSV create) is baseline — no movement. Variants replace is a re-baseline of new variant identities — no movements (documented).
+- **Un-archive respects plan limits:** transitioning a product to non-archived status (PATCH or CSV update) runs the plan-limit check (`assertProductLimit` with the product counted as +1); over limit → 402.
+- **SKU uniqueness:** `@@unique([tenantId, sku])` added (multiple NULLs allowed).
+- **Cross-tenant categoryId rejected** with 400 via in-transaction tenant-scoped count check.
+- **CSV commit transaction timeout raised to 60 s** (the AC budget).
+- **UUID params validated** → typed 404 instead of Prisma P2023 500s.
+- **Image confirm key suffix** must match `^[0-9a-f-]{36}\.(jpg|png|webp)$` after the tenant/product prefix.
+- **Revoke migration made shadow-DB-safe** (guarded statements) so `prisma migrate dev` works again; dev DBs recreated from migrations.
+
 ## Self-Review Notes
 
 - **Spec coverage:** M2 fields/AC map to Tasks 2/6/7/8 (CSV < 60 s AC pinned by test; category delete AC pinned in Task 5; archived-products-404 is a storefront concern → P2, noted). M8's "staff cannot reach settings" — settings endpoints don't exist until P1b; the guard + `@Roles` mechanism lands here (Task 3) and P1b's settings endpoints must use `@Roles('owner')` (recorded as a P1b requirement).
