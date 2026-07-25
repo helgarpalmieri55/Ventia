@@ -39,6 +39,9 @@ interface RawRow {
   stock: number;
   trackInventory: boolean;
   thumbnailUrl: string | null;
+}
+
+interface CountRow {
   total: bigint;
 }
 
@@ -80,10 +83,24 @@ export class StorefrontProductsService {
       await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
 
+      // Two round-trips (count + page), not one `count(*) OVER()` window
+      // column, so that `total` reflects the real match count even when the
+      // requested page/offset lands past the end of the result set (in which
+      // case the paginated SELECT below legitimately returns zero rows, but
+      // there's no row for a window function to have ridden along on). Both
+      // queries reuse the exact same WHERE fragments so they can never drift
+      // out of sync with each other.
+      const countRows = await tx.$queryRaw<CountRow[]>(Prisma.sql`
+        SELECT count(*) AS total
+        FROM "Product" p
+        WHERE p."tenantId" = ${tenantId}::uuid AND p.status = 'active'
+        ${categoryFilter} ${priceFilter} ${searchFilter}
+      `);
+      const total = Number(countRows[0]?.total ?? 0n);
+
       const rows = await tx.$queryRaw<RawRow[]>(Prisma.sql`
         SELECT p.id, p.name, p.slug, p."priceCents", p."compareAtCents", p.stock, p."trackInventory",
-          (SELECT url FROM "ProductImage" WHERE "productId" = p.id ORDER BY position ASC LIMIT 1) AS "thumbnailUrl",
-          count(*) OVER() AS total
+          (SELECT url FROM "ProductImage" WHERE "productId" = p.id ORDER BY position ASC LIMIT 1) AS "thumbnailUrl"
         FROM "Product" p
         WHERE p."tenantId" = ${tenantId}::uuid AND p.status = 'active'
         ${categoryFilter} ${priceFilter} ${searchFilter}
@@ -91,7 +108,6 @@ export class StorefrontProductsService {
         LIMIT ${pageSize} OFFSET ${offset}
       `);
 
-      const total = rows[0] ? Number(rows[0].total) : 0;
       const items: StorefrontProductSummary[] = rows.map((r) => ({
         id: r.id,
         name: r.name,

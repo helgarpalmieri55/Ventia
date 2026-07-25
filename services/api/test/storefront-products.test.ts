@@ -53,6 +53,48 @@ beforeAll(async () => {
     data: { tenantId: liveTenantId, name: 'Borrador', slug: 'borrador', priceCents: 1000, status: 'draft' },
   });
 
+  // A dedicated tenant for the category-filter/sort tests below, kept
+  // separate from `sf-prod` so its fixed 2-product fixture above (and the
+  // `total: 2` assertion against it) never has to change as coverage grows.
+  const sortTenant = await prisma.tenant.create({ data: { slug: 'sf-prod-sort', name: 'SF Prod Sort', status: 'live' } });
+  await prisma.tenantDomain.create({ data: { tenantId: sortTenant.id, domain: 'sf-prod-sort.ventia.localhost', isPrimary: true } });
+  const ropaCategory = await prisma.category.create({ data: { tenantId: sortTenant.id, name: 'Ropa', slug: 'ropa', position: 0 } });
+  // Cheaper and created first (older) — the two sort tests below expect the
+  // opposite order from each other (`price` ascending vs `newest` descending),
+  // so this pair proves the endpoint isn't just returning insertion order.
+  const productA = await prisma.product.create({
+    data: {
+      tenantId: sortTenant.id,
+      name: 'Producto Ropa',
+      slug: 'producto-ropa',
+      priceCents: 5000,
+      status: 'active',
+      createdAt: new Date('2020-01-01T00:00:00Z'),
+    },
+  });
+  await prisma.productCategory.create({ data: { tenantId: sortTenant.id, productId: productA.id, categoryId: ropaCategory.id } });
+  await prisma.product.create({
+    data: {
+      tenantId: sortTenant.id,
+      name: 'Producto Otro',
+      slug: 'producto-otro',
+      priceCents: 3000,
+      status: 'active',
+      createdAt: new Date('2020-01-02T00:00:00Z'),
+    },
+  });
+
+  // A dedicated tenant with exactly `pageSize` active products, for the
+  // out-of-range-page `total` test (Finding 1): page 2 must report the same
+  // real `total` as page 1 even though its `items` come back empty.
+  const pageTenant = await prisma.tenant.create({ data: { slug: 'sf-prod-page', name: 'SF Prod Page', status: 'live' } });
+  await prisma.tenantDomain.create({ data: { tenantId: pageTenant.id, domain: 'sf-prod-page.ventia.localhost', isPrimary: true } });
+  for (let i = 0; i < 5; i++) {
+    await prisma.product.create({
+      data: { tenantId: pageTenant.id, name: `Producto Página ${i}`, slug: `producto-pagina-${i}`, priceCents: 1000 + i, status: 'active' },
+    });
+  }
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
@@ -111,5 +153,47 @@ describe('GET /v1/storefront/products', () => {
     expect(res.status).toBe(200);
     expect(res.body.total).toBe(0);
     expect(res.body.items).toEqual([]);
+  });
+
+  it('filters by category', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products?category=ropa')
+      .set('x-tenant-domain', 'sf-prod-sort.ventia.localhost');
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-ropa']);
+  });
+
+  it('sort=price returns ascending by priceCents', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products?sort=price')
+      .set('x-tenant-domain', 'sf-prod-sort.ventia.localhost');
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-otro', 'producto-ropa']);
+  });
+
+  it('sort=newest returns descending by createdAt', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products?sort=newest')
+      .set('x-tenant-domain', 'sf-prod-sort.ventia.localhost');
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-otro', 'producto-ropa']);
+  });
+
+  it('reports the real total on an out-of-range page instead of 0 (Finding 1)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products?page=2&pageSize=5')
+      .set('x-tenant-domain', 'sf-prod-page.ventia.localhost');
+    expect(res.status).toBe(200);
+    expect(res.body.items).toEqual([]);
+    expect(res.body.total).toBe(5);
+  });
+
+  it('rejects a non-numeric page with 400 VALIDATION_FAILED (Finding 2)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products?page=abc')
+      .set('x-tenant-domain', 'sf-prod.ventia.localhost');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+    expect(res.body.details.page).toBeTruthy();
   });
 });

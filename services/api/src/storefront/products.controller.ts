@@ -1,7 +1,21 @@
-import { Controller, Get, Inject, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, HttpException, Inject, Query, UseGuards } from '@nestjs/common';
 import { PublicTenantGuard } from './public-tenant.guard';
 import { StorefrontTenantId } from './storefront-tenant.decorator';
 import { StorefrontProductsService } from './products.service';
+
+/** Parses a query param as a finite, non-negative number, throwing the same
+ * VALIDATION_FAILED shape as `parseOr400` (catalog/parse.ts) on failure.
+ * `Number(undefined)` is NaN and `raw` is only ever a string or undefined
+ * here (query params), so this alone is enough to reject `?page=abc` etc.
+ * before the value ever reaches the SQL LIMIT/OFFSET/price comparison. */
+function parseNonNegativeNumberOr400(raw: string | undefined, field: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new HttpException({ error: 'VALIDATION_FAILED', details: { [field]: 'debe ser un número válido' } }, 400);
+  }
+  return value;
+}
 
 @Controller('v1/storefront/products')
 @UseGuards(PublicTenantGuard)
@@ -27,10 +41,10 @@ export class StorefrontProductsController {
     return this.products.list(tenantId, {
       search,
       categorySlug,
-      priceMax: priceMax ? Number(priceMax) : undefined,
+      priceMax: parseNonNegativeNumberOr400(priceMax, 'priceMax'),
       sort: sort === 'price' || sort === 'newest' ? sort : 'relevance',
-      page: page ? Number(page) : undefined,
-      pageSize: pageSize ? Number(pageSize) : undefined,
+      page: parseNonNegativeNumberOr400(page, 'page'),
+      pageSize: parseNonNegativeNumberOr400(pageSize, 'pageSize'),
     });
   }
 }
