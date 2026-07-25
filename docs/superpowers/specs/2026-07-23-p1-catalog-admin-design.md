@@ -82,6 +82,9 @@ non-technical tester creates a store with 10 products from a CSV without help.
   (better-auth flow, console mailer in dev) is a hard launch requirement.
 - `suspended`: storefront returns 503, admin becomes read-only (middleware
   checks tenant status; suspension tooling itself is P6 platform admin).
+  **P1 deviation:** the storefront renders the unavailable message at HTTP
+  200, not a real 503 (see `apps/storefront/app/page.tsx`'s doc comment) —
+  the strict 503 is deferred to P2's storefront rebuild.
 
 ### 5. Admin UI (`apps/admin`)
 

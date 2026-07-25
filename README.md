@@ -136,6 +136,25 @@ Prerequisites: dev stack up + DB migrated (Quickstart steps 2–4). Then, from t
 (`apps/admin/e2e/p1-dod.spec.ts`) through Caddy, tears servers down after. Local-run only, not
 part of `pnpm turbo run test`/CI.
 
+## Deviations
+
+- **Suspended storefront returns 200, not 503 (P1):** a suspended tenant's storefront renders an
+  "unavailable" message (`apps/storefront/app/page.tsx`) at HTTP 200 instead of a real 503 — the
+  Next.js App Router has no ergonomic way for a page component to set a non-200 status without
+  reaching for `notFound()`/`redirect()` special cases that don't fit "temporarily unavailable"
+  semantics. The strict 503, along with archived-products-404-on-storefront (also P1-deferred —
+  see `docs/SPEC.md`'s M2 AC), arrives with the storefront rebuild in P2.
+
+## Production notes
+
+- **`ADMIN_URL` is required in any real deployment.** It's used both as better-auth's
+  `trustedOrigins` entry (`services/api/src/admin/admin.module.ts`) and as the destination for
+  the staff-invite and email-verification links (`services/api/src/staff/staff.service.ts`,
+  `services/api/src/auth/auth.ts`). Leaving it unset falls back to the dev default
+  (`http://admin.ventia.localhost`); in a real deployment where the admin app is served from a
+  different origin, every sign-in fails with `403 INVALID_ORIGIN` until `ADMIN_URL` is set to that
+  origin.
+
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and on every
