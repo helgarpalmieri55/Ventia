@@ -27,6 +27,10 @@ docker/             Dev stack: Postgres (pgvector), Redis, Caddy
   `packageManager` field — run `corepack enable` once if `pnpm` isn't already on your PATH)
 - Docker (for the dev stack, and for running the `db`/`api` test suites, which use
   [Testcontainers](https://testcontainers.com/) against the local Docker daemon)
+- Network access to `fonts.googleapis.com`/`fonts.gstatic.com` when building `apps/storefront`:
+  it loads the tenant theme's font pairs via `next/font/google` (`apps/storefront/lib/fonts.ts`),
+  which fetches font files at build time and fails the build if unreachable — the only build-time
+  network dependency in this repo; an airgapped CI runner must allow it.
 
 ## Quickstart
 
