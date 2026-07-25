@@ -1045,6 +1045,7 @@ git add apps/storefront && git commit -m "feat: add policy pages, sitemap, robot
 **Steps:**
 - [ ] Run `pnpm turbo run lint typecheck build` + `pnpm turbo run test` — green (api grows by ~15 tests, storefront by ~6).
 - [ ] Manual smoke against the dev stack: browse home → category → PDP → search → each policy page → sitemap.xml/robots.txt, for a seeded live tenant; confirm a suspended tenant (flip one via `platformDb` in a scratch script) returns real HTTP 503; confirm archived/draft products 404 on their PDP URL.
+- [ ] While doing the smoke pass, open devtools network tab (or check API access logs) for one page load and confirm exactly one `/v1/tenant` request fires, not two — this is the manual check the P2a-5 fix wave (commit `d4be1fd`, wrapping `fetchTenantForHost` in React's `cache()`) deferred here instead of a vitest test (React's `cache()` only memoizes under Next's `react-server` build condition, unreachable from plain vitest).
 - [ ] README update + commit `docs: document storefront endpoints and real 503 for suspended tenants`.
 
 ---
