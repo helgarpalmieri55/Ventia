@@ -20,6 +20,7 @@ describe('themeToFormState', () => {
       fontPair: 'poppins-source',
       radius: 'full',
       logoUrl: 'https://example.com/logo.png',
+      faviconUrl: 'https://example.com/favicon.png',
     });
 
     expect(saved).toEqual({
@@ -29,6 +30,7 @@ describe('themeToFormState', () => {
       fontPair: 'poppins-source',
       radius: 'full',
       logoUrl: 'https://example.com/logo.png',
+      faviconUrl: 'https://example.com/favicon.png',
     });
   });
 
@@ -52,6 +54,27 @@ describe('themeToFormState', () => {
     });
 
     expect(saved.logoUrl).toBe('');
+  });
+
+  it('preserves faviconUrl when set in the saved theme', () => {
+    const saved = themeToFormState({
+      colors: { primary: '#ff0000', background: '#000000', foreground: '#eeeeee' },
+      fontPair: 'poppins-source',
+      radius: 'full',
+      faviconUrl: 'https://example.com/favicon.ico',
+    });
+
+    expect(saved.faviconUrl).toBe('https://example.com/favicon.ico');
+  });
+
+  it('omits faviconUrl in the saved theme -> falls back to the empty-string default', () => {
+    const saved = themeToFormState({
+      colors: { primary: '#ff0000', background: '#000000', foreground: '#eeeeee' },
+      fontPair: 'poppins-source',
+      radius: 'full',
+    });
+
+    expect(saved.faviconUrl).toBe('');
   });
 
   it('degrades field-by-field for an invalid color, unknown fontPair, or unknown radius', () => {

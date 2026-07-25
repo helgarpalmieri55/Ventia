@@ -41,6 +41,7 @@ export function BrandingStep({ onDone, theme }: BrandingStepProps) {
   const [fontPair, setFontPair] = useState<FontPair>(initial.fontPair);
   const [radius, setRadius] = useState<Radius>(initial.radius);
   const [logoUrl, setLogoUrl] = useState(initial.logoUrl);
+  const [faviconUrl, setFaviconUrl] = useState(initial.faviconUrl);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -54,6 +55,7 @@ export function BrandingStep({ onDone, theme }: BrandingStepProps) {
         fontPair,
         radius,
         ...(logoUrl ? { logoUrl } : {}),
+        ...(faviconUrl ? { faviconUrl } : {}),
       };
       await apiFetch<ThemeResponse>('/v1/admin/settings/theme', {
         method: 'PUT',
@@ -112,6 +114,14 @@ export function BrandingStep({ onDone, theme }: BrandingStepProps) {
               type="url"
               value={logoUrl}
               onChange={(event) => setLogoUrl(event.target.value)}
+              placeholder="https://…"
+            />
+          </FormField>
+          <FormField label="URL del favicon (opcional)" htmlFor="faviconUrl">
+            <Input
+              type="url"
+              value={faviconUrl}
+              onChange={(event) => setFaviconUrl(event.target.value)}
               placeholder="https://…"
             />
           </FormField>

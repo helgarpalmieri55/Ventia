@@ -2,8 +2,8 @@ import { FONT_PAIRS, RADIUS_OPTIONS, type FontPair, type Radius } from '@ventia/
 
 /** The branding step's form fields — a flattened, always-fully-populated
  * shape derived from `@ventia/core`'s `ThemeInput` (whose `colors` is nested
- * and whose `logoUrl` is optional), so the step's `useState` calls never deal
- * with partial/nested data. */
+ * and whose `logoUrl` and `faviconUrl` are optional), so the step's `useState`
+ * calls never deal with partial/nested data. */
 export interface ThemeFormState {
   primary: string;
   background: string;
@@ -11,6 +11,7 @@ export interface ThemeFormState {
   fontPair: FontPair;
   radius: Radius;
   logoUrl: string;
+  faviconUrl: string;
 }
 
 /** Same defaults the branding step always rendered before this fix — used
@@ -25,6 +26,7 @@ export const DEFAULT_THEME_FORM: ThemeFormState = {
   fontPair: FONT_PAIRS[0],
   radius: 'md',
   logoUrl: '',
+  faviconUrl: '',
 };
 
 /** Display labels for `@ventia/core`'s fixed 5-pair font catalog — shared by
@@ -91,5 +93,6 @@ export function themeToFormState(theme?: Record<string, unknown> | null): ThemeF
     fontPair: isFontPair(theme.fontPair) ? theme.fontPair : DEFAULT_THEME_FORM.fontPair,
     radius: isRadius(theme.radius) ? theme.radius : DEFAULT_THEME_FORM.radius,
     logoUrl: typeof theme.logoUrl === 'string' ? theme.logoUrl : DEFAULT_THEME_FORM.logoUrl,
+    faviconUrl: typeof theme.faviconUrl === 'string' ? theme.faviconUrl : DEFAULT_THEME_FORM.faviconUrl,
   };
 }

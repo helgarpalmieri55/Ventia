@@ -43,8 +43,10 @@ const TABS: { key: Tab; label: string }[] = [
  * /v1/admin/settings`, surfaced by `load`'s catch below via `errorMessage`).
  *
  * Three client-side tabs (no routing — just local `tab` state, per the
- * binding contract), each owning its own form state independently so
- * switching tabs never clobbers unsaved edits in another tab. */
+ * binding contract). All three tab components are always mounted (with the
+ * inactive tabs hidden via the `hidden` attribute on their containers), so
+ * each component maintains its own form state independently and switching
+ * tabs never clobbers unsaved edits in another tab. */
 export default function ConfiguracionPage() {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -109,9 +111,15 @@ export default function ConfiguracionPage() {
           ))}
         </div>
 
-        {tab === 'tienda' ? <TiendaTab settings={settings} onSaved={setSettings} /> : null}
-        {tab === 'marca' ? <MarcaTab settings={settings} onSaved={setSettings} /> : null}
-        {tab === 'pagos' ? <PagosTab settings={settings} onSaved={setSettings} /> : null}
+        <div hidden={tab !== 'tienda'}>
+          <TiendaTab settings={settings} onSaved={setSettings} />
+        </div>
+        <div hidden={tab !== 'marca'}>
+          <MarcaTab settings={settings} onSaved={setSettings} />
+        </div>
+        <div hidden={tab !== 'pagos'}>
+          <PagosTab settings={settings} onSaved={setSettings} />
+        </div>
       </CardContent>
     </Card>
   );
@@ -272,6 +280,7 @@ function MarcaTab({ settings, onSaved }: TabProps) {
   const [fontPair, setFontPair] = useState<FontPair>(initial.fontPair);
   const [radius, setRadius] = useState<Radius>(initial.radius);
   const [logoUrl, setLogoUrl] = useState(initial.logoUrl);
+  const [faviconUrl, setFaviconUrl] = useState(initial.faviconUrl);
   const [error, setError] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -289,6 +298,7 @@ function MarcaTab({ settings, onSaved }: TabProps) {
         fontPair,
         radius,
         ...(logoUrl ? { logoUrl } : {}),
+        ...(faviconUrl ? { faviconUrl } : {}),
       };
       const updated = await apiFetch<SettingsResponse>('/v1/admin/settings/theme', {
         method: 'PUT',
@@ -389,6 +399,17 @@ function MarcaTab({ settings, onSaved }: TabProps) {
           value={logoUrl}
           onChange={(event) => {
             setLogoUrl(event.target.value);
+            setSaved(false);
+          }}
+          placeholder="https://…"
+        />
+      </FormField>
+      <FormField label="URL del favicon (opcional)" htmlFor="marca-faviconUrl" error={errors.faviconUrl}>
+        <Input
+          type="url"
+          value={faviconUrl}
+          onChange={(event) => {
+            setFaviconUrl(event.target.value);
             setSaved(false);
           }}
           placeholder="https://…"
