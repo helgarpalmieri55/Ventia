@@ -1,4 +1,4 @@
-import { Controller, Get, HttpException, Inject, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, HttpException, Inject, NotFoundException, Param, Query, UseGuards } from '@nestjs/common';
 import { PublicTenantGuard } from './public-tenant.guard';
 import { StorefrontTenantId } from './storefront-tenant.decorator';
 import { StorefrontProductsService } from './products.service';
@@ -46,5 +46,17 @@ export class StorefrontProductsController {
       page: parseNonNegativeNumberOr400(page, 'page'),
       pageSize: parseNonNegativeNumberOr400(pageSize, 'pageSize'),
     });
+  }
+
+  // Route order note: `GET /v1/storefront/products` (this controller's base
+  // path, zero extra segments) and `GET /v1/storefront/products/:slug` (one
+  // extra segment) never collide, so `list` above doesn't need to be
+  // declared after `detail` — Nest dispatches purely on segment count/shape
+  // here, not registration order.
+  @Get(':slug')
+  async detail(@StorefrontTenantId() tenantId: string, @Param('slug') slug: string) {
+    const detail = await this.products.detail(tenantId, slug);
+    if (!detail) throw new NotFoundException({ error: 'PRODUCT_NOT_FOUND' });
+    return detail;
   }
 }

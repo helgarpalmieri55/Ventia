@@ -1,5 +1,19 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, platformDb } from '@ventia/db';
+import { Prisma, platformDb, tenantDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
+import type { TaxRateValue } from '@ventia/core';
+
+// Same DB-enum-to-human-string translation as catalog/products.service.ts's
+// TAX_RATE_FROM_DB (duplicated locally rather than shared, matching the
+// existing pattern of csv-import.service.ts having its own copy too): the
+// Prisma-generated TaxRate enum's runtime values are its member names
+// (ZERO/FIVE/NINETEEN/EXCLUIDO), not the human-facing '0'/'5'/'19'/'excluido'
+// strings the storefront API contract exposes.
+const TAX_RATE_FROM_DB: Record<PrismaTaxRate, TaxRateValue> = {
+  ZERO: '0',
+  FIVE: '5',
+  NINETEEN: '19',
+  EXCLUIDO: 'excluido',
+};
 
 export interface StorefrontProductSummary {
   id: string;
@@ -9,6 +23,31 @@ export interface StorefrontProductSummary {
   compareAtCents: number | null;
   thumbnailUrl: string | null;
   inStock: boolean;
+}
+
+// Extends the summary shape rather than duplicating its fields, per the
+// brief. `thumbnailUrl` is omitted because detail responses carry the full
+// `images` array instead of a single thumbnail. `taxRate` is added on top of
+// what the brief's own Step 3 code sample returns: the task's "Produces"
+// contract explicitly lists `taxRate` in `StorefrontProductDetail`, and the
+// field already exists on `Product` (and is exposed the same way by the
+// admin-facing ProductDTO in catalog/products.service.ts), so its omission
+// from the sample implementation looks like an oversight rather than an
+// intentional field drop. Included here; noted in the task report.
+export interface StorefrontProductDetail extends Omit<StorefrontProductSummary, 'thumbnailUrl'> {
+  descriptionMd: string;
+  taxRate: TaxRateValue;
+  options: string[];
+  images: Array<{ url: string; alt: string | null }>;
+  variants: Array<{
+    id: string;
+    option1: string | null;
+    option2: string | null;
+    option3: string | null;
+    priceCents: number | null;
+    stock: number;
+  }>;
+  related: StorefrontProductSummary[];
 }
 
 export interface StorefrontProductListResult {
@@ -119,5 +158,65 @@ export class StorefrontProductsService {
       }));
       return { items, total, page, pageSize };
     });
+  }
+
+  async detail(tenantId: string, slug: string): Promise<StorefrontProductDetail | null> {
+    // Plain relational reads (no FTS/trigram ranking needed here), so the
+    // ordinary tenant-scoped client is enough — unlike `list()` above, which
+    // has to drop to raw SQL for `to_tsvector`/`similarity`.
+    const db = tenantDb(tenantId);
+    const product = await db.product.findFirst({
+      where: { slug, status: 'active' },
+      include: {
+        images: { orderBy: { position: 'asc' } },
+        variants: true,
+        categories: { select: { categoryId: true } },
+      },
+    });
+    if (!product) return null;
+
+    const categoryIds = product.categories.map((c) => c.categoryId);
+    const related = categoryIds.length
+      ? await db.product.findMany({
+          where: {
+            status: 'active',
+            id: { not: product.id },
+            categories: { some: { categoryId: { in: categoryIds } } },
+          },
+          take: 4,
+          orderBy: { createdAt: 'desc' },
+          include: { images: { orderBy: { position: 'asc' }, take: 1 } },
+        })
+      : [];
+
+    return {
+      id: product.id,
+      name: product.name,
+      slug: product.slug,
+      descriptionMd: product.descriptionMd,
+      priceCents: product.priceCents,
+      compareAtCents: product.compareAtCents,
+      taxRate: TAX_RATE_FROM_DB[product.taxRate],
+      inStock: !product.trackInventory || product.stock > 0,
+      options: product.options,
+      images: product.images.map((i) => ({ url: i.url, alt: i.alt })),
+      variants: product.variants.map((v) => ({
+        id: v.id,
+        option1: v.option1,
+        option2: v.option2,
+        option3: v.option3,
+        priceCents: v.priceCents,
+        stock: v.stock,
+      })),
+      related: related.map((r) => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        priceCents: r.priceCents,
+        compareAtCents: r.compareAtCents,
+        thumbnailUrl: r.images[0]?.url ?? null,
+        inStock: !r.trackInventory || r.stock > 0,
+      })),
+    };
   }
 }

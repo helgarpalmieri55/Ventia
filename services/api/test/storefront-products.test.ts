@@ -208,3 +208,48 @@ describe('GET /v1/storefront/products', () => {
     expect(res.body.details.page).toBeTruthy();
   });
 });
+
+describe('GET /v1/storefront/products/:slug', () => {
+  it('returns full detail for an active product', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products/camiseta-basica')
+      .set('x-tenant-domain', 'sf-prod.ventia.localhost');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ name: 'Camiseta Básica', slug: 'camiseta-basica', inStock: true });
+    expect(Array.isArray(res.body.related)).toBe(true);
+  });
+
+  it('404s a draft product by slug', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products/borrador')
+      .set('x-tenant-domain', 'sf-prod.ventia.localhost');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('PRODUCT_NOT_FOUND');
+  });
+
+  // The brief's version of this test assumes a 'ropa' category already
+  // exists under the same tenant as 'camiseta-basica' — but in this file's
+  // fixtures 'ropa' belongs to the separate `sf-prod-sort` tenant (see
+  // beforeAll), while 'camiseta-basica' lives under `liveTenantId`
+  // (`sf-prod`). Rather than borrow a category across tenants, this test
+  // creates its own category under `liveTenantId` so the relation stays
+  // tenant-scoped like the real feature would require.
+  it('related products exclude self and other-category items, cap at 4', async () => {
+    const cat = await prisma.category.create({
+      data: { tenantId: liveTenantId, name: 'Ropa Detalle', slug: 'ropa-detalle', position: 0 },
+    });
+    const target = await prisma.product.findFirstOrThrow({ where: { tenantId: liveTenantId, slug: 'camiseta-basica' } });
+    await prisma.productCategory.create({ data: { tenantId: liveTenantId, productId: target.id, categoryId: cat.id } });
+    for (let i = 0; i < 5; i += 1) {
+      const p = await prisma.product.create({
+        data: { tenantId: liveTenantId, name: `Relacionado ${i}`, slug: `relacionado-${i}`, priceCents: 10000, status: 'active' },
+      });
+      await prisma.productCategory.create({ data: { tenantId: liveTenantId, productId: p.id, categoryId: cat.id } });
+    }
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products/camiseta-basica')
+      .set('x-tenant-domain', 'sf-prod.ventia.localhost');
+    expect(res.body.related.length).toBeLessThanOrEqual(4);
+    expect(res.body.related.every((r: { slug: string }) => r.slug !== 'camiseta-basica')).toBe(true);
+  });
+});
