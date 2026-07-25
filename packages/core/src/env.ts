@@ -12,6 +12,8 @@ const envSchema = z.object({
   S3_SECRET_KEY: z.string().min(1).default('ventia-secret'),
   S3_BUCKET: z.string().min(1).default('ventia'),
   S3_PUBLIC_URL: z.string().url().default('http://localhost:9000/ventia'),
+  REVALIDATE_SECRET: z.string().min(1).default('dev-revalidate-secret'),
+  STOREFRONT_INTERNAL_URL: z.string().url().default('http://localhost:3000'),
 });
 
 export type Env = z.infer<typeof envSchema>;

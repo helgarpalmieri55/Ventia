@@ -17,6 +17,7 @@ import { AdminSession, type AdminSessionContext } from '../admin/roles.decorator
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
 import { assertUuidOr404 } from './uuid';
+import { revalidateStorefrontTag } from '../storefront/revalidate';
 
 const categoryUpdateSchema = categoryInputSchema.partial();
 
@@ -56,6 +57,7 @@ export class CategoriesController {
         },
       });
       await writeAudit(session, 'category.create', 'Category', category.id, input);
+      revalidateStorefrontTag(`categories:${session.tenantId}`);
       return category;
     } catch (err) {
       if (isUniqueConstraintError(err)) throw new HttpException({ error: 'SLUG_TAKEN' }, 409);
@@ -74,6 +76,7 @@ export class CategoriesController {
         data: input,
       });
       await writeAudit(session, 'category.update', 'Category', category.id, input);
+      revalidateStorefrontTag(`categories:${session.tenantId}`);
       return category;
     } catch (err) {
       if (isNotFoundError(err)) throw new HttpException({ error: 'NOT_FOUND' }, 404);
@@ -95,5 +98,6 @@ export class CategoriesController {
     // Products are untouched by this delete: only the ProductCategory join
     // rows cascade (see schema.prisma's `onDelete: Cascade` on that relation).
     await writeAudit(session, 'category.delete', 'Category', id);
+    revalidateStorefrontTag(`categories:${session.tenantId}`);
   }
 }
