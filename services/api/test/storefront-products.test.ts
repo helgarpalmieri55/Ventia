@@ -59,15 +59,16 @@ beforeAll(async () => {
   const sortTenant = await prisma.tenant.create({ data: { slug: 'sf-prod-sort', name: 'SF Prod Sort', status: 'live' } });
   await prisma.tenantDomain.create({ data: { tenantId: sortTenant.id, domain: 'sf-prod-sort.ventia.localhost', isPrimary: true } });
   const ropaCategory = await prisma.category.create({ data: { tenantId: sortTenant.id, name: 'Ropa', slug: 'ropa', position: 0 } });
-  // Cheaper and created first (older) — the two sort tests below expect the
-  // opposite order from each other (`price` ascending vs `newest` descending),
-  // so this pair proves the endpoint isn't just returning insertion order.
+  // Three products with diverging price/date orderings to ensure sort=price
+  // and sort=newest tests catch accidental ORDER BY branch swaps:
+  // - sort=price (ascending): [producto-tres, producto-uno, producto-dos]
+  // - sort=newest (descending): [producto-tres, producto-dos, producto-uno]
   const productA = await prisma.product.create({
     data: {
       tenantId: sortTenant.id,
-      name: 'Producto Ropa',
-      slug: 'producto-ropa',
-      priceCents: 5000,
+      name: 'Producto Uno',
+      slug: 'producto-uno',
+      priceCents: 3000,
       status: 'active',
       createdAt: new Date('2020-01-01T00:00:00Z'),
     },
@@ -76,11 +77,21 @@ beforeAll(async () => {
   await prisma.product.create({
     data: {
       tenantId: sortTenant.id,
-      name: 'Producto Otro',
-      slug: 'producto-otro',
-      priceCents: 3000,
+      name: 'Producto Dos',
+      slug: 'producto-dos',
+      priceCents: 5000,
       status: 'active',
       createdAt: new Date('2020-01-02T00:00:00Z'),
+    },
+  });
+  await prisma.product.create({
+    data: {
+      tenantId: sortTenant.id,
+      name: 'Producto Tres',
+      slug: 'producto-tres',
+      priceCents: 1000,
+      status: 'active',
+      createdAt: new Date('2020-01-03T00:00:00Z'),
     },
   });
 
@@ -160,7 +171,7 @@ describe('GET /v1/storefront/products', () => {
       .get('/v1/storefront/products?category=ropa')
       .set('x-tenant-domain', 'sf-prod-sort.ventia.localhost');
     expect(res.status).toBe(200);
-    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-ropa']);
+    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-uno']);
   });
 
   it('sort=price returns ascending by priceCents', async () => {
@@ -168,7 +179,7 @@ describe('GET /v1/storefront/products', () => {
       .get('/v1/storefront/products?sort=price')
       .set('x-tenant-domain', 'sf-prod-sort.ventia.localhost');
     expect(res.status).toBe(200);
-    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-otro', 'producto-ropa']);
+    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-tres', 'producto-uno', 'producto-dos']);
   });
 
   it('sort=newest returns descending by createdAt', async () => {
@@ -176,7 +187,7 @@ describe('GET /v1/storefront/products', () => {
       .get('/v1/storefront/products?sort=newest')
       .set('x-tenant-domain', 'sf-prod-sort.ventia.localhost');
     expect(res.status).toBe(200);
-    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-otro', 'producto-ropa']);
+    expect(res.body.items.map((i: { slug: string }) => i.slug)).toEqual(['producto-tres', 'producto-dos', 'producto-uno']);
   });
 
   it('reports the real total on an out-of-range page instead of 0 (Finding 1)', async () => {
