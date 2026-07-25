@@ -13,6 +13,20 @@ interface AcceptResponse {
   role: 'staff';
 }
 
+/** Maps a `POST /v1/staff/accept` failure to es-CO copy. `staffAcceptSchema`
+ * requires `token` to be exactly 48 hex characters (see
+ * packages/core/src/staff-schemas.ts), so a truncated or mangled link (an
+ * email client rewriting it, a copy/paste error) fails that check BEFORE
+ * the invite lookup ever runs, surfacing as 400 VALIDATION_FAILED rather
+ * than 400 INVITE_INVALID. There is no form on this page for "Revisa los
+ * campos marcados." (`errorMessage`'s default VALIDATION_FAILED copy) to
+ * meaningfully point at, so both codes read identically here — a bad token
+ * is a bad token, whether it's malformed or merely unrecognized. */
+function acceptErrorMessage(e: ApiError): string {
+  if (e.code === 'VALIDATION_FAILED') return errorMessage(new ApiError(e.status, 'INVITE_INVALID'));
+  return errorMessage(e);
+}
+
 /** Public route, deliberately outside the `(app)` group (see that layout's
  * doc comment): this page must be reachable by someone with NO tenant yet
  * (a brand-new invitee) or even no session at all — both states the `(app)`
@@ -65,7 +79,7 @@ function AceptarInvitacionContent() {
       router.push('/');
       router.refresh();
     } catch (e) {
-      setError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
+      setError(e instanceof ApiError ? acceptErrorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
       setAccepting(false);
     }
   }

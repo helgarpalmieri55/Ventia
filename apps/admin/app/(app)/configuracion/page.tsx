@@ -153,11 +153,26 @@ function TiendaTab({ settings, onSaved }: TabProps) {
         method: 'PATCH',
         body: JSON.stringify({
           name,
+          // Unlike the onboarding wizard's store_info step (which only ever
+          // submits once, from a blank form), this page must also support
+          // clearing an already-saved value — and `storeInfo` is a
+          // merge-in-place on the server (settings.controller.ts's
+          // updateStore), not a replace, so a key that's simply OMITTED here
+          // leaves the old value untouched rather than clearing it. category/
+          // contactPhone/description have no `.email()`-style format
+          // constraint (just a max length — see storeSettingsSchema), so an
+          // empty string is valid and is sent unconditionally to actually
+          // persist a clear. contactEmail is the one exception: its schema is
+          // `z.string().email()`, which REJECTS an empty string with
+          // VALIDATION_FAILED — there is no server-side way to explicitly
+          // unset it via this endpoint, so it's still only sent when
+          // non-empty (a real, documented gap in the API, not something this
+          // page can work around).
           storeInfo: {
-            ...(category ? { category } : {}),
+            category,
             ...(contactEmail ? { contactEmail } : {}),
-            ...(contactPhone ? { contactPhone } : {}),
-            ...(description ? { description } : {}),
+            contactPhone,
+            description,
           },
         }),
       });
@@ -258,12 +273,14 @@ function MarcaTab({ settings, onSaved }: TabProps) {
   const [radius, setRadius] = useState<Radius>(initial.radius);
   const [logoUrl, setLogoUrl] = useState(initial.logoUrl);
   const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [saved, setSaved] = useState(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    setErrors({});
     setSaved(false);
     setSubmitting(true);
     try {
@@ -280,7 +297,20 @@ function MarcaTab({ settings, onSaved }: TabProps) {
       onSaved(updated);
       setSaved(true);
     } catch (e) {
-      setError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
+      // VALIDATION_FAILED here is realistically only `logoUrl` (an invalid
+      // absolute URL — colors/fontPair/radius are all constrained to valid
+      // values by their own inputs: <input type="color"> and the two
+      // <Select>s can't produce an out-of-range value) or `colors` (zod's
+      // `.flatten()` keys a nested-object error by its first path segment,
+      // same limitation noted in TiendaTab above), so both are surfaced
+      // per-field/per-group rather than collapsing to the generic
+      // "Revisa los campos marcados." alert.
+      if (e instanceof ApiError) {
+        if (e.code === 'VALIDATION_FAILED') setErrors(fieldErrors(e));
+        else setError(errorMessage(e));
+      } else {
+        setError('Ocurrió un error inesperado. Intenta de nuevo.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -290,6 +320,7 @@ function MarcaTab({ settings, onSaved }: TabProps) {
     <form className="flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
       {error ? <Alert variant="error">{error}</Alert> : null}
       {saved ? <Alert variant="success">Los cambios se guardaron correctamente.</Alert> : null}
+      {errors.colors ? <Alert variant="error">{errors.colors}</Alert> : null}
       <div className="grid grid-cols-3 gap-4">
         <FormField label="Color primario" htmlFor="marca-primary">
           <Input
@@ -352,7 +383,7 @@ function MarcaTab({ settings, onSaved }: TabProps) {
           ))}
         </Select>
       </FormField>
-      <FormField label="URL del logo (opcional)" htmlFor="marca-logoUrl">
+      <FormField label="URL del logo (opcional)" htmlFor="marca-logoUrl" error={errors.logoUrl}>
         <Input
           type="url"
           value={logoUrl}
