@@ -207,6 +207,31 @@ describe('GET /v1/storefront/products', () => {
     expect(res.body.error).toBe('VALIDATION_FAILED');
     expect(res.body.details.page).toBeTruthy();
   });
+
+  it('rejects a fractional page with 400 VALIDATION_FAILED', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products?page=1.5')
+      .set('x-tenant-domain', 'sf-prod.ventia.localhost');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+    expect(res.body.details.page).toBeTruthy();
+  });
+
+  it('rejects a fractional pageSize with 400 VALIDATION_FAILED', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products?pageSize=2.5')
+      .set('x-tenant-domain', 'sf-prod.ventia.localhost');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+    expect(res.body.details.pageSize).toBeTruthy();
+  });
+
+  it('accepts a fractional priceMax (a peso amount, not required to be integer cents)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/products?priceMax=100000.5')
+      .set('x-tenant-domain', 'sf-prod.ventia.localhost');
+    expect(res.status).toBe(200);
+  });
 });
 
 describe('GET /v1/storefront/products/:slug', () => {

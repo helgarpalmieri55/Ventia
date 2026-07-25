@@ -7,11 +7,23 @@ import { StorefrontProductsService } from './products.service';
  * VALIDATION_FAILED shape as `parseOr400` (catalog/parse.ts) on failure.
  * `Number(undefined)` is NaN and `raw` is only ever a string or undefined
  * here (query params), so this alone is enough to reject `?page=abc` etc.
- * before the value ever reaches the SQL LIMIT/OFFSET/price comparison. */
-function parseNonNegativeNumberOr400(raw: string | undefined, field: string): number | undefined {
+ * before the value ever reaches the SQL LIMIT/OFFSET/price comparison.
+ *
+ * `requireInteger` additionally rejects fractional values (e.g. `?page=1.5`)
+ * — needed for `page`/`pageSize`, which flow straight into
+ * `products.service.ts`'s `(page - 1) * pageSize` SQL `OFFSET` and would
+ * otherwise silently produce a fractional offset. `priceMax` is deliberately
+ * left fractional-friendly: it's compared against the integer `priceCents`
+ * column with `<=` (`products.service.ts`), where a fractional value (e.g. a
+ * peso amount) is a perfectly meaningful filter, not malformed input. */
+function parseNonNegativeNumberOr400(
+  raw: string | undefined,
+  field: string,
+  options: { requireInteger?: boolean } = {},
+): number | undefined {
   if (raw === undefined) return undefined;
   const value = Number(raw);
-  if (!Number.isFinite(value) || value < 0) {
+  if (!Number.isFinite(value) || value < 0 || (options.requireInteger && !Number.isInteger(value))) {
     throw new HttpException({ error: 'VALIDATION_FAILED', details: { [field]: 'debe ser un número válido' } }, 400);
   }
   return value;
@@ -43,8 +55,8 @@ export class StorefrontProductsController {
       categorySlug,
       priceMax: parseNonNegativeNumberOr400(priceMax, 'priceMax'),
       sort: sort === 'price' || sort === 'newest' ? sort : 'relevance',
-      page: parseNonNegativeNumberOr400(page, 'page'),
-      pageSize: parseNonNegativeNumberOr400(pageSize, 'pageSize'),
+      page: parseNonNegativeNumberOr400(page, 'page', { requireInteger: true }),
+      pageSize: parseNonNegativeNumberOr400(pageSize, 'pageSize', { requireInteger: true }),
     });
   }
 
