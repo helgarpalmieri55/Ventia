@@ -7,7 +7,7 @@ import { ApiError, apiFetch } from '../../../../lib/api';
 import { errorMessage } from '../../../../lib/errors';
 import { ChecklistPanel } from '../../../_components/checklist-panel';
 import { Stepper } from './stepper';
-import { STEP_ORDER, type WizardStepKey } from './wizard-steps';
+import { checklistStepClickable, STEP_ORDER, type WizardStepKey } from './wizard-steps';
 import { CreateStoreStep } from './create-store-step';
 import { StoreInfoStep } from './store-info-step';
 import { BrandingStep } from './branding-step';
@@ -16,6 +16,16 @@ import { PaymentsStep } from './payments-step';
 
 interface OnboardingGetResponse {
   steps: Partial<Record<OnboardingStep, { done: boolean; completedAt: string }>>;
+}
+
+/** `GET /v1/admin/settings`'s shape (see services/api/src/settings/
+ * settings.controller.ts's `toResponse`) — fetched once alongside the
+ * onboarding steps below and shared by `BrandingStep` (its `theme`) and
+ * `PaymentsStep` (its `payments.codEnabled`), rather than each step doing
+ * its own round-trip. `theme` is `{}` for a tenant that has never PUT one. */
+interface SettingsGetResponse {
+  theme: Record<string, unknown>;
+  payments: { codEnabled: boolean };
 }
 
 export interface OnboardingWizardProps {
@@ -36,12 +46,21 @@ export function OnboardingWizard({ hasTenant: initialHasTenant }: OnboardingWiza
   const [current, setCurrent] = useState<WizardStepKey>(initialHasTenant ? 'store_info' : 'create-store');
   const [loading, setLoading] = useState(initialHasTenant);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [settings, setSettings] = useState<SettingsGetResponse | null>(null);
 
   const loadSteps = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const result = await apiFetch<OnboardingGetResponse>('/v1/admin/onboarding');
+      // Fetched together (one round-trip pair) because both results are
+      // needed before the wizard can render any step: `settings` pre-fills
+      // BrandingStep/PaymentsStep so revisiting them can't clobber the
+      // merchant's saved theme/payments config with hardcoded defaults (see
+      // those steps' doc comments).
+      const [result, settingsResult] = await Promise.all([
+        apiFetch<OnboardingGetResponse>('/v1/admin/onboarding'),
+        apiFetch<SettingsGetResponse>('/v1/admin/settings'),
+      ]);
       const done = new Set<WizardStepKey>(['create-store']);
       let firstPending: WizardStepKey = 'checklist';
       for (const step of ONBOARDING_STEPS) {
@@ -53,6 +72,7 @@ export function OnboardingWizard({ hasTenant: initialHasTenant }: OnboardingWiza
       }
       setDoneSteps(done);
       setCurrent(firstPending);
+      setSettings(settingsResult);
     } catch (e) {
       setLoadError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
     } finally {
@@ -80,7 +100,20 @@ export function OnboardingWizard({ hasTenant: initialHasTenant }: OnboardingWiza
   }
 
   function handleSelect(key: WizardStepKey) {
-    if (key === current || doneSteps.has(key)) setCurrent(key);
+    const clickable = key === current || doneSteps.has(key) || (key === 'checklist' && checklistStepClickable(doneSteps));
+    if (clickable) setCurrent(key);
+  }
+
+  function handleLaunched() {
+    // ChecklistPanel already renders its own success view (storefront link +
+    // "Ir al panel" button) once `POST /v1/admin/launch` succeeds, so this
+    // deliberately doesn't navigate away or re-fetch — either would yank the
+    // merchant off the confirmation screen they just landed on. It only
+    // keeps this wizard's local bookkeeping in sync (mirrors the pattern
+    // `handleStepDone` uses for the other 4 steps) so `doneSteps` reflects
+    // the completed launch if the merchant leaves via the stepper and
+    // returns.
+    setDoneSteps((prev) => new Set(prev).add('checklist'));
   }
 
   if (loading) {
@@ -100,16 +133,20 @@ export function OnboardingWizard({ hasTenant: initialHasTenant }: OnboardingWiza
       <Stepper currentKey={current} doneKeys={doneSteps} onSelect={handleSelect} />
       {current === 'create-store' ? <CreateStoreStep onCreated={handleTenantCreated} /> : null}
       {current === 'store_info' ? <StoreInfoStep onDone={() => handleStepDone('store_info')} /> : null}
-      {current === 'branding' ? <BrandingStep onDone={() => handleStepDone('branding')} /> : null}
+      {current === 'branding' ? (
+        <BrandingStep onDone={() => handleStepDone('branding')} theme={settings?.theme} />
+      ) : null}
       {current === 'products' ? <ProductsStep onDone={() => handleStepDone('products')} /> : null}
-      {current === 'payments' ? <PaymentsStep onDone={() => handleStepDone('payments')} /> : null}
+      {current === 'payments' ? (
+        <PaymentsStep onDone={() => handleStepDone('payments')} initialCodEnabled={settings?.payments.codEnabled} />
+      ) : null}
       {current === 'checklist' ? (
         <Card>
           <CardHeader>
             <CardTitle>Lista de lanzamiento</CardTitle>
           </CardHeader>
           <CardContent>
-            <ChecklistPanel />
+            <ChecklistPanel onLaunched={handleLaunched} />
           </CardContent>
         </Card>
       ) : null}

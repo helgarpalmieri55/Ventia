@@ -7,13 +7,20 @@ import { errorMessage } from '../../../../lib/errors';
 
 export interface PaymentsStepProps {
   onDone: () => void;
+  /** `payments.codEnabled` from the same `GET /v1/admin/settings` fetch
+   * `BrandingStep` uses (see wizard.tsx) — pre-fills the toggle so
+   * revisiting this already-completed step doesn't reset it back to the
+   * hardcoded default and silently flip a merchant's real setting off (or
+   * on) the next time they click "Continuar". `undefined` (not fetched yet,
+   * or this component used standalone) falls back to the previous default. */
+  initialCodEnabled?: boolean;
 }
 
 /** `payments` step: the P1 launch only supports cash-on-delivery ("pago
  * contraentrega"), so this step is a single toggle — `PATCH
  * /v1/admin/onboarding { step: 'payments', data: { codEnabled } }`. */
-export function PaymentsStep({ onDone }: PaymentsStepProps) {
-  const [codEnabled, setCodEnabled] = useState(true);
+export function PaymentsStep({ onDone, initialCodEnabled }: PaymentsStepProps) {
+  const [codEnabled, setCodEnabled] = useState(initialCodEnabled ?? true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 

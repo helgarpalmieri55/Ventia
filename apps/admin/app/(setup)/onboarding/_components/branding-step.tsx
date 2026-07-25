@@ -5,6 +5,7 @@ import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Inp
 import { FONT_PAIRS, RADIUS_OPTIONS, type FontPair, type Radius } from '@ventia/core';
 import { ApiError, apiFetch } from '../../../../lib/api';
 import { errorMessage } from '../../../../lib/errors';
+import { themeToFormState } from '../../../../lib/theme-form';
 
 /** Display labels for `@ventia/core`'s fixed 5-pair font catalog and radius
  * scale — the values themselves (`FONT_PAIRS`, `RADIUS_OPTIONS`) come from
@@ -32,20 +33,34 @@ interface ThemeResponse {
 
 export interface BrandingStepProps {
   onDone: () => void;
+  /** The tenant's current `theme` (from `GET /v1/admin/settings`), fetched
+   * once by the wizard and shared with `PaymentsStep` (see wizard.tsx) so
+   * this step doesn't need its own round-trip. `undefined` means "not
+   * fetched yet" — the wizard only renders this step once its settings load
+   * has resolved, but {@link themeToFormState} tolerates `undefined` too
+   * (falls back to defaults) so this component works standalone as well. */
+  theme?: Record<string, unknown>;
 }
 
 /** `branding` step: `PUT /v1/admin/settings/theme` (owner-only, replaces the
  * whole theme) followed by `PATCH /v1/admin/onboarding { step: 'branding' }`
  * to mark the wizard step done — two separate calls because the theme itself
  * has no onboarding-step concept (see settings-schemas.ts's doc comment on
- * `themeSchema` being a PUT, not a PATCH). */
-export function BrandingStep({ onDone }: BrandingStepProps) {
-  const [primary, setPrimary] = useState('#4f46e5');
-  const [background, setBackground] = useState('#ffffff');
-  const [foreground, setForeground] = useState('#111827');
-  const [fontPair, setFontPair] = useState<FontPair>(FONT_PAIRS[0]);
-  const [radius, setRadius] = useState<Radius>('md');
-  const [logoUrl, setLogoUrl] = useState('');
+ * `themeSchema` being a PUT, not a PATCH).
+ *
+ * Because that PUT is a full replace, the form must start from whatever
+ * theme is already saved — not hardcoded defaults — or revisiting this
+ * (already-completed) step and clicking "Continuar" would silently overwrite
+ * the merchant's real theme with placeholder colors. `theme` is passed down
+ * pre-fetched; {@link themeToFormState} does the saved-vs-default mapping. */
+export function BrandingStep({ onDone, theme }: BrandingStepProps) {
+  const initial = themeToFormState(theme);
+  const [primary, setPrimary] = useState(initial.primary);
+  const [background, setBackground] = useState(initial.background);
+  const [foreground, setForeground] = useState(initial.foreground);
+  const [fontPair, setFontPair] = useState<FontPair>(initial.fontPair);
+  const [radius, setRadius] = useState<Radius>(initial.radius);
+  const [logoUrl, setLogoUrl] = useState(initial.logoUrl);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 

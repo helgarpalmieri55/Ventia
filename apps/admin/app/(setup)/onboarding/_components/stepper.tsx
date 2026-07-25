@@ -1,7 +1,7 @@
 'use client';
 
 import { cn } from '@ventia/ui';
-import { WIZARD_STEP_DEFS, type WizardStepKey } from './wizard-steps';
+import { checklistStepClickable, WIZARD_STEP_DEFS, type WizardStepKey } from './wizard-steps';
 
 export interface StepperProps {
   currentKey: WizardStepKey;
@@ -11,14 +11,18 @@ export interface StepperProps {
 
 /** Stepper header: es-CO labels for the 6 wizard stages (task-3 brief).
  * Only done or current steps are clickable — a merchant can revisit anything
- * already completed, but can't skip ahead to a step it hasn't reached yet. */
+ * already completed, but can't skip ahead to a step it hasn't reached yet.
+ * 'checklist' is the one exception: it never gets marked "done" in
+ * `doneKeys` (there's no wizard step to mark it with), so it's additionally
+ * clickable whenever every real step is done — see
+ * {@link checklistStepClickable}'s doc comment. */
 export function Stepper({ currentKey, doneKeys, onSelect }: StepperProps) {
   return (
     <ol className="mb-6 flex flex-wrap gap-2" aria-label="Progreso de configuración">
       {WIZARD_STEP_DEFS.map((step, index) => {
         const isDone = doneKeys.has(step.key);
         const isCurrent = step.key === currentKey;
-        const clickable = isDone || isCurrent;
+        const clickable = isDone || isCurrent || (step.key === 'checklist' && checklistStepClickable(doneKeys));
 
         return (
           <li key={step.key}>
