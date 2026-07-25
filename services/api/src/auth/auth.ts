@@ -3,7 +3,10 @@ import { prismaAdapter } from 'better-auth/adapters/prisma';
 import type { PrismaClient } from '@ventia/db';
 import { ConsoleMailer, type Mailer } from '../mailer/mailer';
 
-export function createAuth(db: PrismaClient, opts: { secret: string; baseURL: string; mailer?: Mailer }) {
+export function createAuth(
+  db: PrismaClient,
+  opts: { secret: string; baseURL: string; mailer?: Mailer; trustedOrigins?: string[] },
+) {
   // Defaults to ConsoleMailer so callers that don't care about verification
   // email delivery (test/auth.ts, test/admin-helpers.ts — separate auth
   // instances built for fixture setup, not the app's own DI-wired one) still
@@ -17,6 +20,19 @@ export function createAuth(db: PrismaClient, opts: { secret: string; baseURL: st
     secret: opts.secret,
     baseURL: opts.baseURL,
     basePath: '/v1/auth',
+    // The admin app's browser-side calls hit better-auth through its OWN
+    // same-origin `/api` rewrite (apps/admin/next.config.ts), not
+    // `opts.baseURL` directly — so the Origin header on every state-changing
+    // request (sign-up, sign-in, ...) is the admin app's origin, which
+    // never matches `baseURL`'s origin by construction (that's the whole
+    // point of proxying through it). Without this, better-auth's
+    // originCheckMiddleware rejects every such call with 403 INVALID_ORIGIN
+    // the moment a request happens to carry a cookie header (found by the
+    // P1c-8 e2e: a fresh sign-up on a clean browser still has SOME cookie
+    // by the time it submits — Next.js dev sets one on the initial page
+    // load) — a real gap in every environment where the admin app isn't
+    // itself served from `opts.baseURL`'s origin, not just under test.
+    trustedOrigins: opts.trustedOrigins ?? [],
     emailAndPassword: {
       enabled: true,
       // Email verification is wired (sender below) but not required to sign

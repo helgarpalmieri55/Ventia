@@ -37,6 +37,11 @@ export class AdminMeController {
           secret: process.env.AUTH_SECRET ?? 'dev-secret-change-me',
           baseURL: process.env.API_URL ?? 'http://api.ventia.localhost',
           mailer,
+          // The admin app is the only browser-side caller of these routes
+          // (via its own same-origin `/api` proxy — see auth.ts's doc
+          // comment on `trustedOrigins`), so its origin is what needs to be
+          // trusted here, not the API's own.
+          trustedOrigins: [process.env.ADMIN_URL ?? 'http://admin.ventia.localhost'],
         }),
     },
     AdminSessionGuard,

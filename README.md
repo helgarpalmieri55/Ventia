@@ -129,6 +129,13 @@ accepts with `POST /v1/staff/accept`. Staff share `/v1/admin/products` etc. with
 plus the body — including verification and staff-invite links — to stdout instead of sending real
 email; grep the API's dev log for the token/URL when testing these flows locally.
 
+### P1 Definition-of-Done e2e
+
+Prerequisites: dev stack up + DB migrated (Quickstart steps 2–4). Then, from the repo root:
+`bash scripts/e2e.sh` — boots API/admin/storefront, runs the Playwright suite
+(`apps/admin/e2e/p1-dod.spec.ts`) through Caddy, tears servers down after. Local-run only, not
+part of `pnpm turbo run test`/CI.
+
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and on every
