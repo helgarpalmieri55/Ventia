@@ -1,20 +1,12 @@
-import { Card, CardContent, CardHeader, CardTitle } from '@ventia/ui';
+import { getMe } from '../../../lib/session';
+import { OnboardingWizard } from './_components/wizard';
 
-/** Placeholder: the onboarding wizard itself (store info → branding →
- * products → payments → launch checklist) is Task 3's scope. This page
- * exists so Task 2's redirect target (`(app)`'s no-tenant → /onboarding)
- * has somewhere real to land and the route group builds/typechecks. */
-export default function OnboardingPage() {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Configura tu tienda</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="text-sm text-muted-foreground">
-          El asistente de configuración de tu tienda estará disponible aquí.
-        </p>
-      </CardContent>
-    </Card>
-  );
+/** Server entry point: `SetupLayout` (this route's layout) already handles
+ * the `anonymous` case (redirect to /login) and tolerates `no-tenant`. This
+ * page only needs to tell the client wizard which of those two remaining
+ * states (`no-tenant` vs `member`) the visitor is in — the wizard itself
+ * decides which step to resume from `GET /v1/admin/onboarding`. */
+export default async function OnboardingPage() {
+  const session = await getMe();
+  return <OnboardingWizard hasTenant={session.kind === 'member'} />;
 }
