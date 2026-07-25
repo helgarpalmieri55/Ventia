@@ -1,0 +1,8 @@
+@import '@ventia/ui/styles.css';
+
+/* Storefront's own app/ and components/ sources aren't under @ventia/ui's
+   @source scan — declare them explicitly so Tailwind picks up utility
+   classes used in this app's pages and shared components (product-card.tsx,
+   product-grid.tsx, price.tsx). */
+@source './**/*.{ts,tsx}';
+@source '../components/**/*.{ts,tsx}';

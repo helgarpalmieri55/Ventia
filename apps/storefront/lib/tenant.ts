@@ -3,6 +3,14 @@ export interface ResolvedTenant {
   slug: string;
   name: string;
   status: 'draft' | 'live' | 'suspended';
+  // Whatever `GET /v1/tenant` returns for the tenant's saved theme JSON (see
+  // `services/api/src/tenants/tenant.controller.ts`) — `null` for a draft
+  // tenant that hasn't saved branding yet. Left as `unknown` rather than
+  // `TenantTheme | null` (lib/theme.ts) so this module stays independent of
+  // theme.ts; callers narrow it themselves, e.g.
+  // `buildThemeVars(tenant?.theme as TenantTheme | null ?? null)` in
+  // app/layout.tsx.
+  theme: unknown;
 }
 
 export async function fetchTenantForHost(

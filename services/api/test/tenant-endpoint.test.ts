@@ -46,6 +46,10 @@ describe('GET /v1/tenant', () => {
       .set('Host', 'demo.ventia.localhost');
     expect(res.status).toBe(200);
     expect(res.body.slug).toBe('demo');
+    // No theme saved yet for this tenant (created with `theme` left at its
+    // Prisma default of null) — the response still carries the key.
+    expect(res.body).toHaveProperty('theme');
+    expect(res.body.theme).toBeNull();
   });
 
   it('404s for unknown host', async () => {
