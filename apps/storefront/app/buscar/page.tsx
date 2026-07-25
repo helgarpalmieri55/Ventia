@@ -19,9 +19,14 @@ interface StorefrontProductListResult {
 export default async function SearchPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string }>;
+  searchParams: Promise<{ q?: string | string[] }>;
 }) {
   const { q } = await searchParams;
+  // Next.js parses a repeated query key (`?q=a&q=b`) as a string array, not
+  // just a string — the rendered form only ever emits one `q`, but this is a
+  // public, unauthenticated route, so a hand-crafted/bot-generated URL with a
+  // repeated key must not crash. Only the first value is used.
+  const rawQ = Array.isArray(q) ? q[0] : q;
   const host = (await headers()).get('host');
   const apiUrl = process.env.API_INTERNAL_URL ?? 'http://localhost:4000';
   const tenant = await fetchTenantForHost(host, apiUrl);
@@ -36,7 +41,7 @@ export default async function SearchPage({
   // `host` is guaranteed non-null here (see categorias/[slug]/page.tsx's
   // identical comment).
   const tenantHost = host as string;
-  const query = q?.trim();
+  const query = rawQ?.trim();
 
   // fetchStorefrontOrNull (not fetchStorefront): a transient upstream error
   // here should degrade this section to the empty-results state, not crash
@@ -56,7 +61,7 @@ export default async function SearchPage({
       {/* Plain GET form — no client component/JS needed, it navigates to
           /buscar?q=... on submit like any ordinary HTML form. */}
       <form action="/buscar" method="get" className="flex max-w-md gap-2">
-        <Input type="text" name="q" defaultValue={q} placeholder="¿Qué estás buscando?" aria-label="Buscar productos" />
+        <Input type="text" name="q" defaultValue={rawQ} placeholder="¿Qué estás buscando?" aria-label="Buscar productos" />
         <Button type="submit">Buscar</Button>
       </form>
 
