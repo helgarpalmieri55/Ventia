@@ -97,10 +97,24 @@ export function ImagesManager({ productId, images, onImageAdded, onImageRemoved 
         return;
       }
 
-      const image = await apiFetch<ProductImage>(`/v1/admin/products/${productId}/images`, {
-        method: 'POST',
-        body: JSON.stringify({ key: presign.key, position: images.length }),
-      });
+      let image: ProductImage;
+      try {
+        image = await apiFetch<ProductImage>(`/v1/admin/products/${productId}/images`, {
+          method: 'POST',
+          body: JSON.stringify({ key: presign.key, position: images.length }),
+        });
+      } catch (e) {
+        // The S3 PUT above already succeeded when confirm fails here, so this
+        // key is now an orphaned object with no ProductImage row pointing at
+        // it — tolerated for now (a P6 sweep is the planned cleanup for
+        // unconfirmed S3 objects, not this request). Reset the pending
+        // file/input state regardless, so a retry mints a fresh presign/key
+        // from a clean slate instead of resubmitting the same File against a
+        // now-stale presign response.
+        setFile(null);
+        if (inputRef.current) inputRef.current.value = '';
+        throw e;
+      }
       onImageAdded(image);
       setFile(null);
       if (inputRef.current) inputRef.current.value = '';
