@@ -5,27 +5,7 @@ import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Inp
 import { FONT_PAIRS, RADIUS_OPTIONS, type FontPair, type Radius } from '@ventia/core';
 import { ApiError, apiFetch } from '../../../../lib/api';
 import { errorMessage } from '../../../../lib/errors';
-import { themeToFormState } from '../../../../lib/theme-form';
-
-/** Display labels for `@ventia/core`'s fixed 5-pair font catalog and radius
- * scale — the values themselves (`FONT_PAIRS`, `RADIUS_OPTIONS`) come from
- * `@ventia/core` so this step can never drift from what `themeSchema`
- * actually accepts; only the es-CO copy for each option lives here. */
-const FONT_PAIR_LABELS: Record<FontPair, string> = {
-  'inter-lora': 'Inter + Lora',
-  'poppins-source': 'Poppins + Source Serif',
-  'montserrat-merriweather': 'Montserrat + Merriweather',
-  'raleway-open': 'Raleway + Open Sans',
-  'worksans-bitter': 'Work Sans + Bitter',
-};
-
-const RADIUS_LABELS: Record<Radius, string> = {
-  none: 'Sin bordes redondeados',
-  sm: 'Pequeño',
-  md: 'Mediano',
-  lg: 'Grande',
-  full: 'Circular',
-};
+import { FONT_PAIR_LABELS, RADIUS_LABELS, themeToFormState } from '../../../../lib/theme-form';
 
 interface ThemeResponse {
   theme: Record<string, unknown>;

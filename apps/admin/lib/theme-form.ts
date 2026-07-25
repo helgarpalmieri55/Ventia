@@ -27,6 +27,30 @@ export const DEFAULT_THEME_FORM: ThemeFormState = {
   logoUrl: '',
 };
 
+/** Display labels for `@ventia/core`'s fixed 5-pair font catalog — shared by
+ * the onboarding wizard's branding step and the configuración page's Marca
+ * tab (Task 7), so both theme forms show identical es-CO copy for the same
+ * fixed set of options rather than maintaining two copies. The option
+ * values themselves come from `@ventia/core` so neither form can drift from
+ * what `themeSchema` actually accepts. */
+export const FONT_PAIR_LABELS: Record<FontPair, string> = {
+  'inter-lora': 'Inter + Lora',
+  'poppins-source': 'Poppins + Source Serif',
+  'montserrat-merriweather': 'Montserrat + Merriweather',
+  'raleway-open': 'Raleway + Open Sans',
+  'worksans-bitter': 'Work Sans + Bitter',
+};
+
+/** Display labels for `@ventia/core`'s fixed radius scale — same sharing
+ * rationale as {@link FONT_PAIR_LABELS}. */
+export const RADIUS_LABELS: Record<Radius, string> = {
+  none: 'Sin bordes redondeados',
+  sm: 'Pequeño',
+  md: 'Mediano',
+  lg: 'Grande',
+  full: 'Circular',
+};
+
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
 function isHexColor(value: unknown): value is string {

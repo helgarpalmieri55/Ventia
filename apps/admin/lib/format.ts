@@ -4,6 +4,16 @@ const formatter = new Intl.NumberFormat('es-CO', {
   maximumFractionDigits: 0,
 });
 
+const dateFormatter = new Intl.DateTimeFormat('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+/** Formats an ISO date string (or `Date`) as an es-CO short date, e.g.
+ * `formatDateCO('2026-07-25T12:00:00.000Z') -> "25/07/2026"` — used for the
+ * "fecha"/"expira" columns on the equipo page's members and invites tables. */
+export function formatDateCO(value: string | Date): string {
+  const date = value instanceof Date ? value : new Date(value);
+  return dateFormatter.format(date);
+}
+
 // U+00A0 NO-BREAK SPACE: what Intl actually inserts between the currency
 // symbol and the digits (see the doc comment below) — named explicitly via
 // escape so the source has no invisible/ambiguous whitespace in it.

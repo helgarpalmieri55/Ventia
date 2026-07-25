@@ -189,140 +189,170 @@ export default function ImportarPage() {
     }
   }
 
+  // Once a commit succeeds, `commitResult` is set for good — nothing above
+  // is actionable anymore (the CSV that produced it is gone, and starting
+  // another import means starting clean, not re-validating stale rows), so
+  // the whole pre-commit section (instructions/upload, the dry-run stats +
+  // "Importar productos" button) collapses in favor of just this success
+  // summary and a reset button, per the T6 review rider.
+  function handleReset() {
+    setInputMode('file');
+    setCsvText('');
+    setFileName(null);
+    setSizeError(null);
+    setDryRunModel(null);
+    setLastDryRunCsv(null);
+    setDryRunLoading(false);
+    setDryRunError(null);
+    setCommitLoading(false);
+    setCommitError(null);
+    setCommitErrors(null);
+    setCommitResult(null);
+  }
+
   return (
     <Card className="w-full max-w-3xl">
       <CardHeader>
         <CardTitle>Importar productos desde CSV</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
-        <div className="flex flex-col gap-3">
-          <ol className="list-inside list-decimal text-sm text-foreground">
-            <li>Descarga la plantilla.</li>
-            <li>Llénala con tus productos (una fila por producto).</li>
-            <li>Valida el archivo para revisar el resumen antes de importar.</li>
-            <li>Importa cuando la validación no muestre errores.</li>
-          </ol>
-          <Button href="/api/v1/admin/import/template" variant="secondary" className="self-start">
-            Descargar plantilla
-          </Button>
-        </div>
-
-        <div className="flex flex-col gap-3">
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant={inputMode === 'file' ? 'default' : 'secondary'}
-              size="sm"
-              onClick={() => setInputMode('file')}
-            >
-              Subir archivo
-            </Button>
-            <Button
-              type="button"
-              variant={inputMode === 'text' ? 'default' : 'secondary'}
-              size="sm"
-              onClick={() => setInputMode('text')}
-            >
-              Pegar texto
-            </Button>
-          </div>
-
-          {inputMode === 'file' ? (
-            <div className="flex flex-col gap-2">
-              <input
-                type="file"
-                accept=".csv,text/csv"
-                onChange={(event) => void handleFileChange(event)}
-                className="text-sm text-foreground"
-              />
-              {fileName ? <p className="text-sm text-muted-foreground">Archivo cargado: {fileName}</p> : null}
-            </div>
-          ) : (
-            <textarea
-              className={TEXTAREA_CLASS}
-              value={csvText}
-              onChange={handleTextareaChange}
-              placeholder="Pega aquí el contenido del CSV"
-            />
-          )}
-
-          {sizeError ? <Alert variant="error">{sizeError}</Alert> : null}
-
-          <Button
-            type="button"
-            variant="secondary"
-            className="self-start"
-            disabled={!csvText.trim() || !!sizeError || dryRunLoading}
-            onClick={() => void handleValidate()}
-          >
-            {dryRunLoading ? 'Validando…' : 'Validar archivo'}
-          </Button>
-          {dryRunError ? <Alert variant="error">{dryRunError}</Alert> : null}
-        </div>
-
-        {dryRunModel ? (
-          <div className="flex flex-col gap-4 border-t border-border pt-6">
-            {dirty ? (
-              <Alert variant="info">El archivo cambió desde la última validación. Vuelve a validarlo antes de importar.</Alert>
-            ) : null}
-
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <SummaryStat label="Válidas" value={dryRunModel.valid} />
-              <SummaryStat label="Con errores" value={dryRunModel.invalid} />
-              <SummaryStat label="Nuevos" value={dryRunModel.creates} />
-              <SummaryStat label="Actualizaciones" value={dryRunModel.updates} />
-            </div>
-
-            {dryRunModel.limitExceeded ? (
-              <Alert variant="error">{errorMessage(new ApiError(402, 'PLAN_LIMIT_EXCEEDED'))}</Alert>
-            ) : null}
-
-            {dryRunModel.errors.length > 0 ? (
-              <ErrorsTable
-                errors={dryRunModel.errors}
-                note={
-                  dryRunModel.moreErrorRows > 0
-                    ? `y ${dryRunModel.moreErrorRows} fila${dryRunModel.moreErrorRows === 1 ? '' : 's'} más con errores`
-                    : undefined
-                }
-              />
-            ) : null}
-
-            <Button
-              type="button"
-              className="self-start"
-              disabled={!commitEnabled || commitLoading}
-              onClick={() => void handleCommit()}
-            >
-              {commitLoading ? 'Importando…' : 'Importar productos'}
-            </Button>
-          </div>
-        ) : null}
-
-        {commitError ? <Alert variant="error">{commitError}</Alert> : null}
-
-        {commitErrors ? (
-          <ErrorsTable
-            errors={commitErrors}
-            note={
-              commitErrors.length >= MAX_DISPLAYED_ERRORS
-                ? 'El archivo tiene más errores de los que se muestran aquí. Corrígelos y vuelve a validar.'
-                : undefined
-            }
-          />
-        ) : null}
-
         {commitResult ? (
           <Alert variant="success" className="flex flex-col gap-3">
             <span>
               Se crearon {commitResult.created} producto{commitResult.created === 1 ? '' : 's'} y se actualizaron{' '}
               {commitResult.updated}.
             </span>
-            <Button href="/productos" variant="secondary" className="self-start">
-              Ver productos
-            </Button>
+            <div className="flex gap-3">
+              <Button href="/productos" variant="secondary">
+                Ver productos
+              </Button>
+              <Button type="button" onClick={handleReset}>
+                Importar otro archivo
+              </Button>
+            </div>
           </Alert>
-        ) : null}
+        ) : (
+          <>
+            <div className="flex flex-col gap-3">
+              <ol className="list-inside list-decimal text-sm text-foreground">
+                <li>Descarga la plantilla.</li>
+                <li>Llénala con tus productos (una fila por producto).</li>
+                <li>Valida el archivo para revisar el resumen antes de importar.</li>
+                <li>Importa cuando la validación no muestre errores.</li>
+              </ol>
+              <Button href="/api/v1/admin/import/template" variant="secondary" className="self-start">
+                Descargar plantilla
+              </Button>
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant={inputMode === 'file' ? 'default' : 'secondary'}
+                  size="sm"
+                  onClick={() => setInputMode('file')}
+                >
+                  Subir archivo
+                </Button>
+                <Button
+                  type="button"
+                  variant={inputMode === 'text' ? 'default' : 'secondary'}
+                  size="sm"
+                  onClick={() => setInputMode('text')}
+                >
+                  Pegar texto
+                </Button>
+              </div>
+
+              {inputMode === 'file' ? (
+                <div className="flex flex-col gap-2">
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(event) => void handleFileChange(event)}
+                    className="text-sm text-foreground"
+                  />
+                  {fileName ? <p className="text-sm text-muted-foreground">Archivo cargado: {fileName}</p> : null}
+                </div>
+              ) : (
+                <textarea
+                  className={TEXTAREA_CLASS}
+                  value={csvText}
+                  onChange={handleTextareaChange}
+                  placeholder="Pega aquí el contenido del CSV"
+                />
+              )}
+
+              {sizeError ? <Alert variant="error">{sizeError}</Alert> : null}
+
+              <Button
+                type="button"
+                variant="secondary"
+                className="self-start"
+                disabled={!csvText.trim() || !!sizeError || dryRunLoading}
+                onClick={() => void handleValidate()}
+              >
+                {dryRunLoading ? 'Validando…' : 'Validar archivo'}
+              </Button>
+              {dryRunError ? <Alert variant="error">{dryRunError}</Alert> : null}
+            </div>
+
+            {dryRunModel ? (
+              <div className="flex flex-col gap-4 border-t border-border pt-6">
+                {dirty ? (
+                  <Alert variant="info">
+                    El archivo cambió desde la última validación. Vuelve a validarlo antes de importar.
+                  </Alert>
+                ) : null}
+
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <SummaryStat label="Válidas" value={dryRunModel.valid} />
+                  <SummaryStat label="Con errores" value={dryRunModel.invalid} />
+                  <SummaryStat label="Nuevos" value={dryRunModel.creates} />
+                  <SummaryStat label="Actualizaciones" value={dryRunModel.updates} />
+                </div>
+
+                {dryRunModel.limitExceeded ? (
+                  <Alert variant="error">{errorMessage(new ApiError(402, 'PLAN_LIMIT_EXCEEDED'))}</Alert>
+                ) : null}
+
+                {dryRunModel.errors.length > 0 ? (
+                  <ErrorsTable
+                    errors={dryRunModel.errors}
+                    note={
+                      dryRunModel.moreErrorRows > 0
+                        ? `y ${dryRunModel.moreErrorRows} fila${dryRunModel.moreErrorRows === 1 ? '' : 's'} más con errores`
+                        : undefined
+                    }
+                  />
+                ) : null}
+
+                <Button
+                  type="button"
+                  className="self-start"
+                  disabled={!commitEnabled || commitLoading}
+                  onClick={() => void handleCommit()}
+                >
+                  {commitLoading ? 'Importando…' : 'Importar productos'}
+                </Button>
+              </div>
+            ) : null}
+
+            {commitError ? <Alert variant="error">{commitError}</Alert> : null}
+
+            {commitErrors ? (
+              <ErrorsTable
+                errors={commitErrors}
+                note={
+                  commitErrors.length >= MAX_DISPLAYED_ERRORS
+                    ? 'El archivo tiene más errores de los que se muestran aquí. Corrígelos y vuelve a validar.'
+                    : undefined
+                }
+              />
+            ) : null}
+          </>
+        )}
       </CardContent>
     </Card>
   );
