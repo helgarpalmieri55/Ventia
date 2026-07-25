@@ -115,6 +115,12 @@ The `/v1/admin/*` endpoints (products, categories, variants, images, stock) prov
 catalog CRUD, plus bulk CSV import at `/v1/admin/import/{template,dry-run,commit}` — fetch a
 starter file from `GET /v1/admin/import/template`.
 
+The public `/v1/storefront/*` endpoints (categories, product list/detail, content) mirror that
+pattern for the storefront: no auth, tenant-scoped via the same `x-tenant-domain`/`Host`
+resolution. Admin mutations trigger on-demand ISR revalidation on the storefront via
+`REVALIDATE_SECRET` and `STOREFRONT_INTERNAL_URL` (see `services/api/src/storefront/revalidate.ts`
+and `apps/storefront/app/api/revalidate/route.ts`).
+
 ### Onboarding, staff & launch
 
 A signed-up user provisions their tenant via `POST /v1/admin/onboarding/tenant`, then drives the
@@ -138,12 +144,11 @@ part of `pnpm turbo run test`/CI.
 
 ## Deviations
 
-- **Suspended storefront returns 200, not 503 (P1):** a suspended tenant's storefront renders an
-  "unavailable" message (`apps/storefront/app/page.tsx`) at HTTP 200 instead of a real 503 — the
-  Next.js App Router has no ergonomic way for a page component to set a non-200 status without
-  reaching for `notFound()`/`redirect()` special cases that don't fit "temporarily unavailable"
-  semantics. The strict 503, along with archived-products-404-on-storefront (also P1-deferred —
-  see `docs/SPEC.md`'s M2 AC), arrives with the storefront rebuild in P2.
+- **Suspended storefront returns 200, not 503 — closed in P2a.** `apps/storefront/middleware.ts`
+  now fetches `/v1/tenant` ahead of the route tree and returns a real HTTP 503 for a suspended
+  tenant (the App Router still has no way for a page component to set a non-200 status, so the
+  check lives in middleware instead). Archived products also now 404 on their PDP URL
+  (`services/api/src/storefront/products.service.ts`'s `detail()` only queries `status: 'active'`).
 
 ## Production notes
 
