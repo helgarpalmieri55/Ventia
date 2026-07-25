@@ -49,6 +49,23 @@ export function authErrorMessage(e: AuthError): string {
   return 'Ocurrió un error inesperado. Intenta de nuevo.';
 }
 
+/** Maps an auth error code to the field it belongs to, enabling field-level
+ * error display in FormField (which wires aria-invalid + aria-describedby).
+ * Codes that map to a field get a focused error message; ambiguous codes
+ * (INVALID_EMAIL_OR_PASSWORD) return null so they stay as page-level alerts. */
+export function fieldForAuthCode(code?: string): 'email' | 'password' | null {
+  switch (code) {
+    case 'INVALID_EMAIL':
+    case 'USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL':
+      return 'email';
+    case 'PASSWORD_TOO_SHORT':
+    case 'PASSWORD_TOO_LONG':
+      return 'password';
+    default:
+      return null;
+  }
+}
+
 async function postAuth(path: string, body: unknown): Promise<void> {
   let response: Response;
   try {

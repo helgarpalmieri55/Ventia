@@ -3,25 +3,37 @@
 import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Input } from '@ventia/ui';
-import { AuthError, authErrorMessage, signInEmail } from '../../../lib/auth';
+import { AuthError, authErrorMessage, signInEmail, fieldForAuthCode } from '../../../lib/auth';
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    setFieldErrors({});
     setSubmitting(true);
     try {
       await signInEmail(email, password);
       router.push('/');
       router.refresh();
     } catch (e) {
-      setError(e instanceof AuthError ? authErrorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
+      if (e instanceof AuthError) {
+        const message = authErrorMessage(e);
+        const field = fieldForAuthCode(e.code);
+        if (field) {
+          setFieldErrors({ [field]: message });
+        } else {
+          setError(message);
+        }
+      } else {
+        setError('Ocurrió un error inesperado. Intenta de nuevo.');
+      }
       setSubmitting(false);
     }
   }
@@ -34,7 +46,7 @@ export default function LoginPage() {
       <CardContent>
         <form className="flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
           {error ? <Alert variant="error">{error}</Alert> : null}
-          <FormField label="Correo" htmlFor="email">
+          <FormField label="Correo" htmlFor="email" error={fieldErrors.email}>
             <Input
               type="email"
               autoComplete="email"
@@ -43,7 +55,7 @@ export default function LoginPage() {
               onChange={(event) => setEmail(event.target.value)}
             />
           </FormField>
-          <FormField label="Contraseña" htmlFor="password">
+          <FormField label="Contraseña" htmlFor="password" error={fieldErrors.password}>
             <Input
               type="password"
               autoComplete="current-password"
