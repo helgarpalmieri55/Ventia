@@ -59,35 +59,38 @@ describe('/v1/admin/products', () => {
       .spyOn(global, 'fetch')
       .mockResolvedValue(new Response(JSON.stringify({ revalidated: true }), { status: 200 }));
 
-    const res = await createProduct(cookie, { name: 'Gorra Deportiva' });
+    try {
+      const res = await createProduct(cookie, { name: 'Gorra Deportiva' });
 
-    expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({
-      tenantId,
-      name: 'Gorra Deportiva',
-      slug: 'gorra-deportiva',
-      priceCents: 50_000,
-      status: 'draft',
-      taxRate: '19',
-      stock: 0,
-      trackInventory: true,
-      descriptionMd: '',
-    });
-    expect(res.body.images).toEqual([]);
-    expect(res.body.variants).toEqual([]);
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({
+        tenantId,
+        name: 'Gorra Deportiva',
+        slug: 'gorra-deportiva',
+        priceCents: 50_000,
+        status: 'draft',
+        taxRate: '19',
+        stock: 0,
+        trackInventory: true,
+        descriptionMd: '',
+      });
+      expect(res.body.images).toEqual([]);
+      expect(res.body.variants).toEqual([]);
 
-    // The create mutation fires a (fire-and-forget) ISR revalidation call for
-    // the storefront's products tag — asserting the fetch is attempted, not
-    // awaited by the request, since revalidateStorefrontTag never rejects the
-    // handler's promise chain.
-    expect(fetchSpy).toHaveBeenCalledWith(
-      expect.stringContaining('/api/revalidate'),
-      expect.objectContaining({
-        method: 'POST',
-        body: expect.stringContaining(`products:${tenantId}`),
-      }),
-    );
-    fetchSpy.mockRestore();
+      // The create mutation fires a (fire-and-forget) ISR revalidation call for
+      // the storefront's products tag — asserting the fetch is attempted, not
+      // awaited by the request, since revalidateStorefrontTag never rejects the
+      // handler's promise chain.
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/api/revalidate'),
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining(`products:${tenantId}`),
+        }),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it('dedups slugs on collision: camiseta, then camiseta-2', async () => {

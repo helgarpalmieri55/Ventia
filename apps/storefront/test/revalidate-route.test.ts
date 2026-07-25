@@ -26,4 +26,14 @@ describe('POST /api/revalidate', () => {
     const res = await POST(req);
     expect(res.status).toBe(401);
   });
+
+  it('400s on a missing tag', async () => {
+    process.env.REVALIDATE_SECRET = 'test-secret';
+    const req = new Request('http://localhost/api/revalidate', {
+      method: 'POST',
+      body: JSON.stringify({ secret: 'test-secret' }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+  });
 });
