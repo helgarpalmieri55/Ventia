@@ -73,11 +73,16 @@ export class StaffService {
     });
 
     const tenant = await db.tenant.findUniqueOrThrow({ where: { id: tenantId } });
-    const apiUrl = process.env.API_URL ?? 'http://api.ventia.localhost';
+    // The admin app's client-rendered accept page, NOT the API's own
+    // `/v1/staff/accept` endpoint: that endpoint is POST-only (see
+    // acceptInvite below), so a browser GET-ing it 404s. `/aceptar-invitacion`
+    // reads the token off the query string and issues the real POST itself.
+    // Same env var (and same fallback) as admin.module.ts's trustedOrigins.
+    const adminUrl = process.env.ADMIN_URL ?? 'http://admin.ventia.localhost';
     await this.mailer.send({
       to: input.email,
       subject: `Invitación a ${tenant.name} — Ventia`,
-      text: `Te invitaron a unirte a ${tenant.name} en Ventia como parte del equipo.\n\nAcepta la invitación aquí:\n${apiUrl}/v1/staff/accept?token=${raw}\n\nEste enlace vence en 7 días.`,
+      text: `Te invitaron a unirte a ${tenant.name} en Ventia como parte del equipo.\n\nAcepta la invitación aquí:\n${adminUrl}/aceptar-invitacion?token=${raw}\n\nEste enlace vence en 7 días.`,
     });
 
     await writeAudit(session, 'staff.invite', 'StaffInvite', created.id, { email: input.email });

@@ -20,8 +20,8 @@ import { test, expect, type Locator, type Page } from '@playwright/test';
  * mailer.ts) logs every outbound email — `[mail] to=<addr> subject=...`
  * followed by the body, verification/invite links included — to its own
  * stdout instead of sending anything real. `scripts/e2e.sh` tees that
- * stdout to a file and exports its path as `E2E_API_LOG`; `waitForMailUrl`/
- * `waitForMailToken` below just poll that file for the line this test's own
+ * stdout to a file and exports its path as `E2E_API_LOG`; `waitForVerificationUrl`/
+ * `waitForInviteUrl` below just poll that file for the line this test's own
  * signup/invite action just produced, exactly like a developer eyeballing
  * the API's terminal would.
  */
@@ -82,14 +82,13 @@ function waitForVerificationUrl(toEmail: string): Promise<string> {
   return waitForMailMatch(toEmail, /(https?:\/\/\S+)/);
 }
 
-/** The staff-invite email embeds `...token=${raw}` (48 hex chars — see
- * staff.service.ts) in a link on the API's own domain
- * (`${apiUrl}/v1/staff/accept?token=...`), which is a POST-only endpoint and
- * not something a browser can just GET — the admin app's actual accept flow
- * is the client-rendered `/aceptar-invitacion?token=...` page, so this only
- * pulls the token out of the emailed link rather than following it as-is. */
-function waitForInviteToken(toEmail: string): Promise<string> {
-  return waitForMailMatch(toEmail, /token=([0-9a-f]{48})/);
+/** The staff-invite email links straight to the admin app's client-rendered
+ * accept page (`${ADMIN_URL}/aceptar-invitacion?token=...` — see
+ * staff.service.ts#createInvite), so this pulls the whole URL out of the
+ * emailed link and the test below follows it via `page.goto` like a real
+ * invitee would, rather than only extracting the token. */
+function waitForInviteUrl(toEmail: string): Promise<string> {
+  return waitForMailMatch(toEmail, /(https?:\/\/\S+)/);
 }
 
 /** A 10-row CSV using only the columns the binding contract calls out
@@ -375,7 +374,7 @@ test.describe('P1 Definition-of-Done', () => {
       await expect(page.getByRole('heading', { name: 'Invitación enviada' })).toBeVisible();
     });
 
-    const inviteToken = await waitForInviteToken(STAFF_EMAIL);
+    const inviteUrl = await waitForInviteUrl(STAFF_EMAIL);
 
     const staffContext = await browser.newContext();
     try {
@@ -393,7 +392,7 @@ test.describe('P1 Definition-of-Done', () => {
           urlCheck(staffPage, /\/onboarding/, '/onboarding'),
         );
 
-        await staffPage.goto(`/aceptar-invitacion?token=${inviteToken}`);
+        await staffPage.goto(inviteUrl);
         await expect(staffPage.getByRole('heading', { name: 'Aceptar invitación' })).toBeVisible();
         await retryUntil(async () => {
           await staffPage.getByRole('button', { name: 'Aceptar invitación' }).click();

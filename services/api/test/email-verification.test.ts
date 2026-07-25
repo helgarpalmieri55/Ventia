@@ -92,11 +92,20 @@ describe('email verification', () => {
 
     const mail = sent.find((m) => m.to === email)!;
     const url = extractVerifyUrl(mail);
+    // auth.ts's sendVerificationEmail hook overrides the embedded
+    // callbackURL to the admin app's origin (see that file's doc comment) —
+    // asserted below via the redirect Location, not just the DB flip,
+    // since an unqualified "/" would ALSO flip emailVerified while still
+    // 404ing the browser on the API's own origin.
+    expect(url.searchParams.get('callbackURL')).toBe('http://admin.ventia.localhost/');
 
     const verifyRes = await request(app.getHttpServer()).get(`${url.pathname}${url.search}`);
-    // better-auth redirects (302) to callbackURL ("/" by default) on success;
-    // the DB flip is what this test actually cares about.
-    expect([200, 302]).toContain(verifyRes.status);
+    // better-auth redirects (302) to callbackURL on success; the DB flip is
+    // what this test actually cares about, but the redirect target is what
+    // Fix 3 (P1 pre-merge) is actually about — a browser landing on the
+    // admin origin instead of a bare API 404.
+    expect(verifyRes.status).toBe(302);
+    expect(verifyRes.headers.location).toBe('http://admin.ventia.localhost/');
 
     const after = await platformDb.user.findUniqueOrThrow({ where: { email } });
     expect(after.emailVerified).toBe(true);

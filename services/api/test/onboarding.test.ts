@@ -134,6 +134,37 @@ describe('POST /v1/admin/onboarding/tenant', () => {
     expect(resA.body.tenant.slug).toBe('tienda-duplicada');
     expect(resB.body.tenant.slug).toBe('tienda-duplicada-2');
   });
+
+  it('400 VALIDATION_FAILED for an explicit reserved slug', async () => {
+    const cookie = await signUpAndGetCookie('provision-reserved-slug@demo.co');
+
+    const res = await provisionTenant(cookie, { storeName: 'Mi Tienda', slug: 'admin' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'VALIDATION_FAILED', details: { slug: 'slug reservado' } });
+  });
+
+  it('400 VALIDATION_FAILED for an explicit malformed slug (uppercase, dots)', async () => {
+    const cookie = await signUpAndGetCookie('provision-malformed-slug@demo.co');
+
+    const res = await provisionTenant(cookie, { storeName: 'Mi Tienda', slug: 'Mi.Tienda' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+  });
+
+  it('a store named "Admin" auto-resolves its slug past the reserved word (admin -> admin-2)', async () => {
+    const cookie = await signUpAndGetCookie('provision-auto-reserved@demo.co');
+
+    const res = await provisionTenant(cookie, { storeName: 'Admin' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.tenant.slug).not.toBe('admin');
+    expect(res.body.tenant.slug).toBe('admin-2');
+
+    const reservedCount = await platformDb.tenant.count({ where: { slug: 'admin' } });
+    expect(reservedCount).toBe(0);
+  });
 });
 
 describe('onboarding wizard state', () => {

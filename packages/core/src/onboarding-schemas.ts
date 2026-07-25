@@ -1,8 +1,16 @@
 import { z } from 'zod';
 
+/** Same alphabet slugify() produces (lowercase, digits, single internal
+ * hyphens, no leading/trailing hyphen) — an explicitly-supplied slug must
+ * match it too, since it ends up as a subdomain label (`${slug}.${rootDomain}`,
+ * see onboarding.service.ts#provisionTenant) where uppercase, dots, or a
+ * leading/trailing hyphen are either invalid or silently mismatch what DNS
+ * actually resolves. */
+const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
 export const tenantProvisionSchema = z.object({
   storeName: z.string().min(2).max(80),
-  slug: z.string().min(1).max(60).optional(),
+  slug: z.string().min(1).max(60).regex(SLUG_PATTERN, 'slug inválido').optional(),
 });
 
 /** `store_info` step payload — see onboardingStepSchema's doc comment for how

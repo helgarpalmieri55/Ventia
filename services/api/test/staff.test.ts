@@ -54,9 +54,12 @@ function accept(cookie: string, token: string) {
   return request(app.getHttpServer()).post('/v1/staff/accept').set('cookie', cookie).send({ token });
 }
 
-/** Pulls the raw accept token out of a captured invite mail's text body. */
+/** Pulls the raw accept token out of a captured invite mail's text body. The
+ * link points at the admin app's client-rendered accept page
+ * (`/aceptar-invitacion?token=...`), not the API's own POST-only
+ * `/v1/staff/accept` — see staff.service.ts#createInvite. */
 function extractToken(mail: MailMessage): string {
-  const match = mail.text.match(/\/v1\/staff\/accept\?token=([0-9a-f]{48})/);
+  const match = mail.text.match(/\/aceptar-invitacion\?token=([0-9a-f]{48})/);
   if (!match) throw new Error(`no accept token found in captured mail text: ${mail.text}`);
   return match[1]!;
 }
@@ -76,7 +79,7 @@ describe('POST /v1/admin/staff/invites → POST /v1/staff/accept (full flow)', (
     expect(mail).toBeTruthy();
     expect(mail!.subject).toContain('Ventia');
     expect(mail!.subject).toContain('Invitación');
-    expect(mail!.text).toContain('/v1/staff/accept?token=');
+    expect(mail!.text).toContain('/aceptar-invitacion?token=');
     const token = extractToken(mail!);
 
     const inviteeCookie = await signUpAndGetCookie(inviteeEmail);

@@ -15,6 +15,37 @@ import { writeAudit } from '../catalog/audit';
 
 const MAX_SLUG_SUFFIX = 20;
 
+/** Slugs that would collide with an infrastructure-meaningful subdomain
+ * label (`${slug}.${rootDomain}` becomes the tenant's storefront host — see
+ * provisionTenant below) — `admin.ventia.localhost`, `api.ventia.localhost`,
+ * etc. are all real, non-tenant routes this platform itself serves. An
+ * EXPLICIT slug matching one of these is rejected outright; an
+ * AUTO-DERIVED one (slugify(storeName) landing on a reserved word, e.g. a
+ * store literally named "Admin") is instead routed through the same
+ * suffix-dedup uniqueTenantSlug already does for taken slugs, so "Admin"
+ * silently becomes "admin-2" rather than failing signup. */
+const RESERVED_SLUGS = new Set([
+  'www',
+  'api',
+  'admin',
+  'app',
+  'mail',
+  'ftp',
+  'ns1',
+  'ns2',
+  'smtp',
+  'imap',
+  'pop',
+  'webmail',
+  'cdn',
+  'static',
+  'assets',
+  'status',
+  'dev',
+  'staging',
+  'test',
+]);
+
 export interface LaunchChecklist {
   storeInfo: boolean;
   emailVerified: boolean;
@@ -50,11 +81,17 @@ export class OnboardingService {
       throw new HttpException({ error: 'ALREADY_HAS_TENANT' }, 409);
     }
     const input = parseOr400(tenantProvisionSchema, body);
+    if (input.slug && RESERVED_SLUGS.has(input.slug)) {
+      throw new HttpException({ error: 'VALIDATION_FAILED', details: { slug: 'slug reservado' } }, 400);
+    }
     const base = input.slug ?? slugify(input.storeName);
     const rootDomain = process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost';
 
     const tenant = await platformDb.$transaction(async (tx) => {
-      const slug = await this.uniqueTenantSlug(tx, base);
+      // Only auto-derived slugs get bumped past a reserved word (dedup
+      // suffix, same as a slug clash) — an explicit reserved slug was already
+      // rejected above, so `avoidReserved` only ever applies here.
+      const slug = await this.uniqueTenantSlug(tx, base, input.slug === undefined);
 
       const created = await tx.tenant.create({
         data: { slug, name: input.storeName, status: 'draft', plan: 'basico' },
@@ -111,10 +148,18 @@ export class OnboardingService {
 
   /** Finds a tenant-unique slug: `base`, then `base-2`, ... `base-20` — same
    * dedup shape as products.service.ts's uniqueSlug, against Tenant.slug
-   * instead of Product.slug. Throws 409 SLUG_TAKEN if all 20 are taken. */
-  private async uniqueTenantSlug(tx: Prisma.TransactionClient, base: string): Promise<string> {
+   * instead of Product.slug. When `avoidReserved` is set (auto-derived
+   * slugs only — see provisionTenant), a candidate landing on a reserved
+   * word is skipped exactly like a taken one, so e.g. "Admin" resolves to
+   * "admin-2" instead of "admin". Throws 409 SLUG_TAKEN if all 20 are taken. */
+  private async uniqueTenantSlug(
+    tx: Prisma.TransactionClient,
+    base: string,
+    avoidReserved: boolean,
+  ): Promise<string> {
     for (let suffix = 1; suffix <= MAX_SLUG_SUFFIX; suffix++) {
       const candidate = suffix === 1 ? base : `${base}-${suffix}`;
+      if (avoidReserved && RESERVED_SLUGS.has(candidate)) continue;
       const clash = await tx.tenant.findFirst({ where: { slug: candidate }, select: { id: true } });
       if (!clash) return candidate;
     }

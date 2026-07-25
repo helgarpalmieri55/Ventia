@@ -50,10 +50,30 @@ export function createAuth(
     emailVerification: {
       sendOnSignUp: true,
       sendVerificationEmail: async ({ user, url }) => {
+        // `url` is `${baseURL}/v1/auth/verify-email?token=...&callbackURL=<..>`
+        // (see the installed better-auth@1.6.25 sources,
+        // dist/api/routes/email-verification.mjs#sendVerificationEmailFn) —
+        // `callbackURL` defaults to an unqualified "/" unless the caller's
+        // signUpEmail/sendVerificationEmail request supplied one, and
+        // verify-email's handler does `ctx.redirect(callbackURL)` verbatim on
+        // success, with NO resolution against baseURL. An unqualified "/"
+        // therefore 302s a browser to `${baseURL}/` — the API's own origin,
+        // which has no route there and 404s — instead of anywhere in the
+        // admin app. Overriding it here, at the one place every
+        // verification email is composed regardless of caller, guarantees
+        // the link always lands the user back on the admin app no matter
+        // who triggered the send (the real signup form, a direct API test,
+        // or a resend). This is a same-origin redirect from the admin app's
+        // own point of view: trustedOrigins (admin.module.ts) already lists
+        // ADMIN_URL, which is what verify-email's own originCheck validates
+        // this callbackURL against.
+        const adminUrl = process.env.ADMIN_URL ?? 'http://admin.ventia.localhost';
+        const verifyUrl = new URL(url);
+        verifyUrl.searchParams.set('callbackURL', `${adminUrl}/`);
         await mailer.send({
           to: user.email,
           subject: 'Verifica tu correo — Ventia',
-          text: `Hola,\n\nVerifica tu correo haciendo clic en el siguiente enlace:\n${url}\n\nSi no creaste esta cuenta, ignora este mensaje.`,
+          text: `Hola,\n\nVerifica tu correo haciendo clic en el siguiente enlace:\n${verifyUrl.toString()}\n\nSi no creaste esta cuenta, ignora este mensaje.`,
         });
       },
     },
