@@ -6,7 +6,7 @@ import { ApiError, apiFetch } from '../../../../lib/api';
 import { errorMessage } from '../../../../lib/errors';
 
 export interface PaymentsStepProps {
-  onDone: () => void;
+  onDone: (codEnabled: boolean) => void;
   /** `payments.codEnabled` from the same `GET /v1/admin/settings` fetch
    * `BrandingStep` uses (see wizard.tsx) — pre-fills the toggle so
    * revisiting this already-completed step doesn't reset it back to the
@@ -32,7 +32,7 @@ export function PaymentsStep({ onDone, initialCodEnabled }: PaymentsStepProps) {
         method: 'PATCH',
         body: JSON.stringify({ step: 'payments', data: { codEnabled } }),
       });
-      onDone();
+      onDone(codEnabled);
     } catch (e) {
       setError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
       setSubmitting(false);

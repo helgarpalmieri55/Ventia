@@ -32,7 +32,7 @@ interface ThemeResponse {
 }
 
 export interface BrandingStepProps {
-  onDone: () => void;
+  onDone: (savedTheme: Record<string, unknown>) => void;
   /** The tenant's current `theme` (from `GET /v1/admin/settings`), fetched
    * once by the wizard and shared with `PaymentsStep` (see wizard.tsx) so
    * this step doesn't need its own round-trip. `undefined` means "not
@@ -69,20 +69,21 @@ export function BrandingStep({ onDone, theme }: BrandingStepProps) {
     setError(null);
     setSubmitting(true);
     try {
+      const themePayload = {
+        colors: { primary, background, foreground },
+        fontPair,
+        radius,
+        ...(logoUrl ? { logoUrl } : {}),
+      };
       await apiFetch<ThemeResponse>('/v1/admin/settings/theme', {
         method: 'PUT',
-        body: JSON.stringify({
-          colors: { primary, background, foreground },
-          fontPair,
-          radius,
-          ...(logoUrl ? { logoUrl } : {}),
-        }),
+        body: JSON.stringify(themePayload),
       });
       await apiFetch('/v1/admin/onboarding', {
         method: 'PATCH',
         body: JSON.stringify({ step: 'branding' }),
       });
-      onDone();
+      onDone(themePayload);
     } catch (e) {
       setError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
       setSubmitting(false);

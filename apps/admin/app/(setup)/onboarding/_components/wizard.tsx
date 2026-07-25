@@ -5,6 +5,7 @@ import { Alert, Card, CardContent, CardHeader, CardTitle, Spinner } from '@venti
 import { ONBOARDING_STEPS, type OnboardingStep } from '@ventia/core';
 import { ApiError, apiFetch } from '../../../../lib/api';
 import { errorMessage } from '../../../../lib/errors';
+import { mergeSavedSettings, mergeSavedPaymentsSettings } from '../../../../lib/settings-merge';
 import { ChecklistPanel } from '../../../_components/checklist-panel';
 import { Stepper } from './stepper';
 import { checklistStepClickable, STEP_ORDER, type WizardStepKey } from './wizard-steps';
@@ -99,6 +100,21 @@ export function OnboardingWizard({ hasTenant: initialHasTenant }: OnboardingWiza
     setCurrent(STEP_ORDER[index + 1] ?? 'checklist');
   }
 
+  function handleBrandingDone(theme: Record<string, unknown>) {
+    // Propagate the newly-saved theme back into the settings snapshot so
+    // any later remount of this step pre-fills from fresh data, not the
+    // original stale snapshot.
+    setSettings((prev) => mergeSavedSettings(prev, { theme }));
+    handleStepDone('branding');
+  }
+
+  function handlePaymentsDone(codEnabled: boolean) {
+    // Propagate the newly-saved payments setting back into the settings
+    // snapshot so any later remount pre-fills from the fresh value.
+    setSettings((prev) => mergeSavedPaymentsSettings(prev, { codEnabled }));
+    handleStepDone('payments');
+  }
+
   function handleSelect(key: WizardStepKey) {
     const clickable = key === current || doneSteps.has(key) || (key === 'checklist' && checklistStepClickable(doneSteps));
     if (clickable) setCurrent(key);
@@ -134,11 +150,11 @@ export function OnboardingWizard({ hasTenant: initialHasTenant }: OnboardingWiza
       {current === 'create-store' ? <CreateStoreStep onCreated={handleTenantCreated} /> : null}
       {current === 'store_info' ? <StoreInfoStep onDone={() => handleStepDone('store_info')} /> : null}
       {current === 'branding' ? (
-        <BrandingStep onDone={() => handleStepDone('branding')} theme={settings?.theme} />
+        <BrandingStep onDone={handleBrandingDone} theme={settings?.theme} />
       ) : null}
       {current === 'products' ? <ProductsStep onDone={() => handleStepDone('products')} /> : null}
       {current === 'payments' ? (
-        <PaymentsStep onDone={() => handleStepDone('payments')} initialCodEnabled={settings?.payments.codEnabled} />
+        <PaymentsStep onDone={handlePaymentsDone} initialCodEnabled={settings?.payments.codEnabled} />
       ) : null}
       {current === 'checklist' ? (
         <Card>
