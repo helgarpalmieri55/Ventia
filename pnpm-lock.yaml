@@ -66,6 +66,9 @@ importers:
 
   apps/storefront:
     dependencies:
+      '@ventia/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@ventia/ui':
         specifier: workspace:*
         version: link:../../packages/ui

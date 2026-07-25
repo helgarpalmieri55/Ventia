@@ -2,6 +2,7 @@ import './globals.css';
 import { headers } from 'next/headers';
 import { fetchTenantForHost } from '../lib/tenant';
 import { buildThemeVars, type TenantTheme } from '../lib/theme';
+import { fontVariables } from '../lib/fonts';
 
 export const metadata = { title: 'Ventia' };
 
@@ -15,14 +16,19 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   // (services/api/src/settings/settings.controller.ts), unvalidated at this
   // layer. Trusted here rather than re-validated: only the merchant's own
   // admin session can ever write it, and `buildThemeVars` only ever reads a
-  // handful of string fields off it. `null`/missing (draft tenant, or no
-  // tenant resolved at all for this host) falls through to the neutral
-  // defaults `buildThemeVars` already provides.
+  // handful of string fields off it (including `fontPair`, which it does
+  // validate against the fixed catalog via `fontPairVars` — see lib/theme.ts).
+  // `null`/missing (draft tenant, or no tenant resolved at all for this host)
+  // falls through to the neutral defaults `buildThemeVars` already provides.
   const themeVars = buildThemeVars((tenant?.theme as TenantTheme | null) ?? null);
 
   return (
-    <html lang="es-CO" style={themeVars as React.CSSProperties}>
-      <body className="font-sans antialiased">{children}</body>
+    // `fontVariables` (lib/fonts.ts) puts all 10 catalog fonts' CSS variables
+    // in scope on <html> — `themeVars`' `--font-heading`/`--font-body` (set
+    // per this tenant's saved `fontPair`) then pick the two that resolve to
+    // an actual font, via `globals.css`'s `body`/heading rules.
+    <html lang="es-CO" className={fontVariables} style={themeVars as React.CSSProperties}>
+      <body className="antialiased">{children}</body>
     </html>
   );
 }
