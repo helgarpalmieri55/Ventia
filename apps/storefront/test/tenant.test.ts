@@ -19,4 +19,14 @@ describe('fetchTenantForHost', () => {
     expect(await fetchTenantForHost('x.local', 'http://api', fetchImpl)).toBeNull();
     expect(await fetchTenantForHost(null, 'http://api', fetchImpl)).toBeNull();
   });
+
+  // NOT unit-tested here: React's cache() only dedupes within the
+  // 'react-server' module condition Next.js's App Router build sets up for
+  // Server Components — a plain vitest/Node import gets the client no-op
+  // build, where two concurrent calls both hit fetchImpl (observed directly:
+  // doing so against a single shared mocked Response throws "Body has
+  // already been read", since nothing serializes the two reads). That
+  // failure is a test-harness artifact, not evidence the real dedup is
+  // broken — verify it via the Task 9 manual smoke test instead (one
+  // request to /v1/tenant per page view, not two).
 });

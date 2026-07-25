@@ -6,6 +6,11 @@ export interface ResolvedTenant {
   slug: string;
   name: string;
   status: 'draft' | 'live' | 'suspended';
+  // Optional (not `theme: unknown`): kept off older call sites that build a
+  // ResolvedTenant by hand (e.g. tenant-middleware.test.ts fixtures) so this
+  // addition doesn't force an unrelated update there. Real resolves always
+  // populate it from the tenant row.
+  theme?: unknown;
 }
 
 export function normalizeHost(host: string | undefined): string | null {
@@ -30,7 +35,13 @@ export class DomainResolver {
       include: { tenant: true },
     });
     const resolved: ResolvedTenant | null = row
-      ? { tenantId: row.tenantId, slug: row.tenant.slug, name: row.tenant.name, status: row.tenant.status }
+      ? {
+          tenantId: row.tenantId,
+          slug: row.tenant.slug,
+          name: row.tenant.name,
+          status: row.tenant.status,
+          theme: row.tenant.theme,
+        }
       : null;
     await this.redis.set(key, resolved ? JSON.stringify(resolved) : 'null', 'EX', this.ttlSeconds);
     return resolved;

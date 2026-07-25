@@ -44,6 +44,21 @@ describe('DomainResolver', () => {
     expect(t?.status).toBe('live');
   });
 
+  it('includes the tenant theme in the resolved (and cached) result', async () => {
+    const themed = await prisma.tenant.create({
+      data: { slug: 'themed', name: 'Themed', status: 'live', theme: { primary: '#123456' } },
+    });
+    await prisma.tenantDomain.create({ data: { tenantId: themed.id, domain: 'themed.ventia.localhost', isPrimary: true } });
+
+    const fresh = await resolver.resolve('themed.ventia.localhost');
+    expect(fresh?.theme).toEqual({ primary: '#123456' });
+
+    // Same value must survive the Redis round trip (JSON.stringify/parse),
+    // not just the first, DB-backed resolve.
+    const cached = await resolver.resolve('themed.ventia.localhost');
+    expect(cached?.theme).toEqual({ primary: '#123456' });
+  });
+
   it('returns null for unknown domain and caches the miss', async () => {
     expect(await resolver.resolve('nope.ventia.localhost')).toBeNull();
     expect(await redis.get('tenant:domain:nope.ventia.localhost')).toBe('null');

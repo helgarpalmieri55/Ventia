@@ -1,3 +1,5 @@
+import { cache } from 'react';
+
 export interface ResolvedTenant {
   tenantId: string;
   slug: string;
@@ -13,7 +15,13 @@ export interface ResolvedTenant {
   theme: unknown;
 }
 
-export async function fetchTenantForHost(
+// Wrapped in React's cache() so a layout and a page rendering the same
+// request (e.g. app/layout.tsx + app/page.tsx, both calling this with the
+// same host/apiUrl and the default fetchImpl) share one in-flight call
+// instead of issuing two round trips to /v1/tenant per page view. Scoped to
+// the lifetime of a single render pass — safe across requests/tests since
+// each gets its own cache instance.
+export const fetchTenantForHost = cache(async function fetchTenantForHost(
   host: string | null,
   apiUrl: string,
   fetchImpl: typeof fetch = fetch,
@@ -28,4 +36,4 @@ export async function fetchTenantForHost(
   });
   if (!res.ok) return null;
   return (await res.json()) as ResolvedTenant;
-}
+});
