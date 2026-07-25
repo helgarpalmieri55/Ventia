@@ -104,6 +104,57 @@ pnpm turbo run test                   # unit/integration tests, all packages (ne
 The `db` and `api` test suites use Testcontainers and spin up throwaway Postgres containers on the
 local Docker daemon — no manual DB setup is required to run them, only a running Docker daemon.
 
+The dev stack (`docker/compose.yaml`) also runs MinIO (S3-compatible storage) for product images,
+on ports `9000` (S3 API) and `9001` (web console, login `ventia` / `ventia-secret`). The API reads
+`S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, and `S3_PUBLIC_URL` (see
+`.env.example`) to talk to it.
+
+### Catalog API
+
+The `/v1/admin/*` endpoints (products, categories, variants, images, stock) provide the merchant
+catalog CRUD, plus bulk CSV import at `/v1/admin/import/{template,dry-run,commit}` — fetch a
+starter file from `GET /v1/admin/import/template`.
+
+### Onboarding, staff & launch
+
+A signed-up user provisions their tenant via `POST /v1/admin/onboarding/tenant`, then drives the
+wizard with `GET`/`PATCH /v1/admin/onboarding` (steps: `store_info`, `branding`, `products`,
+`payments`). `POST /v1/admin/launch` (owner-only) flips the tenant to `live` once the checklist —
+store info, verified email, an active product, payments — is complete, else `422
+LAUNCH_CHECKLIST_INCOMPLETE`. Owners invite staff via `POST /v1/admin/staff/invites`; the invitee
+accepts with `POST /v1/staff/accept`. Staff share `/v1/admin/products` etc. with owners but get
+`403 FORBIDDEN_ROLE` on `/v1/admin/settings`, `/v1/admin/staff/*`, and `/v1/admin/launch`.
+
+**Mailer:** dev/test use a console transport (`ConsoleMailer`) that logs `[mail] to=... subject=...`
+plus the body — including verification and staff-invite links — to stdout instead of sending real
+email; grep the API's dev log for the token/URL when testing these flows locally.
+
+### P1 Definition-of-Done e2e
+
+Prerequisites: dev stack up + DB migrated (Quickstart steps 2–4). Then, from the repo root:
+`bash scripts/e2e.sh` — boots API/admin/storefront, runs the Playwright suite
+(`apps/admin/e2e/p1-dod.spec.ts`) through Caddy, tears servers down after. Local-run only, not
+part of `pnpm turbo run test`/CI.
+
+## Deviations
+
+- **Suspended storefront returns 200, not 503 (P1):** a suspended tenant's storefront renders an
+  "unavailable" message (`apps/storefront/app/page.tsx`) at HTTP 200 instead of a real 503 — the
+  Next.js App Router has no ergonomic way for a page component to set a non-200 status without
+  reaching for `notFound()`/`redirect()` special cases that don't fit "temporarily unavailable"
+  semantics. The strict 503, along with archived-products-404-on-storefront (also P1-deferred —
+  see `docs/SPEC.md`'s M2 AC), arrives with the storefront rebuild in P2.
+
+## Production notes
+
+- **`ADMIN_URL` is required in any real deployment.** It's used both as better-auth's
+  `trustedOrigins` entry (`services/api/src/admin/admin.module.ts`) and as the destination for
+  the staff-invite and email-verification links (`services/api/src/staff/staff.service.ts`,
+  `services/api/src/auth/auth.ts`). Leaving it unset falls back to the dev default
+  (`http://admin.ventia.localhost`); in a real deployment where the admin app is served from a
+  different origin, every sign-in fails with `403 INVALID_ORIGIN` until `ADMIN_URL` is set to that
+  origin.
+
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and on every

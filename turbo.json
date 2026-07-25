@@ -3,7 +3,16 @@
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", ".next/**"] },
     "lint": {},
-    "typecheck": { "dependsOn": ["^build"] },
+    // Also depends on this package's OWN build (not just "^build" — its
+    // dependencies'): Next.js's typecheck reads generated `.next/types/**`
+    // (app-route type stubs), which only exist once `next build` (this
+    // package's own build task) has actually run. Without "build" here,
+    // turbo is free to schedule a package's typecheck and build concurrently
+    // (no ordering edge between two tasks of the SAME package otherwise),
+    // and typecheck losing that race fails with "File '.next/types/app/
+    // page.ts' not found" — observed in this environment under concurrent
+    // load (P1c-8 e2e work), not something specific to admin/storefront.
+    "typecheck": { "dependsOn": ["^build", "build"] },
     "test": { "dependsOn": ["^build"] }
   }
 }
