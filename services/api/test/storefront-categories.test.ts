@@ -28,6 +28,17 @@ beforeAll(async () => {
   const suspended = await prisma.tenant.create({ data: { slug: 'sf-susp', name: 'SF Susp', status: 'suspended' } });
   await prisma.tenantDomain.create({ data: { tenantId: suspended.id, domain: 'sf-susp.ventia.localhost', isPrimary: true } });
 
+  // Draft tenants get a live TenantDomain row at provisioning time, well
+  // before launch, so this fixture mirrors a real mid-onboarding merchant:
+  // real category/product data already sitting behind an unlaunched domain.
+  const draft = await prisma.tenant.create({ data: { slug: 'sf-draft', name: 'SF Draft', status: 'draft' } });
+  await prisma.tenantDomain.create({ data: { tenantId: draft.id, domain: 'sf-draft.ventia.localhost', isPrimary: true } });
+  const draftCat = await prisma.category.create({ data: { tenantId: draft.id, name: 'Draft Cat', slug: 'draft-cat', position: 0 } });
+  const draftProduct = await prisma.product.create({
+    data: { tenantId: draft.id, name: 'Draft Product', slug: 'draft-product', priceCents: 9900, status: 'active' },
+  });
+  await prisma.productCategory.create({ data: { tenantId: draft.id, productId: draftProduct.id, categoryId: draftCat.id } });
+
   const cat = await prisma.category.create({ data: { tenantId: liveTenantId, name: 'Ropa', slug: 'ropa', position: 0 } });
   const p1 = await prisma.product.create({ data: { tenantId: liveTenantId, name: 'Camiseta', slug: 'camiseta', priceCents: 45900, status: 'active' } });
   await prisma.product.create({ data: { tenantId: liveTenantId, name: 'Borrador', slug: 'borrador', priceCents: 1000, status: 'draft' } });
@@ -71,5 +82,22 @@ describe('GET /v1/storefront/categories', () => {
       .set('x-tenant-domain', 'sf-susp.ventia.localhost');
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('TENANT_SUSPENDED');
+  });
+
+  it('404s a draft (unlaunched) tenant identically to an unresolved one, even with live data behind it', async () => {
+    const unresolved = await request(app.getHttpServer())
+      .get('/v1/storefront/categories')
+      .set('x-tenant-domain', 'nope.ventia.localhost');
+    const draftRes = await request(app.getHttpServer())
+      .get('/v1/storefront/categories')
+      .set('x-tenant-domain', 'sf-draft.ventia.localhost');
+
+    expect(draftRes.status).toBe(404);
+    expect(draftRes.body.error).toBe('TENANT_NOT_FOUND');
+    // Same status and body as the unresolved-domain case — an anonymous
+    // prober must not be able to distinguish "no such tenant" from "tenant
+    // exists but hasn't launched yet".
+    expect(draftRes.status).toBe(unresolved.status);
+    expect(draftRes.body).toEqual(unresolved.body);
   });
 });

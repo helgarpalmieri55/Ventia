@@ -5,6 +5,9 @@ import { DomainResolver, normalizeHost, type ResolvedTenant } from './domain-res
 declare module 'express-serve-static-core' {
   interface Request {
     tenant?: ResolvedTenant | null;
+    // Set by PublicTenantGuard once req.tenant is confirmed resolved and
+    // live; storefront route handlers read it via @StorefrontTenantId().
+    storefrontTenantId?: string;
   }
 }
 

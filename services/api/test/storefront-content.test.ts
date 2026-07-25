@@ -34,6 +34,14 @@ beforeAll(async () => {
   liveTenantId = tenant.id;
   await prisma.tenantDomain.create({ data: { tenantId: tenant.id, domain: 'sf-content.ventia.localhost', isPrimary: true } });
 
+  // Same PublicTenantGuard as storefront-categories.test.ts (@UseGuards(PublicTenantGuard))
+  // guards this controller too — verify the draft-tenant block holds here as well.
+  const draft = await prisma.tenant.create({ data: { slug: 'sf-content-draft', name: 'SF Content Draft', status: 'draft' } });
+  await prisma.tenantDomain.create({ data: { tenantId: draft.id, domain: 'sf-content-draft.ventia.localhost', isPrimary: true } });
+  await prisma.tenantContent.create({
+    data: { tenantId: draft.id, type: 'policy_shipping', title: 'Envíos', bodyMd: 'Entregamos en 3 días.' },
+  });
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
@@ -70,5 +78,19 @@ describe('GET /v1/storefront/content/:type', () => {
       .get('/v1/storefront/content/bogus')
       .set('x-tenant-domain', 'sf-content.ventia.localhost');
     expect(res.status).toBe(400);
+  });
+
+  it('404s a draft (unlaunched) tenant identically to an unresolved one, even with saved content behind it', async () => {
+    const unresolved = await request(app.getHttpServer())
+      .get('/v1/storefront/content/policy_shipping')
+      .set('x-tenant-domain', 'nope.ventia.localhost');
+    const draftRes = await request(app.getHttpServer())
+      .get('/v1/storefront/content/policy_shipping')
+      .set('x-tenant-domain', 'sf-content-draft.ventia.localhost');
+
+    expect(draftRes.status).toBe(404);
+    expect(draftRes.body.error).toBe('TENANT_NOT_FOUND');
+    expect(draftRes.status).toBe(unresolved.status);
+    expect(draftRes.body).toEqual(unresolved.body);
   });
 });
