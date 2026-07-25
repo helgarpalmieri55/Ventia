@@ -1,7 +1,8 @@
+import type { Metadata } from 'next';
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { fetchTenantForHost } from '../../../lib/tenant';
-import { fetchStorefront } from '../../../lib/storefront-api';
+import { fetchStorefront, fetchStorefrontOrNull } from '../../../lib/storefront-api';
 import { ProductGrid } from '../../../components/product-grid';
 import { Price } from '../../../components/price';
 import { Badge, Button, Select } from '@ventia/ui';
@@ -65,6 +66,52 @@ function distinctVariantOptionValues(
   return values;
 }
 
+/** Truncates `text` to at most `maxLength` characters, breaking at the last
+ * whitespace before the cutoff when possible so the description doesn't end
+ * mid-word — a trivial inline transform, not promoted to a `lib/` helper. */
+function truncate(text: string, maxLength: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  const cut = trimmed.slice(0, maxLength);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+// Re-resolves tenant + product from `params`/`headers()` independently of the
+// page component below — Next.js request-memoizes identical `fetch()` calls
+// within one request and `fetchTenantForHost` is already `cache()`-wrapped,
+// so this is idiomatic duplication, not a real extra round trip.
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params;
+  const host = (await headers()).get('host');
+  const apiUrl = process.env.API_INTERNAL_URL ?? 'http://localhost:4000';
+  const tenant = await fetchTenantForHost(host, apiUrl);
+  if (!tenant || !host) return {};
+
+  // fetchStorefrontOrNull (not fetchStorefront): metadata generation must
+  // never crash the page — a transient upstream error here should just fall
+  // back to minimal metadata, while the page component's own plain
+  // fetchStorefront call still surfaces the error / notFound() as usual.
+  const product = await fetchStorefrontOrNull<StorefrontProductDetail>(
+    host,
+    `/v1/storefront/products/${encodeURIComponent(slug)}`,
+  );
+  if (!product) return {};
+
+  const description = truncate(product.descriptionMd, 160);
+  const images = product.images.length > 0 ? product.images.map((image) => ({ url: image.url })) : undefined;
+
+  return {
+    title: product.name,
+    description,
+    openGraph: {
+      title: product.name,
+      description,
+      images,
+    },
+  };
+}
+
 export default async function ProductPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const host = (await headers()).get('host');
@@ -92,83 +139,108 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
   );
   if (!product) notFound();
 
+  // schema.org Product structured data. `price` is a plain decimal string in
+  // pesos (the currency's major unit) per schema.org's Offer.price
+  // convention — NOT `formatCOP`'s display formatting (`"$ 45.900"`) — derived
+  // directly from priceCents with the same `Math.round(cents / 100)`
+  // convention formatCOP itself uses internally.
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    name: product.name,
+    image: product.images.map((image) => image.url),
+    description: product.descriptionMd,
+    offers: {
+      '@type': 'Offer',
+      priceCurrency: 'COP',
+      price: String(Math.round(product.priceCents / 100)),
+      availability: product.inStock ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+    },
+  };
+
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-8">
-      <div className="grid gap-8 md:grid-cols-2">
-        <div className="flex flex-col gap-2">
-          {product.images.length > 0 ? (
-            product.images.map((image, i) => (
-              // Plain <img>, not next/image: storefront has no remote-image
-              // domain config yet, matching product-card.tsx's established
-              // convention.
-              <img
-                key={i}
-                src={image.url}
-                alt={image.alt ?? product.name}
-                className="aspect-square w-full rounded-md bg-muted object-cover"
-              />
-            ))
-          ) : (
-            // Simple muted placeholder box — no placeholder SVG asset exists
-            // in this codebase yet, out of scope for this task.
-            <div className="aspect-square w-full rounded-md bg-muted" />
-          )}
-        </div>
-
-        <div className="flex flex-col gap-4">
-          <h1 className="text-2xl font-semibold">{product.name}</h1>
-          <Price cents={product.priceCents} compareAtCents={product.compareAtCents} />
-
-          <div>
-            <Badge variant={product.inStock ? 'default' : 'secondary'}>
-              {product.inStock ? 'En stock' : 'Agotado'}
-            </Badge>
+    <>
+      {/* Standard/only way to emit JSON-LD in the App Router — safe here
+          since the payload is server-generated structured data from our own
+          API, not raw user input rendered as HTML. */}
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+      <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-8">
+        <div className="grid gap-8 md:grid-cols-2">
+          <div className="flex flex-col gap-2">
+            {product.images.length > 0 ? (
+              product.images.map((image, i) => (
+                // Plain <img>, not next/image: storefront has no remote-image
+                // domain config yet, matching product-card.tsx's established
+                // convention.
+                <img
+                  key={i}
+                  src={image.url}
+                  alt={image.alt ?? product.name}
+                  className="aspect-square w-full rounded-md bg-muted object-cover"
+                />
+              ))
+            ) : (
+              // Simple muted placeholder box — no placeholder SVG asset exists
+              // in this codebase yet, out of scope for this task.
+              <div className="aspect-square w-full rounded-md bg-muted" />
+            )}
           </div>
 
-          {product.options.length > 0 ? (
-            <div className="flex flex-col gap-3">
-              {product.options.map((optionName, i) => (
-                <label key={optionName} className="flex flex-col gap-1 text-sm">
-                  <span className="font-medium">{optionName}</span>
-                  {/* Plain server-rendered <select>, no onChange/client state:
-                      purely informational for this task — "Agregar al
-                      carrito" stays disabled regardless of selection. A
-                      later task (P2b) wires real variant-aware add-to-cart. */}
-                  <Select defaultValue="">
-                    <option value="" disabled>
-                      Selecciona {optionName.toLowerCase()}
-                    </option>
-                    {distinctVariantOptionValues(product.variants, i).map((value) => (
-                      <option key={value} value={value}>
-                        {value}
-                      </option>
-                    ))}
-                  </Select>
-                </label>
-              ))}
+          <div className="flex flex-col gap-4">
+            <h1 className="text-2xl font-semibold">{product.name}</h1>
+            <Price cents={product.priceCents} compareAtCents={product.compareAtCents} />
+
+            <div>
+              <Badge variant={product.inStock ? 'default' : 'secondary'}>
+                {product.inStock ? 'En stock' : 'Agotado'}
+              </Badge>
             </div>
-          ) : null}
 
-          <div>
-            <Button disabled title="Disponible próximamente">
-              Agregar al carrito
-            </Button>
+            {product.options.length > 0 ? (
+              <div className="flex flex-col gap-3">
+                {product.options.map((optionName, i) => (
+                  <label key={optionName} className="flex flex-col gap-1 text-sm">
+                    <span className="font-medium">{optionName}</span>
+                    {/* Plain server-rendered <select>, no onChange/client state:
+                        purely informational for this task — "Agregar al
+                        carrito" stays disabled regardless of selection. A
+                        later task (P2b) wires real variant-aware add-to-cart. */}
+                    <Select defaultValue="">
+                      <option value="" disabled>
+                        Selecciona {optionName.toLowerCase()}
+                      </option>
+                      {distinctVariantOptionValues(product.variants, i).map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </Select>
+                  </label>
+                ))}
+              </div>
+            ) : null}
+
+            <div>
+              <Button disabled title="Disponible próximamente">
+                Agregar al carrito
+              </Button>
+            </div>
+
+            {/* No markdown renderer exists in this codebase yet — rendering
+                descriptionMd as plain text (whitespace-pre-wrap so at least
+                line breaks survive) rather than adding one, out of scope for
+                this task. */}
+            <div className="whitespace-pre-wrap text-sm text-muted-foreground">{product.descriptionMd}</div>
           </div>
-
-          {/* No markdown renderer exists in this codebase yet — rendering
-              descriptionMd as plain text (whitespace-pre-wrap so at least
-              line breaks survive) rather than adding one, out of scope for
-              this task. */}
-          <div className="whitespace-pre-wrap text-sm text-muted-foreground">{product.descriptionMd}</div>
         </div>
-      </div>
 
-      {product.related.length > 0 ? (
-        <section>
-          <h2 className="mb-4 text-xl font-semibold">También te puede interesar</h2>
-          <ProductGrid products={product.related} />
-        </section>
-      ) : null}
-    </main>
+        {product.related.length > 0 ? (
+          <section>
+            <h2 className="mb-4 text-xl font-semibold">También te puede interesar</h2>
+            <ProductGrid products={product.related} />
+          </section>
+        ) : null}
+      </main>
+    </>
   );
 }
