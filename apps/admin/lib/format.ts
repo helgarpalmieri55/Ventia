@@ -30,3 +30,30 @@ export function formatCOP(cents: number): string {
   const pesos = Math.round(cents / 100);
   return formatter.format(pesos).replaceAll(NBSP, ' ');
 }
+
+/** Converts a peso amount (as typed into a form's price input, e.g. "45900")
+ * into integer cents for the API's `priceCents` field — the inverse of the
+ * `cents / 100` convention documented on {@link formatCOP}. Accepts either a
+ * `number` or a raw string (trimmed before parsing, so " 45900 " and "45900"
+ * behave identically). Returns `null` — rather than silently coercing to `0`
+ * or `NaN` — for anything that isn't a non-negative finite number, so a
+ * caller can turn that into a field error instead of submitting a bogus
+ * price. `Math.round` guards the rare fractional-peso-cent case (e.g.
+ * "45900.005" pesos -> 4590000.5 cents -> rounds to 4590001). */
+export function pesosToCents(pesos: string | number): number | null {
+  const trimmed = typeof pesos === 'string' ? pesos.trim() : pesos;
+  if (trimmed === '') return null;
+  const n = typeof trimmed === 'string' ? Number(trimmed) : trimmed;
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100);
+}
+
+/** Converts integer cents back to a peso amount for populating an *editable*
+ * price input (e.g. the edit form's initial value from `GET /v1/admin/products/:id`).
+ * Unlike {@link formatCOP} (a display formatter that intentionally rounds to
+ * a whole peso), this preserves any fractional-peso remainder exactly so
+ * round-tripping a value through {@link pesosToCents} and back doesn't lose
+ * precision while the merchant is still editing it. */
+export function centsToPesos(cents: number): number {
+  return cents / 100;
+}

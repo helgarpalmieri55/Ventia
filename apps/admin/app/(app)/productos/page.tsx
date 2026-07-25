@@ -101,9 +101,7 @@ export default function ProductosPage() {
     <Card className="w-full">
       <CardHeader className="flex flex-row items-center justify-between gap-4">
         <CardTitle>Productos</CardTitle>
-        <a href="/productos/nuevo">
-          <Button>Nuevo producto</Button>
-        </a>
+        <Button href="/productos/nuevo">Nuevo producto</Button>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         <form className="flex flex-wrap items-center gap-3" onSubmit={handleSearchSubmit}>
@@ -150,12 +148,10 @@ export default function ProductosPage() {
             </p>
             {isFiltered ? null : (
               <div className="flex gap-3">
-                <a href="/productos/nuevo">
-                  <Button>Nuevo producto</Button>
-                </a>
-                <a href="/importar">
-                  <Button variant="secondary">Importar CSV</Button>
-                </a>
+                <Button href="/productos/nuevo">Nuevo producto</Button>
+                <Button href="/importar" variant="secondary">
+                  Importar CSV
+                </Button>
               </div>
             )}
           </div>
