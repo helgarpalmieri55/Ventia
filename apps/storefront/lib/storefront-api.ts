@@ -31,3 +31,26 @@ export async function fetchStorefront<T>(
   if (!res.ok) throw new StorefrontApiError(res.status);
   return (await res.json()) as T;
 }
+
+/** Same as {@link fetchStorefront}, but degrades a {@link StorefrontApiError}
+ * to `null` instead of throwing — for page sections where a transient
+ * upstream error (e.g. a suspend-race between `middleware.ts`'s tenant check
+ * and this fetch, or any other 5xx) should render as an empty section rather
+ * than crash the whole page with an uncaught Server Component error. Any
+ * other kind of thrown error (a real bug, not an upstream status) still
+ * propagates. */
+export async function fetchStorefrontOrNull<T>(
+  tenantHost: string,
+  path: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<T | null> {
+  try {
+    return await fetchStorefront<T>(tenantHost, path, fetchImpl);
+  } catch (err) {
+    if (err instanceof StorefrontApiError) {
+      console.error(`[storefront] ${path} failed with status ${err.status}`, err);
+      return null;
+    }
+    throw err;
+  }
+}

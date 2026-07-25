@@ -1,7 +1,7 @@
 import { headers } from 'next/headers';
 import Link from 'next/link';
 import { fetchTenantForHost } from '../lib/tenant';
-import { fetchStorefront } from '../lib/storefront-api';
+import { fetchStorefrontOrNull } from '../lib/storefront-api';
 import { ProductGrid } from '../components/product-grid';
 import type { ProductCardData } from '../components/product-card';
 
@@ -51,9 +51,12 @@ export default async function Home() {
   // resolves a tenant for a non-null host, and `tenant` is truthy at this
   // point.
   const tenantHost = host as string;
+  // fetchStorefrontOrNull (not fetchStorefront): a transient upstream error
+  // here (e.g. a suspend-race with middleware.ts's own tenant check) should
+  // degrade this section to empty, not crash the whole page render.
   const [categories, productsResult] = await Promise.all([
-    fetchStorefront<StorefrontCategory[]>(tenantHost, '/v1/storefront/categories'),
-    fetchStorefront<StorefrontProductListResult>(tenantHost, '/v1/storefront/products?sort=newest&pageSize=8'),
+    fetchStorefrontOrNull<StorefrontCategory[]>(tenantHost, '/v1/storefront/categories'),
+    fetchStorefrontOrNull<StorefrontProductListResult>(tenantHost, '/v1/storefront/products?sort=newest&pageSize=8'),
   ]);
   const newest = productsResult?.items ?? [];
 

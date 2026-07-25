@@ -1,7 +1,7 @@
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { fetchTenantForHost } from '../../../lib/tenant';
-import { fetchStorefront } from '../../../lib/storefront-api';
+import { fetchStorefrontOrNull } from '../../../lib/storefront-api';
 import { ProductGrid } from '../../../components/product-grid';
 import type { ProductCardData } from '../../../components/product-card';
 
@@ -39,11 +39,14 @@ export default async function CategoryPage({ params }: { params: Promise<{ slug:
   // The categories endpoint has no single-slug lookup, so the full list is
   // fetched and matched by slug here, same as the home page's category
   // tiles — simplest option per the brief rather than adding a new API route.
-  const categories = await fetchStorefront<StorefrontCategory[]>(tenantHost, '/v1/storefront/categories');
+  // fetchStorefrontOrNull (not fetchStorefront): a transient upstream error
+  // degrades to `notFound()` here (safe default — no crash), same as a
+  // genuinely nonexistent slug, rather than an uncaught exception.
+  const categories = await fetchStorefrontOrNull<StorefrontCategory[]>(tenantHost, '/v1/storefront/categories');
   const category = categories?.find((c) => c.slug === slug);
   if (!category) notFound();
 
-  const productsResult = await fetchStorefront<StorefrontProductListResult>(
+  const productsResult = await fetchStorefrontOrNull<StorefrontProductListResult>(
     tenantHost,
     `/v1/storefront/products?category=${encodeURIComponent(slug)}&sort=newest`,
   );
