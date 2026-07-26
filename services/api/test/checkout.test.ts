@@ -11,6 +11,7 @@ const CHECKOUT_TEST_DOMAINS = [
   'checkout-c.ventia.localhost',
   'checkout-d.ventia.localhost',
   'checkout-e.ventia.localhost',
+  'checkout-f.ventia.localhost',
 ];
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
@@ -23,6 +24,7 @@ let tenantBId: string; // insufficient stock
 let tenantCId: string; // COD-restricted departamento
 let tenantDId: string; // no cart cookie at all
 let tenantEId: string; // concurrency
+let tenantFId: string; // product archived after being added to cart
 
 // Product fixture ids, populated in beforeAll.
 let productXId: string; // tenant A — 45900 cents
@@ -31,6 +33,7 @@ let stockOkProductId: string; // tenant B — enough stock
 let stockShortProductId: string; // tenant B — insufficient stock
 let codProductId: string; // tenant C
 let concurrencyProductId: string; // tenant E — plenty of stock
+let archivableProductId: string; // tenant F — active at add-to-cart time, archived before checkout
 
 const BOGOTA_ADDRESS = {
   nombreCompleto: 'Ana Ejemplo',
@@ -182,6 +185,29 @@ beforeAll(async () => {
   });
   concurrencyProductId = concurrencyProduct.id;
 
+  // Tenant F: a product archived (pulled off sale by the merchant) AFTER
+  // being added to a shopper's cart, but before checkout — must reject, not
+  // silently create a paid order for an unpublished product.
+  const tenantF = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-f',
+      name: 'Checkout F',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantFId = tenantF.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantFId, domain: 'checkout-f.ventia.localhost', isPrimary: true } });
+
+  const archivableProduct = await prisma.product.create({
+    data: { tenantId: tenantFId, name: 'Producto Archivable', slug: 'producto-archivable', priceCents: 18000, status: 'active', stock: 10 },
+  });
+  archivableProductId = archivableProduct.id;
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
@@ -325,6 +351,35 @@ describe('POST /v1/storefront/checkout — insufficient stock rejects the whole 
     // Cart must survive a failed checkout — checkout failure must not delete it.
     const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantBId, cookieKey: cookieValue } });
     expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — product archived after being added to cart', () => {
+  it('400 INSUFFICIENT_STOCK and creates zero Order rows, even though stock is still nonzero', async () => {
+    const cookieValue = await newCartWithItem('checkout-f.ventia.localhost', archivableProductId, 1);
+
+    // Merchant pulls the product off sale between add-to-cart and checkout —
+    // its stock count is untouched, only status changes.
+    await prisma.product.update({ where: { id: archivableProductId }, data: { status: 'archived' } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-f.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'archived@example.com',
+        phone: '3001112233',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('INSUFFICIENT_STOCK');
+    expect(res.body.details).toMatchObject({ productId: archivableProductId, available: 0 });
+
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantFId } });
+    expect(orderCount).toBe(0);
   });
 });
 

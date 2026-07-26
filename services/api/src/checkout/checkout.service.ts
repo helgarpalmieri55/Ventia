@@ -68,9 +68,14 @@ export class CheckoutService {
         // extension deliberately blocks raw queries (see
         // packages/db/src/tenant-client.ts). We re-establish RLS scoping
         // ourselves for the lifetime of this one transaction; every
-        // read/write below uses `tx` directly (NOT tenantDb) and explicitly
-        // includes tenantId in every where/data, with Postgres RLS as the
-        // fail-closed backstop if that's ever missed.
+        // read/write below uses `tx` directly (NOT tenantDb). Every read and
+        // every create includes tenantId explicitly; `customer.update` and
+        // `cart.delete` further down key off ids already resolved from a
+        // tenantId-scoped read earlier in this same transaction (no
+        // time-of-check/time-of-use gap) and also carry tenantId in their own
+        // `where` as redundant defense-in-depth — Postgres RLS (the
+        // tenant_isolation policy's WITH CHECK clause) is the fail-closed
+        // backstop underneath all of this regardless.
         await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
         await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
         // Advisory lock taken up front (inside nextOrderNumber) serializes
@@ -115,6 +120,17 @@ export class CheckoutService {
           // written above (nothing is written above at this point, but later
           // lines/order/customer rows would be too) — no partial order.
           if (!product) {
+            throw new HttpException(
+              { error: 'INSUFFICIENT_STOCK', details: { productId: item.productId, available: 0 } },
+              400,
+            );
+          }
+          // A product the merchant archived/unpublished after it was added to
+          // the cart must not be purchasable, even if its stock count is
+          // still nonzero — same "no longer orderable" bucket as the missing-
+          // row case above (not a distinct error code: from the shopper's
+          // perspective, both mean "this item can't be bought right now").
+          if (product.status !== 'active') {
             throw new HttpException(
               { error: 'INSUFFICIENT_STOCK', details: { productId: item.productId, available: 0 } },
               400,
@@ -180,7 +196,7 @@ export class CheckoutService {
         const existingCustomer = await tx.customer.findFirst({ where: { tenantId, email: input.email } });
         const customer = existingCustomer
           ? await tx.customer.update({
-              where: { id: existingCustomer.id },
+              where: { id: existingCustomer.id, tenantId },
               data: { ordersCount: { increment: 1 }, totalSpentCents: { increment: totalCents } },
             })
           : await tx.customer.create({
@@ -235,7 +251,7 @@ export class CheckoutService {
         });
 
         // Cascades to CartItem via the schema's onDelete: Cascade.
-        await tx.cart.delete({ where: { id: cart.id } });
+        await tx.cart.delete({ where: { id: cart.id, tenantId } });
 
         return { orderNumber, totalCents };
       },
