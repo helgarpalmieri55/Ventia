@@ -47,6 +47,23 @@ describe('shippingToFormState', () => {
   it('falls back to defaults per-field when both fields are malformed', () => {
     expect(shippingToFormState({ methods: 42, codRestrictedDepartamentos: null })).toEqual(DEFAULT_SHIPPING_FORM);
   });
+
+  it('drops individual methods that fail shippingMethodSchema instead of throwing or passing them through', () => {
+    const saved = {
+      methods: [
+        { id: 'ok', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true },
+        null,
+        'not-an-object',
+        { id: 'bad-type', type: 'carrier-pigeon', label: 'x', enabled: true },
+        { id: 'missing-price', type: 'flat', label: 'x', enabled: true }, // no priceCents
+      ],
+    };
+
+    expect(() => shippingToFormState(saved)).not.toThrow();
+    expect(shippingToFormState(saved).methods).toEqual([
+      { id: 'ok', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true },
+    ]);
+  });
 });
 
 describe('new*Method constructors', () => {

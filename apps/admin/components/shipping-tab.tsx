@@ -196,9 +196,17 @@ const METHOD_TYPE_LABELS: Record<MethodDraft['type'], string> = {
  * tabs combined, and page.tsx was already 474 lines before this tab
  * existed. */
 export function EnviosTab({ settings, onSaved }: TabProps) {
-  const initial = shippingToFormState(settings.shipping);
-  const [methods, setMethods] = useState<MethodDraft[]>(initial.methods.map(methodToDraft));
-  const [codRestricted, setCodRestricted] = useState<Set<string>>(new Set(initial.codRestrictedDepartamentos));
+  // Lazy initializers: `shippingToFormState` + mapping every method to its
+  // draft form is real work (schema-validating each element, building a
+  // full 33-entry rate record per zone method) that must only run once, on
+  // mount — not be recomputed and discarded on every re-render (e.g. every
+  // keystroke).
+  const [methods, setMethods] = useState<MethodDraft[]>(() =>
+    shippingToFormState(settings.shipping).methods.map(methodToDraft),
+  );
+  const [codRestricted, setCodRestricted] = useState<Set<string>>(
+    () => new Set(shippingToFormState(settings.shipping).codRestrictedDepartamentos),
+  );
   const [error, setError] = useState<string | null>(null);
   const [methodsError, setMethodsError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);

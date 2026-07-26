@@ -1,4 +1,4 @@
-import type { ShippingMethodInput, ShippingSettingsInput } from '@ventia/core';
+import { shippingMethodSchema, type ShippingMethodInput } from '@ventia/core';
 
 /** The Envíos tab's form-state shape — a flattened, always-fully-populated
  * pair derived from `@ventia/core`'s `ShippingSettingsInput` (whose
@@ -32,39 +32,31 @@ export const DEFAULT_SHIPPING_FORM: ShippingFormState = {
  * {@link DEFAULT_SHIPPING_FORM} per-field whenever `shipping` is absent,
  * empty, or a field has the wrong shape — never throws.
  *
- * Deliberate simplification: this only checks that `methods` is an ARRAY,
- * not that each element parses against `shippingMethodSchema`'s
- * discriminated union. A malformed individual method (e.g. missing a
- * required field for its `type`) is passed through as-is rather than
- * dropped or repaired. The task's test list only calls for "malformed
- * methods [array] falls back to []", not per-item validation, and the tab's
- * inputs are always fully controlled (every field always renders some
- * value), so a malformed item mostly self-heals the moment the merchant
- * touches that method's fields. A reviewer who wants stricter behavior
- * (e.g. filtering out entries that fail `shippingMethodSchema.safeParse`)
- * could add that here without changing this function's signature. */
+ * Each element of the `methods` array is additionally validated against
+ * `shippingMethodSchema` and dropped if it doesn't parse: the only write
+ * path (`PATCH /v1/admin/settings/shipping`) already enforces this shape
+ * server-side, so a non-conforming element can only reach here via direct
+ * DB tampering, a future looser write path, or JSON corruption — but
+ * `shipping-tab.tsx`'s `methodToDraft` switches on `method.type` with no
+ * fallback branch, so a malformed element (wrong/missing `type`, or not an
+ * object at all) would otherwise throw and crash the whole `/configuracion`
+ * page (all 4 tabs are always-mounted siblings with no error boundary
+ * anywhere in this app) rather than just degrading this one tab. Filtering
+ * here — the single choke point every caller goes through — closes that gap
+ * at the source instead of requiring every future reader of `methods` to
+ * defend against it individually. */
 export function shippingToFormState(shipping: Record<string, unknown> | undefined): ShippingFormState {
   if (!shipping || Object.keys(shipping).length === 0) return DEFAULT_SHIPPING_FORM;
 
-  const methods = Array.isArray(shipping.methods) ? (shipping.methods as ShippingMethodInput[]) : DEFAULT_SHIPPING_FORM.methods;
+  const methods = Array.isArray(shipping.methods)
+    ? shipping.methods.filter((m): m is ShippingMethodInput => shippingMethodSchema.safeParse(m).success)
+    : DEFAULT_SHIPPING_FORM.methods;
 
   const codRestrictedDepartamentos = Array.isArray(shipping.codRestrictedDepartamentos)
     ? (shipping.codRestrictedDepartamentos as string[])
     : DEFAULT_SHIPPING_FORM.codRestrictedDepartamentos;
 
   return { methods, codRestrictedDepartamentos };
-}
-
-/** Converts a fully-populated {@link ShippingFormState} back into the
- * `ShippingSettingsInput` shape `PATCH /v1/admin/settings/shipping` expects
- * — a thin, explicit pass-through (the two shapes are structurally
- * identical) kept as its own function so the tab component doesn't need to
- * know the wire shape matches the form shape exactly. */
-export function shippingFormToInput(form: ShippingFormState): ShippingSettingsInput {
-  return {
-    methods: form.methods,
-    codRestrictedDepartamentos: form.codRestrictedDepartamentos,
-  };
 }
 
 /** Builds a fresh flat-rate method for the "add method" control.
