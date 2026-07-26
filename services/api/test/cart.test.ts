@@ -193,6 +193,40 @@ describe('POST /v1/storefront/cart/items', () => {
   });
 });
 
+describe('PATCH/DELETE /v1/storefront/cart/items/:id (same-tenant happy path)', () => {
+  it('updates an item\'s qty, then removes it, recalculating totals each time', async () => {
+    const addRes = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/items')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({ productId: otherVariantProductId, variantId: variantBId, qty: 1 });
+    expect(addRes.status).toBe(201);
+    const cookieValue = extractCartCookie(addRes);
+    const itemId: string = addRes.body.lines.find(
+      (l: { productId: string; id: string }) => l.productId === otherVariantProductId,
+    ).id;
+    // Gorra: priceCents 30000, qty 1 -> subtotal 30000.
+    expect(addRes.body.subtotalCents).toBe(30000);
+
+    const patchRes = await request(app.getHttpServer())
+      .patch(`/v1/storefront/cart/items/${itemId}`)
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({ qty: 3 });
+    expect(patchRes.status).toBe(200);
+    const patchedLine = patchRes.body.lines.find((l: { id: string }) => l.id === itemId);
+    expect(patchedLine.qty).toBe(3);
+    expect(patchRes.body.subtotalCents).toBe(90000);
+
+    const deleteRes = await request(app.getHttpServer())
+      .delete(`/v1/storefront/cart/items/${itemId}`)
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`);
+    expect(deleteRes.status).toBe(200);
+    expect(deleteRes.body.lines.some((l: { id: string }) => l.id === itemId)).toBe(false);
+    expect(await prisma.cartItem.findUnique({ where: { id: itemId } })).toBeNull();
+  });
+});
+
 describe('cross-tenant isolation', () => {
   it('never lets tenant A\'s cart cookie reach tenant B\'s cart, even against a real item id', async () => {
     // Tenant A creates a real cart with a real item.
