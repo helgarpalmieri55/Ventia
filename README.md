@@ -125,6 +125,17 @@ resolution. Admin mutations trigger on-demand ISR revalidation on the storefront
 `REVALIDATE_SECRET` and `STOREFRONT_INTERNAL_URL` (see `services/api/src/storefront/revalidate.ts`
 and `apps/storefront/app/api/revalidate/route.ts`).
 
+### Cart, checkout & orders
+
+`/v1/storefront/cart` (get/add/update/remove) and `/v1/storefront/checkout` (shipping quote,
+order creation, confirmation lookup) are guest-cart endpoints keyed on a `ventia_cart` cookie —
+the storefront never calls these directly (its browser can't reach the API's internal host, and a
+cross-origin `Set-Cookie` wouldn't be readable back from its own domain), instead proxying through
+`apps/storefront/app/api/{cart,checkout}/[[...path]]/route.ts`. Payment is cash-on-delivery only;
+checkout never decrements `Product.stock` (deferred to order-status transitions in a later phase).
+Manually exercising the cart/checkout flow (add → drawer → `/carrito` → `/checkout`) needs the API
+reachable from wherever the storefront dev server runs, since the proxy route calls it directly.
+
 ### Onboarding, staff & launch
 
 A signed-up user provisions their tenant via `POST /v1/admin/onboarding/tenant`, then drives the
@@ -136,8 +147,11 @@ accepts with `POST /v1/staff/accept`. Staff share `/v1/admin/products` etc. with
 `403 FORBIDDEN_ROLE` on `/v1/admin/settings`, `/v1/admin/staff/*`, and `/v1/admin/launch`.
 
 **Mailer:** dev/test use a console transport (`ConsoleMailer`) that logs `[mail] to=... subject=...`
-plus the body — including verification and staff-invite links — to stdout instead of sending real
-email; grep the API's dev log for the token/URL when testing these flows locally.
+plus the body — including verification, staff-invite, and order-confirmation links — to stdout
+instead of sending real email; grep the API's dev log for the token/URL when testing these flows
+locally. Setting `RESEND_API_KEY` (plus optionally `RESEND_FROM_EMAIL`, see `.env.example`) switches
+every environment sharing that API process to sending real email via
+[Resend](https://resend.com) instead.
 
 ### P1 Definition-of-Done e2e
 
