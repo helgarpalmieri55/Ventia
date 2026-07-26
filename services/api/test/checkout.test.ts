@@ -1,9 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import Redis from 'ioredis';
 import type { INestApplication } from '@nestjs/common';
 import type { PrismaClient as PrismaClientType } from '@ventia/db';
 import { startTestDb } from './helpers';
+import { MAILER, type Mailer, type MailMessage } from '../src/mailer/mailer';
 
 const CHECKOUT_TEST_DOMAINS = [
   'checkout-a.ventia.localhost',
@@ -17,6 +18,7 @@ const CHECKOUT_TEST_DOMAINS = [
 let db: Awaited<ReturnType<typeof startTestDb>>;
 let prisma: PrismaClientType;
 let app: INestApplication;
+let sentMail: MailMessage[];
 
 // tenantId fixtures, populated in beforeAll.
 let tenantAId: string; // happy path + unconfigured-shipping-method + same-email reuse
@@ -211,6 +213,18 @@ beforeAll(async () => {
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
+
+  // RESEND_API_KEY is unset in this test environment, so MailerModule's
+  // factory (see src/mailer/mailer.module.ts) wires MAILER to a ConsoleMailer
+  // instance — spying on its `send` method captures every email
+  // CheckoutService's fire-and-forget sendOrderEmails(...) call sends,
+  // without standing up a second app/module just to swap providers. Same
+  // recording-double-via-spy pattern as test/email-verification.test.ts.
+  sentMail = [];
+  const mailer = app.get<Mailer>(MAILER);
+  vi.spyOn(mailer, 'send').mockImplementation(async (msg) => {
+    sentMail.push(msg);
+  });
 });
 
 afterAll(async () => {
@@ -309,6 +323,19 @@ describe('POST /v1/storefront/checkout — happy path', () => {
     // Success response must clear the cart cookie.
     const setCookie = res.headers['set-cookie'] as unknown as string[] | undefined;
     expect(setCookie?.some((c) => c.startsWith('ventia_cart=;') || c.includes('ventia_cart=;'))).toBe(true);
+
+    // Post-checkout order emails are fire-and-forget (CheckoutService never
+    // awaits sendOrderEmails(...) — see checkout.service.ts's doc comment),
+    // so the HTTP response above can (and does) land before the mailer spy
+    // records anything; a short fixed wait gives that background call a
+    // chance to run before asserting on it. Tenant A never configured
+    // `settings.storeInfo.contactEmail`, so only the 2 shopper-facing emails
+    // fire here (no merchant alert) — see order-emails.test.ts for the
+    // 2-vs-3 branching itself.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const orderMail = sentMail.filter((m) => m.to === 'ana@example.com');
+    expect(orderMail.length).toBeGreaterThanOrEqual(2);
+    expect(orderMail.some((m) => m.subject.includes('VNT-1'))).toBe(true);
   });
 });
 

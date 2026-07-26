@@ -1,8 +1,20 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { Prisma, platformDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
-import type { CheckoutAddressInput, TaxRateValue } from '@ventia/core';
+import { DEPARTAMENTOS, type CheckoutAddressInput, type TaxRateValue } from '@ventia/core';
+import { MAILER, type Mailer } from '../mailer/mailer';
+import { sendOrderEmails, type OrderEmailContext } from '../mailer/order-emails';
 import { ShippingService } from './shipping.service';
 import { nextOrderNumber } from './order-number';
+
+type JsonRecord = Record<string, unknown>;
+
+// Same defensive-parse posture as settings/settings.controller.ts's asRecord
+// and checkout/shipping.service.ts's asRecord: `settings` is a loosely-typed
+// JSON column, so a read through it treats an absent/malformed shape as
+// "nothing configured" rather than throwing.
+function asRecord(value: Prisma.JsonValue | null | undefined): JsonRecord {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
 
 // Same DB-enum <-> human-string maps as cart.service.ts / storefront/products.service.ts
 // / csv-import.service.ts (duplicated locally, matching this codebase's
@@ -41,6 +53,21 @@ export interface CheckoutResult {
   totalCents: number;
 }
 
+// Everything the post-checkout email flow needs, computed once inside the
+// transaction (cheap, since it's all already loaded/derived there) rather
+// than re-queried afterward. `CheckoutResult` (the actual HTTP response
+// shape, asserted verbatim by test/checkout.test.ts) stays exactly
+// `{orderNumber, totalCents}` — this wider shape is internal to this service.
+interface CheckoutTransactionResult extends CheckoutResult {
+  email: string;
+  phone: string;
+  items: OrderEmailContext['items'];
+  departamentoCode: string;
+  municipioName: string;
+  tenantName: string;
+  merchantContactEmail: string | null;
+}
+
 interface CheckoutLine {
   productId: string;
   variantId: string | null;
@@ -54,13 +81,18 @@ interface CheckoutLine {
 export class CheckoutService {
   // Explicit @Inject: esbuild (vitest's TS transform) doesn't emit
   // `design:paramtypes` metadata, so Nest's implicit constructor-injection by
-  // type alone can't resolve ShippingService here — same caution as every
-  // other controller/service in this codebase (see cart.controller.ts).
-  constructor(@Inject(ShippingService) private readonly shippingService: ShippingService) {}
+  // type alone can't resolve ShippingService (or MAILER, a Symbol token that
+  // was never resolvable by type alone in the first place) here — same
+  // caution as every other controller/service in this codebase (see
+  // cart.controller.ts).
+  constructor(
+    @Inject(ShippingService) private readonly shippingService: ShippingService,
+    @Inject(MAILER) private readonly mailer: Mailer,
+  ) {}
 
   async checkout(tenantId: string, cartCookieKey: string, input: CheckoutInput): Promise<CheckoutResult> {
     const result = await platformDb.$transaction(
-      async (tx) => {
+      async (tx): Promise<CheckoutTransactionResult> => {
         // Manual RLS transaction escape (same pattern as
         // storefront/products.service.ts's list() and csv-import.service.ts's
         // commit()): allocating a sequential per-tenant order number needs a
@@ -193,6 +225,15 @@ export class CheckoutService {
         const totalCents = subtotalCents + taxCents + shippingCents;
         const orderNumber = await nextOrderNumber(tx, tenantId);
 
+        // Only needed for the post-checkout email flow below (tenant display
+        // name + the merchant's optional contact address) — one cheap extra
+        // read inside the same transaction rather than a second round trip
+        // after commit.
+        const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+        const storeInfo = asRecord(asRecord(tenant.settings).storeInfo as Prisma.JsonValue | undefined);
+        const merchantContactEmail =
+          typeof storeInfo.contactEmail === 'string' ? storeInfo.contactEmail : null;
+
         const existingCustomer = await tx.customer.findFirst({ where: { tenantId, email: input.email } });
         const customer = existingCustomer
           ? await tx.customer.update({
@@ -253,18 +294,45 @@ export class CheckoutService {
         // Cascades to CartItem via the schema's onDelete: Cascade.
         await tx.cart.delete({ where: { id: cart.id, tenantId } });
 
-        return { orderNumber, totalCents };
+        return {
+          orderNumber,
+          totalCents,
+          email: input.email,
+          phone: input.phone,
+          items: lines.map((line) => ({
+            nameSnapshot: line.name,
+            qty: line.qty,
+            priceCentsSnapshot: line.priceCents,
+          })),
+          departamentoCode: input.address.departamentoCode,
+          municipioName: input.address.municipioName,
+          tenantName: tenant.name,
+          merchantContactEmail,
+        };
       },
       { timeout: 15_000 },
     );
 
-    // Task 5 wires in the post-checkout email flow HERE, after the
-    // transaction has committed — a fire-and-forget call to
-    // services/api/src/mailer/order-emails.ts's sendOrderEmails(...), NOT
-    // awaited, wrapped in its own .catch(console.error), so a slow/failed
-    // email send can never delay or fail the checkout response itself. Not
-    // implemented in this task (Task 4) — order creation only.
+    // Fire-and-forget post-checkout email flow, same pattern as
+    // storefront/revalidate.ts's revalidateStorefrontTag: called AFTER the
+    // transaction has committed, never awaited by this method, and its own
+    // failure is swallowed here (not re-thrown) so a slow/failed email
+    // provider can never delay or fail the checkout response itself.
+    const departamentoName = DEPARTAMENTOS.find((d) => d.code === result.departamentoCode)?.name ?? result.departamentoCode;
+    const emailCtx: OrderEmailContext = {
+      orderNumber: result.orderNumber,
+      email: result.email,
+      phone: result.phone,
+      totalCents: result.totalCents,
+      items: result.items,
+      shippingAddress: { departamentoName, municipioName: result.municipioName },
+      merchantContactEmail: result.merchantContactEmail,
+      tenantName: result.tenantName,
+    };
+    sendOrderEmails(this.mailer, emailCtx).catch((err: unknown) => {
+      console.error('[checkout] order email failed', err);
+    });
 
-    return result;
+    return { orderNumber: result.orderNumber, totalCents: result.totalCents };
   }
 }
