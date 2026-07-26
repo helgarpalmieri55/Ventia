@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { Resend } from 'resend';
+import { DEFAULT_RESEND_FROM_EMAIL } from '@ventia/core';
 import { ConsoleMailer, MAILER, type Mailer } from './mailer';
 import { ResendMailer } from './resend-mailer';
 
@@ -25,10 +26,12 @@ import { ResendMailer } from './resend-mailer';
  * and take down the ENTIRE test suite, not just mailer-specific tests. This
  * mirrors `admin/admin.module.ts`'s AUTH_INSTANCE factory, which reads
  * `process.env.AUTH_SECRET ?? 'dev-secret-change-me'` directly for the exact
- * same reason rather than going through `loadEnv()`. The default below
- * (`pedidos@ventia.localhost`) matches `@ventia/core`'s `RESEND_FROM_EMAIL`
- * schema default, which real deploys (whose bootstrap DOES call `loadEnv()`
- * successfully, since every required var is actually set there) validate.
+ * same reason rather than going through `loadEnv()`. The fallback below
+ * imports `DEFAULT_RESEND_FROM_EMAIL` from `@ventia/core` (the same constant
+ * `RESEND_FROM_EMAIL`'s schema default uses) rather than a second copy of the
+ * literal, so this can't silently drift from what real deploys (whose
+ * bootstrap DOES call `loadEnv()` successfully, since every required var is
+ * actually set there) validate.
  */
 @Global()
 @Module({
@@ -37,7 +40,7 @@ import { ResendMailer } from './resend-mailer';
       provide: MAILER,
       useFactory: (): Mailer => {
         const apiKey = process.env.RESEND_API_KEY;
-        const fromEmail = process.env.RESEND_FROM_EMAIL ?? 'pedidos@ventia.localhost';
+        const fromEmail = process.env.RESEND_FROM_EMAIL ?? DEFAULT_RESEND_FROM_EMAIL;
         return apiKey ? new ResendMailer(new Resend(apiKey), fromEmail) : new ConsoleMailer();
       },
     },

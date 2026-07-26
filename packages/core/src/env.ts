@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+// Exported (not just a literal in the schema below) so mailer.module.ts's
+// hand-rolled process.env fallback (it can't call loadEnv() itself — see
+// that file's doc comment on why) can share this exact default instead of
+// carrying its own copy that could silently drift from this one.
+export const DEFAULT_RESEND_FROM_EMAIL = 'pedidos@ventia.localhost';
+
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
@@ -15,7 +21,7 @@ const envSchema = z.object({
   REVALIDATE_SECRET: z.string().min(1).default('dev-revalidate-secret'),
   STOREFRONT_INTERNAL_URL: z.string().url().default('http://localhost:3000'),
   RESEND_API_KEY: z.string().min(1).optional(),
-  RESEND_FROM_EMAIL: z.string().email().default('pedidos@ventia.localhost'),
+  RESEND_FROM_EMAIL: z.string().email().default(DEFAULT_RESEND_FROM_EMAIL),
 });
 
 export type Env = z.infer<typeof envSchema>;
