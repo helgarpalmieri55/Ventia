@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Patch, Put, UseGuards } from '@nestjs/common';
 import { Prisma, tenantDb } from '@ventia/db';
-import { paymentsSettingsSchema, storeSettingsSchema, themeSchema } from '@ventia/core';
+import { paymentsSettingsSchema, shippingSettingsSchema, storeSettingsSchema, themeSchema } from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from '../catalog/parse';
@@ -94,6 +94,29 @@ export class SettingsController {
     return this.toResponse(updated.name, updated.slug, updated.status, updated.settings, updated.theme);
   }
 
+  @Patch('shipping')
+  async updateShipping(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
+    const input = parseOr400(shippingSettingsSchema, body);
+    const db = tenantDb(session.tenantId);
+
+    // PATCH, but `settings.shipping` is replaced wholesale (like `theme`'s
+    // PUT, not payments/storeInfo's merge-in-place) — a methods array has no
+    // meaningful partial-update semantics: there's no sensible way to "merge"
+    // one array of shipping methods into another key-by-key.
+    const tenant = await db.tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
+    const settings = { ...asRecord(tenant.settings) };
+    settings.shipping = input;
+
+    const updated = await db.tenant.update({
+      where: { id: session.tenantId },
+      data: { settings: settings as Prisma.InputJsonValue },
+    });
+
+    await writeAudit(session, 'settings.shipping', 'Tenant', session.tenantId, input);
+
+    return this.toResponse(updated.name, updated.slug, updated.status, updated.settings, updated.theme);
+  }
+
   private toResponse(
     name: string,
     slug: string,
@@ -104,6 +127,7 @@ export class SettingsController {
     const settings = asRecord(settingsJson);
     const storeInfo = asRecord(settings.storeInfo as Prisma.JsonValue | undefined);
     const payments = asRecord(settings.payments as Prisma.JsonValue | undefined);
+    const shipping = asRecord(settings.shipping as Prisma.JsonValue | undefined);
     const theme = asRecord(themeJson);
 
     return {
@@ -113,6 +137,9 @@ export class SettingsController {
       storeInfo,
       theme,
       payments: { codEnabled: payments.codEnabled === true },
+      // Defaults to `{}` when unset — the admin UI (a later task) handles
+      // defaulting this to `{ methods: [] }` client-side.
+      shipping,
     };
   }
 }

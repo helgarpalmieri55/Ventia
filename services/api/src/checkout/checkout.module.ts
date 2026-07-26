@@ -2,9 +2,11 @@ import { Module } from '@nestjs/common';
 import { CartController } from './cart.controller';
 import { CartCookieGuard } from './cart-cookie.guard';
 import { CartService } from './cart.service';
+import { CheckoutController } from './checkout.controller';
+import { ShippingService } from './shipping.service';
 
 @Module({
-  controllers: [CartController],
-  providers: [CartCookieGuard, CartService],
+  controllers: [CartController, CheckoutController],
+  providers: [CartCookieGuard, CartService, ShippingService],
 })
 export class CheckoutModule {}
