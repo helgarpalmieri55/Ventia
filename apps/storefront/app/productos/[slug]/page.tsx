@@ -5,7 +5,8 @@ import { fetchTenantForHost } from '../../../lib/tenant';
 import { fetchStorefront, fetchStorefrontOrNull } from '../../../lib/storefront-api';
 import { ProductGrid } from '../../../components/product-grid';
 import { Price } from '../../../components/price';
-import { Badge, Button, Select } from '@ventia/ui';
+import { AddToCart } from '../../../components/add-to-cart';
+import { Badge } from '@ventia/ui';
 
 /** Shape of `GET /v1/storefront/products/:slug`'s response (see
  * services/api/src/storefront/products.service.ts#StorefrontProductDetail) —
@@ -42,28 +43,6 @@ interface StorefrontProductDetail {
     thumbnailUrl: string | null;
     inStock: boolean;
   }>;
-}
-
-const VARIANT_OPTION_KEYS = ['option1', 'option2', 'option3'] as const;
-
-/** Distinct, non-null values a given option position (0-based, matching
- * `options[position]`'s label) takes across `variants`, in first-seen order.
- * Purely decorative input for the per-option <Select> below — this task
- * wires no client state, so the derivation only needs to produce the list of
- * choices to display, not track a selection. Kept local to this page file
- * rather than a new `lib/` helper module, per the brief's "no new pure
- * helpers — composition only". */
-function distinctVariantOptionValues(
-  variants: StorefrontProductDetail['variants'],
-  position: number,
-): string[] {
-  const key = VARIANT_OPTION_KEYS[position];
-  const values: string[] = [];
-  for (const variant of variants) {
-    const value = variant[key];
-    if (value && !values.includes(value)) values.push(value);
-  }
-  return values;
 }
 
 /** Truncates `text` to at most `maxLength` characters, breaking at the last
@@ -196,35 +175,17 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
               </Badge>
             </div>
 
-            {product.options.length > 0 ? (
-              <div className="flex flex-col gap-3">
-                {product.options.map((optionName, i) => (
-                  <label key={optionName} className="flex flex-col gap-1 text-sm">
-                    <span className="font-medium">{optionName}</span>
-                    {/* Plain server-rendered <select>, no onChange/client state:
-                        purely informational for this task — "Agregar al
-                        carrito" stays disabled regardless of selection. A
-                        later task (P2b) wires real variant-aware add-to-cart. */}
-                    <Select defaultValue="">
-                      <option value="" disabled>
-                        Selecciona {optionName.toLowerCase()}
-                      </option>
-                      {distinctVariantOptionValues(product.variants, i).map((value) => (
-                        <option key={value} value={value}>
-                          {value}
-                        </option>
-                      ))}
-                    </Select>
-                  </label>
-                ))}
-              </div>
-            ) : null}
-
-            <div>
-              <Button disabled title="Disponible próximamente">
-                Agregar al carrito
-              </Button>
-            </div>
+            {/* Variant selection + "Agregar al carrito" is the one client
+                island on this otherwise fully server-rendered PDP (see
+                components/add-to-cart.tsx) — P2b wires this up for real;
+                P2a left it permanently disabled specifically for this task
+                to complete. */}
+            <AddToCart
+              productId={product.id}
+              options={product.options}
+              variants={product.variants}
+              inStock={product.inStock}
+            />
 
             {/* No markdown renderer exists in this codebase yet — rendering
                 descriptionMd as plain text (whitespace-pre-wrap so at least

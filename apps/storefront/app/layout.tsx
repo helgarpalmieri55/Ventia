@@ -3,6 +3,8 @@ import { headers } from 'next/headers';
 import { fetchTenantForHost } from '../lib/tenant';
 import { buildThemeVars, type TenantTheme } from '../lib/theme';
 import { fontVariables } from '../lib/fonts';
+import { CartProvider } from '../lib/cart-context';
+import { CartDrawer } from '../components/cart-drawer';
 
 export const metadata = { title: 'Ventia' };
 
@@ -28,7 +30,18 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     // per this tenant's saved `fontPair`) then pick the two that resolve to
     // an actual font, via `globals.css`'s `body`/heading rules.
     <html lang="es-CO" className={fontVariables} style={themeVars as React.CSSProperties}>
-      <body className="antialiased">{children}</body>
+      <body className="antialiased">
+        {/* `CartProvider`/`CartDrawer` are this app's first client
+            components (P2b) — `RootLayout` itself stays a Server Component
+            (it still needs `headers()`/tenant/theme resolution above); a
+            Server Component rendering a Client Component as `children`'s
+            sibling is ordinary Next.js composition, no serialization concern
+            since nothing unserializable crosses that boundary. */}
+        <CartProvider>
+          <CartDrawer />
+          {children}
+        </CartProvider>
+      </body>
     </html>
   );
 }
