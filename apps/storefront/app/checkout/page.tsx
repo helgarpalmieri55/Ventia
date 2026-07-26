@@ -28,6 +28,37 @@ const EMPTY_FORM: CheckoutFormState = {
 };
 
 const GENERIC_ERROR = 'Ocurrió un error al procesar tu pedido. Intenta de nuevo.';
+const VALIDATION_BANNER = 'Revisa los campos marcados.';
+
+/** Field-error keys in top-to-bottom form order, matching each field's
+ * `htmlFor`/wrapper `id` (the shipping radiogroup's wrapping `div` carries
+ * `id="shippingMethodId"` for exactly this purpose, since it has no single
+ * `<input id>` of its own). Used only to pick which invalid field to scroll
+ * to first — a purely cosmetic ordering, not a validation rule. */
+const FIELD_ORDER = [
+  'email',
+  'phone',
+  'nombreCompleto',
+  'departamentoCode',
+  'municipioName',
+  'direccion',
+  'complemento',
+  'barrio',
+  'notas',
+  'shippingMethodId',
+] as const;
+
+/** Scrolls to and focuses the first invalid field (in top-to-bottom form
+ * order) so a shopper who submits while scrolled down near the button sees
+ * SOMETHING happen, rather than the page silently doing nothing while the
+ * actual errors render off-screen above. */
+function scrollToFirstError(errors: Record<string, string>) {
+  const firstKey = FIELD_ORDER.find((key) => key in errors);
+  if (!firstKey) return;
+  const el = document.getElementById(firstKey);
+  el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (el instanceof HTMLElement) el.focus({ preventScroll: true });
+}
 
 /** Extracts a `{field: message}` map from a `CheckoutApiError`'s `details`,
  * local equivalent of `apps/admin/lib/errors.ts`'s `fieldErrors` helper
@@ -187,6 +218,8 @@ export default function CheckoutPage() {
     };
     if (Object.keys(stepErrors).length > 0) {
       setErrors(stepErrors);
+      setBannerError(VALIDATION_BANNER);
+      scrollToFirstError(stepErrors);
       return;
     }
 
@@ -368,7 +401,7 @@ export default function CheckoutPage() {
                 No hay métodos de envío disponibles para este departamento.
               </p>
             ) : (
-              <div role="radiogroup" aria-label="Método de envío" className="flex flex-col gap-2">
+              <div id="shippingMethodId" role="radiogroup" aria-label="Método de envío" className="flex flex-col gap-2">
                 {quoteLines.map((line) => (
                   <label
                     key={line.id}
