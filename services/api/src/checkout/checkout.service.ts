@@ -291,8 +291,27 @@ export class CheckoutService {
           data: { tenantId, orderId: order.id, type: 'created', actor: 'shopper' },
         });
 
-        // Cascades to CartItem via the schema's onDelete: Cascade.
-        await tx.cart.delete({ where: { id: cart.id, tenantId } });
+        // Cascades to CartItem via the schema's onDelete: Cascade. Two
+        // concurrent checkouts sharing the SAME cart cookie both pass every
+        // earlier check (the advisory lock only serializes order-number
+        // allocation, not this whole method), so the loser reaches this
+        // delete after the winner's transaction already committed and
+        // deleted the same row — Prisma throws P2025 ("record to delete does
+        // not exist") rather than a no-op, which would otherwise surface as
+        // an uncaught 500. Mapped to the same CART_EMPTY the method's own
+        // opening check throws for an already-empty/nonexistent cart: by the
+        // time this fires, that's exactly what's true for the loser (their
+        // cart is gone), and this throw still rolls back everything else
+        // this transaction wrote (Order/OrderItem/OrderEvent/Customer), same
+        // as any other throw inside this callback.
+        try {
+          await tx.cart.delete({ where: { id: cart.id, tenantId } });
+        } catch (err) {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+            throw new HttpException({ error: 'CART_EMPTY' }, 400);
+          }
+          throw err;
+        }
 
         return {
           orderNumber,

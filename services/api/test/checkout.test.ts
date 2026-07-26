@@ -540,6 +540,57 @@ describe('POST /v1/storefront/checkout — concurrency (pg_advisory_xact_lock sa
   });
 });
 
+describe('POST /v1/storefront/checkout — concurrent checkout of the SAME cart', () => {
+  it('one succeeds (201), the other gets a clean 400 CART_EMPTY (not an uncaught 500); exactly one Order is created', async () => {
+    // Same cookie for both requests this time (unlike the order-numbering
+    // concurrency test above, which deliberately used two DIFFERENT carts) —
+    // this exercises a different race entirely: two requests racing to
+    // check out the SAME guest cart. The advisory lock only serializes
+    // order-NUMBER allocation, not this whole method, so both requests can
+    // get past every earlier check before either commits; the loser's own
+    // `tx.cart.delete(...)` then targets a row the winner's transaction
+    // already deleted, which Prisma reports as P2025 ("record to delete
+    // does not exist") — this must surface as a clean CART_EMPTY, not an
+    // uncaught 500, and must not leave a second, partial Order behind.
+    const cookie = await newCartWithItem('checkout-e.ventia.localhost', concurrencyProductId, 1);
+
+    const before = await prisma.order.count({ where: { tenantId: tenantEId } });
+
+    const [res1, res2] = await Promise.all([
+      request(app.getHttpServer())
+        .post('/v1/storefront/checkout')
+        .set('x-tenant-domain', 'checkout-e.ventia.localhost')
+        .set('Cookie', `ventia_cart=${cookie}`)
+        .send({
+          email: 'samecart1@example.com',
+          phone: '3003330000',
+          address: BOGOTA_ADDRESS,
+          shippingMethodId: 'flat-1',
+          paymentMethod: 'cod',
+        }),
+      request(app.getHttpServer())
+        .post('/v1/storefront/checkout')
+        .set('x-tenant-domain', 'checkout-e.ventia.localhost')
+        .set('Cookie', `ventia_cart=${cookie}`)
+        .send({
+          email: 'samecart2@example.com',
+          phone: '3004440000',
+          address: BOGOTA_ADDRESS,
+          shippingMethodId: 'flat-1',
+          paymentMethod: 'cod',
+        }),
+    ]);
+
+    const statuses = [res1.status, res2.status].sort();
+    expect(statuses).toEqual([201, 400]);
+    const failed = res1.status === 400 ? res1 : res2;
+    expect(failed.body.error).toBe('CART_EMPTY');
+
+    const after = await prisma.order.count({ where: { tenantId: tenantEId } });
+    expect(after).toBe(before + 1);
+  });
+});
+
 describe('POST /v1/storefront/checkout — repeat customer', () => {
   it('a second checkout for the same email updates the existing Customer instead of creating a duplicate', async () => {
     const before = await prisma.customer.findFirst({ where: { tenantId: tenantAId, email: 'ana@example.com' } });

@@ -99,10 +99,13 @@ the checkout transaction rather than a new counter table.
   6. Clear the cart.
 - After commit (fire-and-forget, same pattern as P2a's ISR revalidation):
   send order-confirmation + COD-confirmation-request emails to the shopper,
-  and a new-order alert to the merchant's contact email. Each attempt
-  writes a `NotificationLog` row (existing table) keyed for idempotency;
-  full BullMQ retry/backoff (spec's M10 AC) is backlog — introducing a
-  queue for 3 fire-and-forget sends isn't justified yet.
+  and a new-order alert to the merchant's contact email. **Amended after
+  implementation** (P2b's phase-scoped review caught this section drifting
+  from what actually got built): as built, sends are fire-and-forget with no
+  `NotificationLog` write and no idempotency key — that table/mechanism only
+  earns its cost alongside the BullMQ retry/backoff it exists to support
+  (spec's M10 AC), so both are deferred together to P2c rather than adding
+  an audit-log write path today with no retry consumer to use it.
 
 ### 3. Shipping settings (`services/api/src/settings/`, extended)
 
@@ -152,11 +155,20 @@ the checkout transaction rather than a new counter table.
 
 ## Error handling
 
-Typed codes: `CART_EMPTY`, `INSUFFICIENT_STOCK` (per-line), `INVALID_MUNICIPIO`,
+Typed codes: `CART_EMPTY`, `INSUFFICIENT_STOCK` (per-line),
 `SHIPPING_METHOD_UNAVAILABLE`, plus inherited `TENANT_NOT_FOUND`/
-`TENANT_SUSPENDED` from the existing guard. Checkout is one transaction —
-any failure rolls back the whole order, never a partial one. Email failures
-never fail the checkout response (fire-and-forget, logged).
+`TENANT_SUSPENDED` from the existing guard. **Amended after implementation:**
+a bad municipio/departamento pairing does not get its own `INVALID_MUNICIPIO`
+code as this section originally said — `checkoutAddressSchema`'s own
+`.refine()` rejects it as an ordinary `VALIDATION_FAILED`, nested under
+`details.address.fieldErrors.municipioName` (caught by Task 8's review, and
+by the storefront's `checkout-api.ts`/`checkout/page.tsx`, which handle it
+as such). Checkout is one transaction — any failure rolls back the whole
+order, never a partial one, including the case where two requests race to
+check out the SAME cart (the loser's own cart-delete then targets an
+already-deleted row, mapped to a plain `CART_EMPTY` rather than an uncaught
+500 — see `checkout.service.ts`'s P2025 handling around `tx.cart.delete`).
+Email failures never fail the checkout response (fire-and-forget, logged).
 
 ## Testing
 
