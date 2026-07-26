@@ -160,10 +160,12 @@ export class CheckoutController {
   // CheckoutService.checkout's raw-SQL advisory-lock transaction, which is
   // exactly why that one lives in the service), and it doesn't reuse or
   // share any state with CheckoutService's constructor-injected
-  // dependencies (ShippingService, MAILER). Matches this controller's own
-  // established precedent: `quote()` above also does its (admittedly
-  // smaller) validation logic directly in the controller rather than
-  // pushing a one-line check into ShippingService.
+  // dependencies (ShippingService, MAILER). This app's storefront
+  // controllers commonly read straight off `tenantDb` for a plain lookup
+  // with no service in between (see e.g. `storefront/categories.controller.ts`,
+  // `storefront/content.controller.ts`, `settings.controller.ts`) — this
+  // route follows that same convention, not `quote()`'s (which delegates
+  // the actual data access to `ShippingService` and only validates inline).
   @Get('confirmacion/:orderNumber')
   async confirmation(
     @StorefrontTenantId() tenantId: string,

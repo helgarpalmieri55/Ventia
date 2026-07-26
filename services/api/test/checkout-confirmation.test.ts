@@ -191,7 +191,7 @@ describe('GET /v1/storefront/checkout/confirmacion/:orderNumber — not found', 
     expect(res.body.error).toBe('ORDER_NOT_FOUND');
   });
 
-  it('404s with ORDER_NOT_FOUND for a non-numeric order number param (parses to NaN, matches no row)', async () => {
+  it('404s with ORDER_NOT_FOUND for a non-numeric order number param (parses to NaN, rejected by the controller\'s own guard before ever reaching Prisma — a bare NaN where-clause value throws PrismaClientValidationError rather than matching no row)', async () => {
     const res = await request(app.getHttpServer())
       .get('/v1/storefront/checkout/confirmacion/not-a-number')
       .set('x-tenant-domain', 'confirm-a.ventia.localhost');
