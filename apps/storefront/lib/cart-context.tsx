@@ -12,6 +12,13 @@ export interface CartContextValue {
   addItem: (productId: string, variantId: string | null, qty: number) => Promise<void>;
   updateItem: (itemId: string, qty: number) => Promise<void>;
   removeItem: (itemId: string) => Promise<void>;
+  /** Resets the LOCAL cart state only — no API call. Call this right after a
+   * successful `submitCheckout()`: the checkout endpoint already deletes the
+   * server-side `Cart` row (and clears the `ventia_cart` cookie) as part of a
+   * successful checkout, so there's nothing left to ask the server for. This
+   * just makes the client's own state (drawer badge count, `/carrito` page)
+   * match that reality immediately, without waiting on/triggering a refetch. */
+  clearCart: () => void;
 }
 
 const CartContext = React.createContext<CartContextValue | null>(null);
@@ -100,6 +107,10 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     [enqueue],
   );
 
+  const clearCart = React.useCallback(() => {
+    setCart({ lines: [], subtotalCents: 0, taxCents: 0 });
+  }, []);
+
   const value = React.useMemo<CartContextValue>(
     () => ({
       cart,
@@ -110,8 +121,9 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       addItem,
       updateItem,
       removeItem,
+      clearCart,
     }),
-    [cart, loading, isOpen, addItem, updateItem, removeItem],
+    [cart, loading, isOpen, addItem, updateItem, removeItem, clearCart],
   );
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;

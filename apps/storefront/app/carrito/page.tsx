@@ -114,13 +114,8 @@ export default function CarritoPage() {
         </div>
       </div>
 
-      {/* Task 8 builds the full checkout flow — no `/checkout` route exists
-          yet, so this stays a plain disabled-looking affordance rather than
-          linking somewhere that 404s. */}
       <div className="mt-6 flex justify-end">
-        <Button disabled title="Disponible próximamente">
-          Ir a pagar
-        </Button>
+        <Button href="/checkout">Ir a pagar</Button>
       </div>
     </main>
   );
