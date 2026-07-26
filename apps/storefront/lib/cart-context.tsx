@@ -29,6 +29,28 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = React.useState(true);
   const [isOpen, setIsOpen] = React.useState(false);
 
+  // Serializes every mutation below through one promise chain: a shopper can
+  // fire a second update (e.g. another qty change) before the first one's
+  // request has even reached the server, and two concurrent PATCHes give no
+  // guarantee they're processed in the order they were sent — a reviewer of
+  // this task reproduced exactly that: a slower request's response arrived
+  // second and overwrote a faster, later request's result, in both the
+  // displayed cart AND the persisted DB row. Queuing mutations so only one
+  // is ever in flight at a time removes the race entirely (nothing left to
+  // reorder, client-side or server-side) rather than just picking which
+  // response wins client-side, which would still leave the wrong value
+  // persisted.
+  const mutationQueue = React.useRef<Promise<unknown>>(Promise.resolve());
+
+  const enqueue = React.useCallback(<T,>(run: () => Promise<T>): Promise<T> => {
+    const result = mutationQueue.current.then(run, run);
+    // Swallow here so one failed mutation doesn't permanently poison the
+    // queue for every mutation after it — the actual error still propagates
+    // to this call's own caller via the returned (un-caught) `result`.
+    mutationQueue.current = result.catch(() => undefined);
+    return result;
+  }, []);
+
   React.useEffect(() => {
     let cancelled = false;
     fetchCart()
@@ -51,20 +73,32 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const addItem = React.useCallback(async (productId: string, variantId: string | null, qty: number) => {
-    const next = await addCartItem(productId, variantId, qty);
-    setCart(next);
-  }, []);
+  const addItem = React.useCallback(
+    (productId: string, variantId: string | null, qty: number) =>
+      enqueue(async () => {
+        const next = await addCartItem(productId, variantId, qty);
+        setCart(next);
+      }),
+    [enqueue],
+  );
 
-  const updateItem = React.useCallback(async (itemId: string, qty: number) => {
-    const next = await updateCartItem(itemId, qty);
-    setCart(next);
-  }, []);
+  const updateItem = React.useCallback(
+    (itemId: string, qty: number) =>
+      enqueue(async () => {
+        const next = await updateCartItem(itemId, qty);
+        setCart(next);
+      }),
+    [enqueue],
+  );
 
-  const removeItem = React.useCallback(async (itemId: string) => {
-    const next = await removeCartItem(itemId);
-    setCart(next);
-  }, []);
+  const removeItem = React.useCallback(
+    (itemId: string) =>
+      enqueue(async () => {
+        const next = await removeCartItem(itemId);
+        setCart(next);
+      }),
+    [enqueue],
+  );
 
   const value = React.useMemo<CartContextValue>(
     () => ({

@@ -1,8 +1,11 @@
 'use client';
 
+import { useState } from 'react';
 import { Button, Dialog } from '@ventia/ui';
 import { formatCOP } from '../lib/format';
 import { useCart } from '../lib/cart-context';
+
+const MUTATION_ERROR = 'No pudimos actualizar tu carrito. Intenta de nuevo.';
 
 /** The storefront's first client component (P2b). Renders both halves of the
  * cart UI from one mount point: a small always-visible fixed-position
@@ -11,9 +14,26 @@ import { useCart } from '../lib/cart-context';
  * Mounting `<CartDrawer />` once in the root layout, alongside
  * `<CartProvider>`, is sufficient to get both on every page. */
 export function CartDrawer() {
-  const { cart, isOpen, openCart, closeCart, updateItem, removeItem } = useCart();
+  const { cart, loading, isOpen, openCart, closeCart, updateItem, removeItem } = useCart();
+  const [mutationError, setMutationError] = useState<string | null>(null);
 
   const itemCount = cart?.lines.reduce((sum, line) => sum + line.qty, 0) ?? 0;
+
+  function handleUpdateItem(itemId: string, qty: number) {
+    setMutationError(null);
+    updateItem(itemId, qty).catch((err) => {
+      console.error('[cart] failed to update item', err);
+      setMutationError(MUTATION_ERROR);
+    });
+  }
+
+  function handleRemoveItem(itemId: string) {
+    setMutationError(null);
+    removeItem(itemId).catch((err) => {
+      console.error('[cart] failed to remove item', err);
+      setMutationError(MUTATION_ERROR);
+    });
+  }
 
   return (
     <>
@@ -40,7 +60,11 @@ export function CartDrawer() {
             </button>
           </div>
 
-          {!cart || cart.lines.length === 0 ? (
+          {mutationError ? <p className="text-sm text-destructive">{mutationError}</p> : null}
+
+          {loading && !cart ? (
+            <p className="text-sm text-muted-foreground">Cargando tu carrito…</p>
+          ) : !cart || cart.lines.length === 0 ? (
             <p className="text-sm text-muted-foreground">Tu carrito está vacío.</p>
           ) : (
             <>
@@ -51,7 +75,7 @@ export function CartDrawer() {
                       <span className="text-sm font-medium">{line.name}</span>
                       <button
                         type="button"
-                        onClick={() => void removeItem(line.id)}
+                        onClick={() => handleRemoveItem(line.id)}
                         aria-label={`Quitar ${line.name}`}
                         className="text-xs text-muted-foreground underline"
                       >
@@ -67,7 +91,7 @@ export function CartDrawer() {
                           value={line.qty}
                           onChange={(e) => {
                             const qty = Number(e.target.value);
-                            if (Number.isInteger(qty) && qty > 0) void updateItem(line.id, qty);
+                            if (Number.isInteger(qty) && qty > 0) handleUpdateItem(line.id, qty);
                           }}
                           className="h-8 w-16 rounded-md border border-border bg-background px-2 text-sm"
                         />

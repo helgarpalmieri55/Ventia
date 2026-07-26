@@ -1,8 +1,11 @@
 'use client';
 
+import { useState } from 'react';
 import { Button, Table, Thead, Tbody, Tr, Th, Td } from '@ventia/ui';
 import { formatCOP } from '../../lib/format';
 import { useCart } from '../../lib/cart-context';
+
+const MUTATION_ERROR = 'No pudimos actualizar tu carrito. Intenta de nuevo.';
 
 /** The fuller `/carrito` cart page — same data/state as `CartDrawer` (via the
  * same `useCart()` context), just more room: a table instead of a compact
@@ -11,6 +14,23 @@ import { useCart } from '../../lib/cart-context';
  * there's no useful server-rendered shell around it. */
 export default function CarritoPage() {
   const { cart, loading, updateItem, removeItem } = useCart();
+  const [mutationError, setMutationError] = useState<string | null>(null);
+
+  function handleUpdateItem(itemId: string, qty: number) {
+    setMutationError(null);
+    updateItem(itemId, qty).catch((err) => {
+      console.error('[cart] failed to update item', err);
+      setMutationError(MUTATION_ERROR);
+    });
+  }
+
+  function handleRemoveItem(itemId: string) {
+    setMutationError(null);
+    removeItem(itemId).catch((err) => {
+      console.error('[cart] failed to remove item', err);
+      setMutationError(MUTATION_ERROR);
+    });
+  }
 
   if (loading && !cart) {
     return (
@@ -35,6 +55,7 @@ export default function CarritoPage() {
   return (
     <main className="mx-auto max-w-4xl px-4 py-8">
       <h1 className="mb-6 text-2xl font-semibold">Tu carrito</h1>
+      {mutationError ? <p className="mb-4 text-sm text-destructive">{mutationError}</p> : null}
       <Table>
         <Thead>
           <Tr>
@@ -53,10 +74,11 @@ export default function CarritoPage() {
                 <input
                   type="number"
                   min={1}
+                  aria-label={`Cantidad de ${line.name}`}
                   value={line.qty}
                   onChange={(e) => {
                     const qty = Number(e.target.value);
-                    if (Number.isInteger(qty) && qty > 0) void updateItem(line.id, qty);
+                    if (Number.isInteger(qty) && qty > 0) handleUpdateItem(line.id, qty);
                   }}
                   className="h-9 w-20 rounded-md border border-border bg-background px-2 text-sm"
                 />
@@ -66,7 +88,7 @@ export default function CarritoPage() {
               <Td>
                 <button
                   type="button"
-                  onClick={() => void removeItem(line.id)}
+                  onClick={() => handleRemoveItem(line.id)}
                   className="text-sm text-muted-foreground underline"
                 >
                   Quitar
