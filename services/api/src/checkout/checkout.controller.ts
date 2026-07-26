@@ -1,5 +1,6 @@
-import { Body, Controller, Get, HttpException, Inject, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, Inject, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
+import { Prisma, tenantDb } from '@ventia/db';
 import { checkoutAddressSchema, DEPARTAMENTOS, type CheckoutAddressInput } from '@ventia/core';
 import { PublicTenantGuard } from '../storefront/public-tenant.guard';
 import { StorefrontTenantId } from '../storefront/storefront-tenant.decorator';
@@ -7,6 +8,35 @@ import { CartCookieGuard } from './cart-cookie.guard';
 import { CartCookieKey } from './cart-cookie.decorator';
 import { ShippingService } from './shipping.service';
 import { CheckoutService, type CheckoutInput } from './checkout.service';
+
+type JsonRecord = Record<string, unknown>;
+
+// Same defensive-parse posture as checkout.service.ts's own `asRecord` /
+// settings.controller.ts's / shipping.service.ts's: `shippingAddress` is a
+// loosely-typed `Json` column. Every row here was in fact written by this
+// same module's checkout.service.ts through the validated `CheckoutAddressInput`
+// shape, but the column itself carries no schema guarantee at the DB level,
+// so this read still narrows defensively rather than casting blindly.
+function asRecord(value: Prisma.JsonValue | null | undefined): JsonRecord {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+/** Narrow, intentionally minimal DTO for the post-checkout confirmation
+ * screen — NOT the full order-detail shape a future P2c tracking page will
+ * need. Deliberately omits `direccion`/`complemento`/`barrio`/`telefono`/
+ * `email` (and everything else on Order/its address): this is a security-
+ * relevant contract (order numbers are shareable/guessable-by-increment, so
+ * this route is intentionally public — see the route's own comment below —
+ * and must never leak the full address or any contact info to whoever holds
+ * just the order number). */
+export interface OrderConfirmationDto {
+  orderNumber: number;
+  totalCents: number;
+  createdAt: string;
+  items: Array<{ nameSnapshot: string; qty: number; priceCentsSnapshot: number }>;
+  shippingCiudad: string;
+  shippingDepartamento: string;
+}
 
 const CART_COOKIE_NAME = 'ventia_cart';
 
@@ -115,5 +145,73 @@ export class CheckoutController {
     // its own cookie write).
     res.clearCookie(CART_COOKIE_NAME);
     return result;
+  }
+
+  // No CartCookieGuard (unlike POST / above) and no other guard beyond the
+  // controller-level PublicTenantGuard: this is a plain lookup by order
+  // number, not tied to any particular guest's cart. Publicly reachable is
+  // intentional — order numbers alone (VNT-1042-style) reveal nothing
+  // sensitive per the spec, and this is exactly the URL a shopper lands on
+  // right after checkout, unauthenticated.
+  //
+  // This read is intentionally inlined here rather than added as a new
+  // CheckoutService method: it's a single, non-transactional tenantDb read
+  // plus DTO shaping with no write/locking concerns (unlike
+  // CheckoutService.checkout's raw-SQL advisory-lock transaction, which is
+  // exactly why that one lives in the service), and it doesn't reuse or
+  // share any state with CheckoutService's constructor-injected
+  // dependencies (ShippingService, MAILER). Matches this controller's own
+  // established precedent: `quote()` above also does its (admittedly
+  // smaller) validation logic directly in the controller rather than
+  // pushing a one-line check into ShippingService.
+  @Get('confirmacion/:orderNumber')
+  async confirmation(
+    @StorefrontTenantId() tenantId: string,
+    @Param('orderNumber') orderNumberParam: string,
+  ): Promise<OrderConfirmationDto> {
+    // A non-numeric param parses to NaN. Verified experimentally (this file's
+    // own test suite caught this): passing `NaN` as an `Int` where-clause
+    // value does NOT simply match zero rows the way a merely-nonexistent
+    // number would — Prisma's query engine rejects `NaN` outright with a
+    // `PrismaClientValidationError` ("Argument `number` is missing"), which
+    // would otherwise surface as an uncaught 500. So malformed input needs
+    // its own explicit branch after all; it's folded into the same
+    // `ORDER_NOT_FOUND` 404 (rather than a distinct 400) since from the
+    // shopper's perspective a malformed confirmation URL and a genuinely
+    // nonexistent order number are the same outcome: "this URL doesn't point
+    // at a real order".
+    const orderNumber = parseInt(orderNumberParam, 10);
+    if (!Number.isInteger(orderNumber)) {
+      throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
+    }
+
+    const order = await tenantDb(tenantId).order.findFirst({
+      where: { tenantId, number: orderNumber },
+      include: { items: true },
+    });
+    if (!order) {
+      throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
+    }
+
+    const address = asRecord(order.shippingAddress);
+    const departamentoCode = typeof address.departamentoCode === 'string' ? address.departamentoCode : '';
+    const shippingCiudad = typeof address.municipioName === 'string' ? address.municipioName : '';
+    // Same "fall back to the raw code" defensive posture as
+    // checkout.service.ts's own DEPARTAMENTOS lookup when building the
+    // post-checkout email context.
+    const shippingDepartamento = DEPARTAMENTOS.find((d) => d.code === departamentoCode)?.name ?? departamentoCode;
+
+    return {
+      orderNumber: order.number,
+      totalCents: order.totalCents,
+      createdAt: order.createdAt.toISOString(),
+      items: order.items.map((item) => ({
+        nameSnapshot: item.nameSnapshot,
+        qty: item.qty,
+        priceCentsSnapshot: item.priceCentsSnapshot,
+      })),
+      shippingCiudad,
+      shippingDepartamento,
+    };
   }
 }
