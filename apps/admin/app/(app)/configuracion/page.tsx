@@ -6,6 +6,7 @@ import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Inp
 import { ApiError, apiFetch } from '../../../lib/api';
 import { errorMessage, fieldErrors } from '../../../lib/errors';
 import { FONT_PAIR_LABELS, RADIUS_LABELS, themeToFormState } from '../../../lib/theme-form';
+import { EnviosTab } from '../../../components/shipping-tab';
 
 interface StoreInfo {
   category?: string;
@@ -20,21 +21,23 @@ interface StoreInfo {
  * it wholesale with the fresh response the PATCH/PUT itself returns, so
  * switching tabs (or re-saving the same tab) always starts from the latest
  * server state rather than a stale initial fetch. */
-interface SettingsResponse {
+export interface SettingsResponse {
   name: string;
   slug: string;
   status: string;
   storeInfo: StoreInfo;
   theme: Record<string, unknown>;
   payments: { codEnabled: boolean };
+  shipping: Record<string, unknown>;
 }
 
-type Tab = 'tienda' | 'marca' | 'pagos';
+type Tab = 'tienda' | 'marca' | 'pagos' | 'envios';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'tienda', label: 'Tienda' },
   { key: 'marca', label: 'Marca' },
   { key: 'pagos', label: 'Pagos' },
+  { key: 'envios', label: 'Envíos' },
 ];
 
 /** Owner-only route (hidden from staff in the nav, enforced server-side by
@@ -120,12 +123,15 @@ export default function ConfiguracionPage() {
         <div hidden={tab !== 'pagos'}>
           <PagosTab settings={settings} onSaved={setSettings} />
         </div>
+        <div hidden={tab !== 'envios'}>
+          <EnviosTab settings={settings} onSaved={setSettings} />
+        </div>
       </CardContent>
     </Card>
   );
 }
 
-interface TabProps {
+export interface TabProps {
   settings: SettingsResponse;
   onSaved: (settings: SettingsResponse) => void;
 }
