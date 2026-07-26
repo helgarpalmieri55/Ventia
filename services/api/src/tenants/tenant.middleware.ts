@@ -8,6 +8,12 @@ declare module 'express-serve-static-core' {
     // Set by PublicTenantGuard once req.tenant is confirmed resolved and
     // live; storefront route handlers read it via @StorefrontTenantId().
     storefrontTenantId?: string;
+    // Set by CartCookieGuard: the `ventia_cart` cookie value IF it resolves
+    // to a real Cart row for this tenant, else null (stale/tampered cookie,
+    // no cookie at all, or another tenant's cookie value replayed against
+    // this one). Never thrown on — an absent/invalid cart is normal state,
+    // handled per-route via @CartCookieKey().
+    cartCookieKey?: string | null;
   }
 }
 

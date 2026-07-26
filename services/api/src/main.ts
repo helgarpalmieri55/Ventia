@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import type { INestApplication } from '@nestjs/common';
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import { toNodeHandler } from 'better-auth/node';
 import { AppModule } from './app.module';
 import { AUTH_INSTANCE, type AuthInstance } from './admin/auth-instance';
@@ -15,6 +16,12 @@ export async function createApp(): Promise<INestApplication> {
   // provider (one instance, not a second one built here) — see src/admin/auth-instance.ts.
   const auth = app.get<AuthInstance>(AUTH_INSTANCE);
   const httpAdapter = app.getHttpAdapter().getInstance() as express.Express;
+  // Populates req.cookies for CartCookieGuard (and any future cookie
+  // consumer) — better-auth parses its own session cookie internally, not
+  // via Express's req.cookies, so this was never wired up before. No
+  // interaction with the body-parser ordering below; mounted early in the
+  // middleware chain since cookie parsing is cheap and side-effect-free.
+  httpAdapter.use(cookieParser());
   httpAdapter.all('/v1/auth/*', toNodeHandler(auth));
   // Path-scoped '10mb' limit ONLY for the CSV import routes (Task 8's
   // POST /v1/admin/import/*, whose own 2 MB cap is enforced in

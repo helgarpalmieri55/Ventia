@@ -3,6 +3,7 @@ import Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
 import { AdminModule } from './admin/admin.module';
 import { CatalogModule } from './catalog/catalog.module';
+import { CheckoutModule } from './checkout/checkout.module';
 import { HealthController } from './health/health.controller';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { SettingsModule } from './settings/settings.module';
@@ -15,7 +16,7 @@ import { TenantController } from './tenants/tenant.controller';
 export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
 
 @Module({
-  imports: [AdminModule, CatalogModule, OnboardingModule, SettingsModule, StaffModule, StorefrontModule],
+  imports: [AdminModule, CatalogModule, CheckoutModule, OnboardingModule, SettingsModule, StaffModule, StorefrontModule],
   controllers: [HealthController, TenantController],
   providers: [
     {
