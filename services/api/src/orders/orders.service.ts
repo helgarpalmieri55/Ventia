@@ -250,6 +250,26 @@ export class OrdersService {
       await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
 
+      // Serializes every transition on this SAME order — mirrors
+      // order-number.ts's advisory lock (there keyed on tenantId, here on
+      // orderId), for the identical reason: the order read right below is a
+      // plain SELECT under Postgres's default READ COMMITTED, so without
+      // this lock, two concurrent transitions on the same order (e.g. two
+      // admin tabs both clicking "cancel", or a double-click before the
+      // first response lands) can both read the same pre-mutation status,
+      // both pass the ALLOWED_ACTIONS check below, and both commit their own
+      // branch — reproduced empirically in this task's review as a genuine
+      // double-restock (two concurrent cancels from CONFIRMED) and a worse,
+      // silent stock-loss bug (confirm racing cancel from PENDING). This
+      // lock also closes the identical race in the `shipped` branch's
+      // find-then-create-or-update on `Shipment` (no unique constraint on
+      // orderId exists to catch a duplicate row otherwise). Held for the
+      // remainder of this transaction; the losing concurrent call blocks
+      // here until the winner commits, then re-reads the now-updated status
+      // and correctly fails ALLOWED_ACTIONS with INVALID_TRANSITION instead
+      // of corrupting stock.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`;
+
       const order = await tx.order.findFirst({ where: { id: orderId, tenantId }, include: { items: true } });
       if (!order) throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
 

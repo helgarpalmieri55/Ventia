@@ -291,6 +291,86 @@ describe('cancel — restock', () => {
   });
 });
 
+describe('concurrent transitions on the SAME order — advisory lock', () => {
+  // Regression coverage for a real, 100%-reproducible bug this task's review
+  // found and fixed: transition()'s order read is a plain SELECT under
+  // Postgres's default READ COMMITTED, so without a per-order advisory lock
+  // (pg_advisory_xact_lock(hashtext(orderId)), mirroring order-number.ts's
+  // tenantId-keyed lock), two concurrent transitions on the same order could
+  // both read the same pre-mutation status, both pass ALLOWED_ACTIONS, and
+  // both commit their own branch — a two-admin-tabs-clicking-the-same-button
+  // scenario, not a contrived edge case.
+
+  it('two concurrent cancels from CONFIRMED: exactly one restock, not two', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-race-cancel@demo.co', 'owner');
+    // Seeded at 6 (not 10): CONFIRMED is a directly-seeded starting point
+    // (this file's established convention — see seedOrder's doc comment)
+    // standing in for "already decremented by an earlier confirm" — a real
+    // CONFIRMED order of qty 4 would already have taken this product's stock
+    // from 10 down to 6, so a single legitimate restock must bring it back
+    // to exactly 10, not 14.
+    const product = await seedProduct(tenantId, 6);
+    const orderId = await seedOrder(tenantId, 'CONFIRMED', [{ productId: product.id, qty: 4 }]);
+
+    const [a, b] = await Promise.all([
+      request(app.getHttpServer()).patch(`/v1/admin/orders/${orderId}/cancel`).set('cookie', cookie).send(bodyFor('cancel')),
+      request(app.getHttpServer()).patch(`/v1/admin/orders/${orderId}/cancel`).set('cookie', cookie).send(bodyFor('cancel')),
+    ]);
+
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([200, 409]); // one winner, one loser (already CANCELLED — a terminal state, no action is ever allowed from it)
+
+    const productAfter = await prisma.product.findUnique({ where: { id: product.id } });
+    expect(productAfter?.stock).toBe(10); // restocked exactly once, not twice (would be 14 if double-restocked)
+
+    const movements = await prisma.inventoryMovement.count({ where: { orderId, reason: 'order_cancelled' } });
+    expect(movements).toBe(1);
+
+    const orderAfter = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(orderAfter?.status).toBe('CANCELLED');
+  });
+
+  it('confirm racing cancel from PENDING: the lock makes the final state deterministic either way', async () => {
+    // Unlike the cancel/cancel race above, confirm and cancel are NOT
+    // mutually exclusive from PENDING: ALLOWED_ACTIONS['CONFIRMED'] also
+    // includes 'cancel' (decision #3 in the design doc — cancel is reachable
+    // from every non-terminal status), so if confirm wins the lock first,
+    // the racing cancel call is STILL a legitimate transition afterward
+    // (CONFIRMED -> CANCELLED, restocking back), not a conflict — this test
+    // must not assume a fixed [200, 409] status pair (whichever call wins
+    // the lock, the OTHER call's outcome is a genuinely valid 200 too, not
+    // an error). What must hold regardless of which order wins the race is
+    // the FINAL state: both orderings below converge to the same end point.
+    //   (a) confirm wins first: PENDING->CONFIRMED (stock 10->6), then
+    //       cancel is now valid from CONFIRMED: CONFIRMED->CANCELLED
+    //       (restock 6->10).
+    //   (b) cancel wins first: PENDING->CANCELLED directly (no restock —
+    //       nothing was ever decremented), then confirm's later attempt
+    //       hits CANCELLED, a terminal status with no allowed actions -> 409.
+    // Both converge to: order CANCELLED, stock back at 10 — never a
+    // CANCELLED order sitting on decremented-but-never-restocked stock,
+    // which is the exact silent-corruption bug this test guards against.
+    const { cookie, tenantId } = await signUpWithTenant('orders-race-confirm-cancel@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 4 }]);
+
+    const [confirmRes, cancelRes] = await Promise.all([
+      request(app.getHttpServer()).patch(`/v1/admin/orders/${orderId}/confirm`).set('cookie', cookie),
+      request(app.getHttpServer()).patch(`/v1/admin/orders/${orderId}/cancel`).set('cookie', cookie).send(bodyFor('cancel')),
+    ]);
+
+    // Neither call ever crashes (no 5xx) and at least the "loser" of the
+    // fair race still gets a well-formed rejection, never an unhandled error.
+    expect([confirmRes.status, cancelRes.status].every((s) => s === 200 || s === 409)).toBe(true);
+
+    const orderAfter = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(orderAfter?.status).toBe('CANCELLED');
+
+    const productAfter = await prisma.product.findUnique({ where: { id: product.id } });
+    expect(productAfter?.stock).toBe(10);
+  });
+});
+
 describe('shipped — carrier/trackingNumber validation', () => {
   it('missing carrier and/or trackingNumber returns 400 VALIDATION_FAILED, order untouched', async () => {
     const { cookie, tenantId } = await signUpWithTenant('orders-shipped-validation@demo.co', 'owner');
