@@ -11,6 +11,7 @@ const QUOTE_TEST_DOMAINS = [
   'quote-zone.ventia.localhost',
   'quote-disabled.ventia.localhost',
   'quote-unset.ventia.localhost',
+  'quote-free-over.ventia.localhost',
 ];
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
@@ -23,6 +24,7 @@ let flatTenantId: string;
 let zoneTenantId: string;
 let disabledTenantId: string;
 let unsetTenantId: string;
+let freeOverTenantId: string;
 
 beforeAll(async () => {
   db = await startTestDb();
@@ -116,6 +118,35 @@ beforeAll(async () => {
     data: { tenantId: unsetTenantId, domain: 'quote-unset.ventia.localhost', isPrimary: true },
   });
 
+  // quote() can't know the real cart subtotal at this stage, so a free_over
+  // method shows fallbackPriceCents as a placeholder — see the dedicated
+  // quote() test below for the exact assertion this fixture backs.
+  const freeOverTenant = await prisma.tenant.create({
+    data: {
+      slug: 'quote-free-over',
+      name: 'Quote Free Over',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [
+            {
+              id: 'free-over-1',
+              type: 'free_over',
+              label: 'Envío gratis desde $100.000',
+              thresholdCents: 10_000_00,
+              fallbackPriceCents: 15000,
+              enabled: true,
+            },
+          ],
+        },
+      },
+    },
+  });
+  freeOverTenantId = freeOverTenant.id;
+  await prisma.tenantDomain.create({
+    data: { tenantId: freeOverTenantId, domain: 'quote-free-over.ventia.localhost', isPrimary: true },
+  });
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
@@ -175,6 +206,17 @@ describe('GET /v1/storefront/checkout/shipping-quote', () => {
       .set('x-tenant-domain', 'quote-unset.ventia.localhost');
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
+  });
+
+  it('a free_over method shows fallbackPriceCents as a placeholder (quote cannot know the real cart subtotal)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/checkout/shipping-quote')
+      .query({ departamento: '11' })
+      .set('x-tenant-domain', 'quote-free-over.ventia.localhost');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      { id: 'free-over-1', type: 'free_over', label: 'Envío gratis desde $100.000', priceCents: 15000 },
+    ]);
   });
 
   it('400 VALIDATION_FAILED when departamento is missing or not a real DANE code', async () => {
