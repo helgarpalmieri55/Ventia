@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Mailer, MailMessage } from '../src/mailer/mailer';
-import { sendOrderEmails, type OrderEmailContext } from '../src/mailer/order-emails';
+import {
+  sendOrderConfirmedEmail,
+  sendOrderDeliveredEmail,
+  sendOrderEmails,
+  sendOrderShippedEmail,
+  type OrderEmailContext,
+  type OrderShippedEmailContext,
+  type OrderStatusEmailContext,
+} from '../src/mailer/order-emails';
 
 /** A recording Mailer double: never touches a real Mailer implementation, so
  * this exercises only `sendOrderEmails`'s own logic. */
@@ -90,5 +98,63 @@ describe('sendOrderEmails', () => {
     expect(merchantMail!.text).toContain(BASE_CTX.email);
     expect(merchantMail!.text).toContain(BASE_CTX.phone);
     expect(merchantMail!.text).toContain('$ 141.650');
+  });
+});
+
+const STATUS_CTX: OrderStatusEmailContext = {
+  orderNumber: 1042,
+  email: 'shopper@example.com',
+  tenantName: 'Tienda Demo',
+};
+
+describe('sendOrderConfirmedEmail', () => {
+  it('sends exactly 1 email to the shopper with a VNT-{orderNumber} subject', async () => {
+    const { mailer, sent } = recordingMailer();
+
+    await sendOrderConfirmedEmail(mailer, STATUS_CTX);
+
+    expect(mailer.send).toHaveBeenCalledTimes(1);
+    expect(sent[0].to).toBe(STATUS_CTX.email);
+    expect(sent[0].subject).toContain('VNT-1042');
+  });
+});
+
+describe('sendOrderShippedEmail', () => {
+  const SHIPPED_CTX: OrderShippedEmailContext = {
+    ...STATUS_CTX,
+    carrier: 'Coordinadora',
+    trackingNumber: 'TRK-9999',
+  };
+
+  it('sends exactly 1 email to the shopper with a VNT-{orderNumber} subject', async () => {
+    const { mailer, sent } = recordingMailer();
+
+    await sendOrderShippedEmail(mailer, SHIPPED_CTX);
+
+    expect(mailer.send).toHaveBeenCalledTimes(1);
+    expect(sent[0].to).toBe(SHIPPED_CTX.email);
+    expect(sent[0].subject).toContain('VNT-1042');
+  });
+
+  it('the body contains both the carrier name and the tracking number verbatim', async () => {
+    const { mailer, sent } = recordingMailer();
+
+    await sendOrderShippedEmail(mailer, SHIPPED_CTX);
+
+    expect(mailer.send).toHaveBeenCalledTimes(1);
+    expect(sent[0].text).toContain(SHIPPED_CTX.carrier);
+    expect(sent[0].text).toContain(SHIPPED_CTX.trackingNumber);
+  });
+});
+
+describe('sendOrderDeliveredEmail', () => {
+  it('sends exactly 1 email to the shopper with a VNT-{orderNumber} subject', async () => {
+    const { mailer, sent } = recordingMailer();
+
+    await sendOrderDeliveredEmail(mailer, STATUS_CTX);
+
+    expect(mailer.send).toHaveBeenCalledTimes(1);
+    expect(sent[0].to).toBe(STATUS_CTX.email);
+    expect(sent[0].subject).toContain('VNT-1042');
   });
 });

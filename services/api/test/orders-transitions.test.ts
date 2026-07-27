@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
@@ -7,12 +7,14 @@ import type { PrismaClient as PrismaClientType, OrderStatus } from '@ventia/db';
 import { startTestDb } from './helpers';
 import type { signUpWithTenant as SignUpWithTenant } from './admin-helpers';
 import { ACTION_TARGET_STATUS, ALLOWED_ACTIONS, type OrderAction } from '../src/orders/transitions';
+import { MAILER, type Mailer, type MailMessage } from '../src/mailer/mailer';
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
 let redisContainer: StartedTestContainer;
 let app: INestApplication;
 let signUpWithTenant: typeof SignUpWithTenant;
 let prisma: PrismaClientType;
+let sentMail: MailMessage[];
 
 const ALL_ACTIONS: OrderAction[] = ['confirm', 'preparing', 'shipped', 'delivered', 'cancel'];
 
@@ -43,6 +45,17 @@ beforeAll(async () => {
 
   ({ signUpWithTenant } = await import('./admin-helpers'));
   ({ platformDb: prisma } = (await import('@ventia/db')) as unknown as { platformDb: PrismaClientType });
+
+  // RESEND_API_KEY is unset in this test environment, so MailerModule's
+  // factory (see src/mailer/mailer.module.ts) wires MAILER to a ConsoleMailer
+  // instance — spying on its `send` method captures every email
+  // OrdersService.transition's fire-and-forget sendOrder*Email(...) calls
+  // send, same recording-double-via-spy pattern as test/checkout.test.ts.
+  sentMail = [];
+  const mailer = app.get<Mailer>(MAILER);
+  vi.spyOn(mailer, 'send').mockImplementation(async (msg) => {
+    sentMail.push(msg);
+  });
 }, 120_000);
 
 afterAll(async () => {
@@ -560,5 +573,79 @@ describe('GET /v1/admin/orders — list', () => {
       .set('cookie', cookie);
     expect(garbage.status).toBe(200);
     expect(garbage.body.total).toBe(3); // filter ignored -> all 3 orders returned
+  });
+});
+
+describe('order status transitions — shopper-facing emails', () => {
+  // transition()'s sendOrder*Email(...) calls are fire-and-forget (never
+  // awaited by the HTTP response — see orders.service.ts's doc comment),
+  // same as checkout.service.ts's sendOrderEmails call, so each assertion
+  // below gives that background call a short fixed wait to land before
+  // reading `sentMail`, matching test/checkout.test.ts's established pattern.
+  const waitForMail = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+  it('confirm -> preparing -> shipped -> delivered fires exactly 1 email each on confirm/shipped/delivered, and 0 on preparing', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-email-flow@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 1 }]);
+
+    const countBefore = sentMail.length;
+
+    const confirmRes = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+    expect(confirmRes.status).toBe(200);
+    await waitForMail();
+    expect(sentMail.length).toBe(countBefore + 1);
+    const confirmMail = sentMail[sentMail.length - 1];
+    expect(confirmMail.to).toBe('comprador@example.com');
+    expect(confirmMail.subject).toContain(`VNT-${confirmRes.body.number}`);
+
+    const preparingRes = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/preparing`)
+      .set('cookie', cookie);
+    expect(preparingRes.status).toBe(200);
+    await waitForMail();
+    expect(sentMail.length).toBe(countBefore + 1); // preparing sends nothing
+
+    const shippedRes = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/shipped`)
+      .set('cookie', cookie)
+      .send({ carrier: 'Servientrega', trackingNumber: 'TRK-1234' });
+    expect(shippedRes.status).toBe(200);
+    await waitForMail();
+    expect(sentMail.length).toBe(countBefore + 2);
+    const shippedMail = sentMail[sentMail.length - 1];
+    expect(shippedMail.to).toBe('comprador@example.com');
+    expect(shippedMail.subject).toContain(`VNT-${shippedRes.body.number}`);
+    expect(shippedMail.text).toContain('Servientrega');
+    expect(shippedMail.text).toContain('TRK-1234');
+
+    const deliveredRes = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/delivered`)
+      .set('cookie', cookie);
+    expect(deliveredRes.status).toBe(200);
+    await waitForMail();
+    expect(sentMail.length).toBe(countBefore + 3);
+    const deliveredMail = sentMail[sentMail.length - 1];
+    expect(deliveredMail.to).toBe('comprador@example.com');
+    expect(deliveredMail.subject).toContain(`VNT-${deliveredRes.body.number}`);
+  });
+
+  it('cancel (from a restockable state) fires no email', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-email-cancel@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'CONFIRMED', [{ productId: product.id, qty: 1 }]);
+
+    const countBefore = sentMail.length;
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/cancel`)
+      .set('cookie', cookie)
+      .send({ reason: 'Cliente canceló' });
+    expect(res.status).toBe(200);
+
+    await waitForMail();
+    expect(sentMail.length).toBe(countBefore); // no email for cancel
   });
 });

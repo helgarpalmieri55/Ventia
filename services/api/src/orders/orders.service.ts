@@ -1,5 +1,11 @@
-import { HttpException, Injectable } from '@nestjs/common';
+import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { Prisma, platformDb, tenantDb, type CartSource, type OrderStatus, type PaymentStatus } from '@ventia/db';
+import { MAILER, type Mailer } from '../mailer/mailer';
+import {
+  sendOrderConfirmedEmail,
+  sendOrderDeliveredEmail,
+  sendOrderShippedEmail,
+} from '../mailer/order-emails';
 import { ACTION_TARGET_STATUS, ALLOWED_ACTIONS, type OrderAction } from './transitions';
 
 export interface ShippedPayload {
@@ -181,8 +187,25 @@ async function adjustStockLine(
   });
 }
 
+// Everything transition()'s post-commit email step needs, on top of the
+// public OrderDetail — computed once inside the transaction (the tenant name
+// read below is the only extra field, mirroring checkout.service.ts's
+// CheckoutTransactionResult/CheckoutResult split) rather than re-queried
+// after commit. The actual method return type stays exactly `OrderDetail` —
+// `tenantName` never leaks into it.
+interface TransitionTransactionResult extends OrderDetail {
+  tenantName: string;
+}
+
 @Injectable()
 export class OrdersService {
+  // Explicit @Inject: esbuild (vitest's TS transform) doesn't emit
+  // `design:paramtypes` metadata, so Nest's implicit constructor-injection by
+  // type alone can't resolve MAILER (a Symbol token, never resolvable by type
+  // alone in the first place) here — same caution as checkout.service.ts's
+  // constructor.
+  constructor(@Inject(MAILER) private readonly mailer: Mailer) {}
+
   async list(tenantId: string, query: OrderListQuery): Promise<OrderListResult> {
     const db = tenantDb(tenantId);
 
@@ -246,7 +269,7 @@ export class OrdersService {
     payload: ShippedPayload | CancelPayload | undefined,
     actorUserId: string,
   ): Promise<OrderDetail> {
-    const detail = await platformDb.$transaction(async (tx) => {
+    const result = await platformDb.$transaction(async (tx): Promise<TransitionTransactionResult> => {
       await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
 
@@ -348,15 +371,49 @@ export class OrdersService {
       const updated = await tx.order.findFirst({ where: { id: orderId, tenantId }, include: ORDER_DETAIL_INCLUDE });
       // Cannot be null: this is the same row just updated inside this same
       // transaction, by its own primary key.
-      return toOrderDetail(updated!);
+
+      // Only needed for the post-commit email step below — one cheap extra
+      // read inside the same transaction (matching checkout.service.ts's
+      // identical `tx.tenant.findUniqueOrThrow` precedent) rather than a
+      // second round trip after commit.
+      const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+
+      return { ...toOrderDetail(updated!), tenantName: tenant.name };
     });
 
-    // Task 2 wires in the shopper-facing emails here, AFTER this transaction
-    // has committed (fire-and-forget, `.catch(console.error)`, same
-    // post-commit pattern as checkout.service.ts's sendOrderEmails call):
+    const { tenantName, ...detail } = result;
+
+    // Shopper-facing emails, fired here AFTER the transaction above has
+    // committed — fire-and-forget (`.catch(console.error)`, never awaited),
+    // same post-commit pattern as checkout.service.ts's sendOrderEmails call:
     // confirm/shipped/delivered each send a matching sendOrder*Email;
     // preparing/cancel send nothing (no spec-required template for either).
-    // Not implemented in this task — out of scope per the brief.
+    // `payload` is still in scope here as the original function parameter —
+    // no need to carry it through the transaction's return value.
+    if (action === 'confirm') {
+      sendOrderConfirmedEmail(this.mailer, { orderNumber: detail.number, email: detail.email, tenantName }).catch(
+        (err: unknown) => {
+          console.error('[orders] confirmed email failed', err);
+        },
+      );
+    } else if (action === 'shipped') {
+      const shippedPayload = payload as ShippedPayload;
+      sendOrderShippedEmail(this.mailer, {
+        orderNumber: detail.number,
+        email: detail.email,
+        tenantName,
+        carrier: shippedPayload.carrier,
+        trackingNumber: shippedPayload.trackingNumber,
+      }).catch((err: unknown) => {
+        console.error('[orders] shipped email failed', err);
+      });
+    } else if (action === 'delivered') {
+      sendOrderDeliveredEmail(this.mailer, { orderNumber: detail.number, email: detail.email, tenantName }).catch(
+        (err: unknown) => {
+          console.error('[orders] delivered email failed', err);
+        },
+      );
+    }
 
     return detail;
   }

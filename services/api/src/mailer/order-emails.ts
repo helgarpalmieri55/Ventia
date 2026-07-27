@@ -44,6 +44,76 @@ function itemLines(items: OrderEmailContext['items']): string {
     .join('\n');
 }
 
+/** Shared shape for the 3 order-status-transition emails below (confirmed/
+ * shipped/delivered) — trimmed to what each template actually needs, unlike
+ * order-creation's wider {@link OrderEmailContext}. */
+export interface OrderStatusEmailContext {
+  orderNumber: number;
+  email: string;
+  tenantName: string;
+}
+
+export interface OrderShippedEmailContext extends OrderStatusEmailContext {
+  carrier: string;
+  trackingNumber: string;
+}
+
+/**
+ * Sent when a staff member confirms a PENDING order (transition -> CONFIRMED)
+ * — the shopper's earlier "we'll call you to confirm" email
+ * (sendOrderEmails's 2nd email) is now followed up with "yes, confirmed,
+ * we're preparing it." Fire-and-forget from `OrdersService.transition`, same
+ * post-commit `.catch(console.error)` pattern as sendOrderEmails's call site
+ * — no merchant-facing alert here, since the merchant is the one who just
+ * took this action in the admin.
+ */
+export async function sendOrderConfirmedEmail(mailer: Mailer, ctx: OrderStatusEmailContext): Promise<void> {
+  const orderLabel = vnt(ctx.orderNumber);
+  await mailer.send({
+    to: ctx.email,
+    subject: `Tu pedido #${orderLabel} fue confirmado — ${ctx.tenantName}`,
+    text: [
+      `¡Buenas noticias! Tu pedido #${orderLabel} en ${ctx.tenantName} fue confirmado y lo estamos preparando.`,
+      '',
+      `Te avisaremos por correo cuando salga hacia tu dirección.`,
+    ].join('\n'),
+  });
+}
+
+/**
+ * Sent when a staff member marks an order SHIPPED. Carries the
+ * carrier/tracking number entered in the admin so the shopper can track the
+ * package themselves.
+ */
+export async function sendOrderShippedEmail(mailer: Mailer, ctx: OrderShippedEmailContext): Promise<void> {
+  const orderLabel = vnt(ctx.orderNumber);
+  await mailer.send({
+    to: ctx.email,
+    subject: `Tu pedido #${orderLabel} fue enviado — ${ctx.tenantName}`,
+    text: [
+      `Tu pedido #${orderLabel} en ${ctx.tenantName} ya está en camino.`,
+      '',
+      `Transportadora: ${ctx.carrier}`,
+      `Número de guía: ${ctx.trackingNumber}`,
+    ].join('\n'),
+  });
+}
+
+/**
+ * Sent when a staff member marks an order DELIVERED — the last email in the
+ * order lifecycle, a short thank-you note.
+ */
+export async function sendOrderDeliveredEmail(mailer: Mailer, ctx: OrderStatusEmailContext): Promise<void> {
+  const orderLabel = vnt(ctx.orderNumber);
+  await mailer.send({
+    to: ctx.email,
+    subject: `Tu pedido #${orderLabel} fue entregado — ${ctx.tenantName}`,
+    text: [
+      `Tu pedido #${orderLabel} en ${ctx.tenantName} fue entregado. ¡Gracias por tu compra!`,
+    ].join('\n'),
+  });
+}
+
 /**
  * Sends the 3 order-creation emails (2 shopper-facing, 1 merchant-facing)
  * through the given `mailer` — never constructs its own Mailer, so callers
