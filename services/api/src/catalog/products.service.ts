@@ -12,6 +12,7 @@ import type { AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
 import { assertProductLimit } from './plan-limits';
+import { revalidateStorefrontTag } from '../storefront/revalidate';
 
 // productInputSchema/productUpdateSchema use the human-facing tax rate strings
 // ('0' | '5' | '19' | 'excluido'); the Prisma-generated TaxRate enum's runtime
@@ -250,6 +251,7 @@ export class ProductsService {
         include: PRODUCT_INCLUDE_WITH_CATEGORIES,
       });
       await writeAudit(session, 'product.create', 'Product', product.id, input);
+      revalidateStorefrontTag(`products:${session.tenantId}`);
       return serialize(product);
     } catch (err) {
       if (isUniqueConstraintError(err)) {
@@ -355,6 +357,7 @@ export class ProductsService {
         });
       });
       await writeAudit(session, 'product.update', 'Product', id, input);
+      revalidateStorefrontTag(`products:${session.tenantId}`);
       return serialize(product);
     } catch (err) {
       if (isNotFoundError(err)) throw new HttpException({ error: 'NOT_FOUND' }, 404);
@@ -382,6 +385,7 @@ export class ProductsService {
       throw err;
     }
     await writeAudit(session, 'product.archive', 'Product', id);
+    revalidateStorefrontTag(`products:${session.tenantId}`);
   }
 
   /** Finds a tenant-unique slug: `base`, then `base-2`, `base-3`, ... `base-20`.

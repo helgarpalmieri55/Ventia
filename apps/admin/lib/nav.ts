@@ -11,6 +11,7 @@ const CATALOG_ITEMS: NavItem[] = [
   { href: '/productos', label: 'Productos' },
   { href: '/categorias', label: 'Categorías' },
   { href: '/importar', label: 'Importar CSV' },
+  { href: '/pedidos', label: 'Pedidos' },
 ];
 
 /** Owner-only items — the server mirrors this with @Roles('owner') on the

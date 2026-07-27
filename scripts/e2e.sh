@@ -115,10 +115,23 @@ wait_for "http://admin.ventia.localhost/" "caddy -> admin"
 # sequentially and before Playwright ever starts, forces each one to finish
 # compiling up front so the real run never races a first compile.
 echo "==> Warming up admin/storefront routes (first Next.js dev compile per route)..."
-for route in / /login /registro /verificar /onboarding /productos /productos/nuevo /categorias /importar /equipo /configuracion /lanzamiento /aceptar-invitacion; do
+for route in / /login /registro /verificar /onboarding /productos /productos/nuevo /categorias /importar /equipo /configuracion /lanzamiento /aceptar-invitacion /pedidos; do
   curl -s -o /dev/null -m 20 "http://localhost:3001${route}" || true
 done
-curl -s -o /dev/null -m 20 "http://localhost:3000/" || true
+# /pedidos/[id] (dynamic) isn't warmed individually here — a fixed route list
+# can't name a real order id up front, and p2-dod.spec.ts's own retryUntil
+# already tolerates a slow first compile on that route the same way it does
+# for every other freshly-loaded route it visits.
+#
+# Storefront: p2-dod.spec.ts (P2 DoD) additionally exercises /carrito,
+# /checkout, /checkout/confirmacion/[orderNumber], and /rastrear beyond the
+# home page p1-dod.spec.ts already warmed up here — /productos/[slug] and
+# /checkout/confirmacion/[orderNumber] are dynamic routes with no real
+# slug/order number known up front, but hitting any (even 404ing) value still
+# forces that route's one-time compile, which is all warmup needs.
+for route in / /carrito /checkout /checkout/confirmacion/0 /productos/warmup-only /rastrear; do
+  curl -s -o /dev/null -m 20 "http://localhost:3000${route}" || true
+done
 echo "==> Warmup done."
 
 # The e2e spec's only way to see the console-mailer's verification/invite

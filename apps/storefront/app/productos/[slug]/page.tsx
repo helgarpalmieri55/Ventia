@@ -1,0 +1,207 @@
+import type { Metadata } from 'next';
+import { headers } from 'next/headers';
+import { notFound } from 'next/navigation';
+import { fetchTenantForHost } from '../../../lib/tenant';
+import { fetchStorefront, fetchStorefrontOrNull } from '../../../lib/storefront-api';
+import { ProductGrid } from '../../../components/product-grid';
+import { Price } from '../../../components/price';
+import { AddToCart } from '../../../components/add-to-cart';
+import { Badge } from '@ventia/ui';
+
+/** Shape of `GET /v1/storefront/products/:slug`'s response (see
+ * services/api/src/storefront/products.service.ts#StorefrontProductDetail) —
+ * kept local like `ProductCardData`/the other storefront pages' DTOs (no
+ * shared package between the API and this app). `variants[].stock` is
+ * carried through structurally but deliberately never rendered below: the
+ * spec's storefront-never-leaks-inventory posture means `inStock` is the only
+ * stock signal a shopper ever sees. */
+interface StorefrontProductDetail {
+  id: string;
+  name: string;
+  slug: string;
+  descriptionMd: string;
+  priceCents: number;
+  compareAtCents: number | null;
+  taxRate: string;
+  inStock: boolean;
+  options: string[];
+  images: Array<{ url: string; alt: string | null }>;
+  variants: Array<{
+    id: string;
+    option1: string | null;
+    option2: string | null;
+    option3: string | null;
+    priceCents: number | null;
+    stock: number;
+  }>;
+  related: Array<{
+    id: string;
+    name: string;
+    slug: string;
+    priceCents: number;
+    compareAtCents: number | null;
+    thumbnailUrl: string | null;
+    inStock: boolean;
+  }>;
+}
+
+/** Truncates `text` to at most `maxLength` characters, breaking at the last
+ * whitespace before the cutoff when possible so the description doesn't end
+ * mid-word — a trivial inline transform, not promoted to a `lib/` helper. */
+function truncate(text: string, maxLength: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  const cut = trimmed.slice(0, maxLength);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+// Re-resolves tenant + product from `params`/`headers()` independently of the
+// page component below — Next.js request-memoizes identical `fetch()` calls
+// within one request and `fetchTenantForHost` is already `cache()`-wrapped,
+// so this is idiomatic duplication, not a real extra round trip.
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params;
+  const host = (await headers()).get('host');
+  const apiUrl = process.env.API_INTERNAL_URL ?? 'http://localhost:4000';
+  const tenant = await fetchTenantForHost(host, apiUrl);
+  if (!tenant || !host) return {};
+
+  // fetchStorefrontOrNull (not fetchStorefront): metadata generation must
+  // never crash the page — a transient upstream error here should just fall
+  // back to minimal metadata, while the page component's own plain
+  // fetchStorefront call still surfaces the error / notFound() as usual.
+  const product = await fetchStorefrontOrNull<StorefrontProductDetail>(
+    host,
+    `/v1/storefront/products/${encodeURIComponent(slug)}`,
+  );
+  if (!product) return {};
+
+  const description = truncate(product.descriptionMd, 160);
+  const images = product.images.length > 0 ? product.images.map((image) => ({ url: image.url })) : undefined;
+
+  return {
+    title: product.name,
+    description,
+    openGraph: {
+      title: product.name,
+      description,
+      images,
+    },
+  };
+}
+
+export default async function ProductPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const host = (await headers()).get('host');
+  const apiUrl = process.env.API_INTERNAL_URL ?? 'http://localhost:4000';
+  const tenant = await fetchTenantForHost(host, apiUrl);
+
+  // No "platform landing" concept for a product sub-route (unlike
+  // app/page.tsx's unknown-host branch), same as categorias/[slug]/page.tsx —
+  // an unresolved tenant is a plain 404 here. A suspended tenant never
+  // reaches this component at all — middleware.ts already answered with a
+  // real 503 upstream of any routing.
+  if (!tenant) notFound();
+
+  // `host` is guaranteed non-null here (see categorias/[slug]/page.tsx's
+  // identical comment).
+  const tenantHost = host as string;
+
+  // Plain fetchStorefront (not the OrNull variant): this fetch's result
+  // directly decides notFound() below, so a real upstream error should
+  // surface as a real error here, not silently render "not found" the same
+  // way a genuinely nonexistent/draft/archived slug does.
+  const product = await fetchStorefront<StorefrontProductDetail>(
+    tenantHost,
+    `/v1/storefront/products/${encodeURIComponent(slug)}`,
+  );
+  if (!product) notFound();
+
+  // schema.org Product structured data. `price` is a plain decimal string in
+  // pesos (the currency's major unit) per schema.org's Offer.price
+  // convention — NOT `formatCOP`'s display formatting (`"$ 45.900"`) — derived
+  // directly from priceCents with the same `Math.round(cents / 100)`
+  // convention formatCOP itself uses internally.
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    name: product.name,
+    image: product.images.map((image) => image.url),
+    description: product.descriptionMd,
+    offers: {
+      '@type': 'Offer',
+      priceCurrency: 'COP',
+      price: String(Math.round(product.priceCents / 100)),
+      availability: product.inStock ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+    },
+  };
+
+  return (
+    <>
+      {/* Standard/only way to emit JSON-LD in the App Router — safe here
+          since the payload is server-generated structured data from our own
+          API, not raw user input rendered as HTML. */}
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+      <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-8">
+        <div className="grid gap-8 md:grid-cols-2">
+          <div className="flex flex-col gap-2">
+            {product.images.length > 0 ? (
+              product.images.map((image, i) => (
+                // Plain <img>, not next/image: storefront has no remote-image
+                // domain config yet, matching product-card.tsx's established
+                // convention.
+                <img
+                  key={i}
+                  src={image.url}
+                  alt={image.alt ?? product.name}
+                  className="aspect-square w-full rounded-md bg-muted object-cover"
+                />
+              ))
+            ) : (
+              // Simple muted placeholder box — no placeholder SVG asset exists
+              // in this codebase yet, out of scope for this task.
+              <div className="aspect-square w-full rounded-md bg-muted" />
+            )}
+          </div>
+
+          <div className="flex flex-col gap-4">
+            <h1 className="text-2xl font-semibold">{product.name}</h1>
+            <Price cents={product.priceCents} compareAtCents={product.compareAtCents} />
+
+            <div>
+              <Badge variant={product.inStock ? 'default' : 'secondary'}>
+                {product.inStock ? 'En stock' : 'Agotado'}
+              </Badge>
+            </div>
+
+            {/* Variant selection + "Agregar al carrito" is the one client
+                island on this otherwise fully server-rendered PDP (see
+                components/add-to-cart.tsx) — P2b wires this up for real;
+                P2a left it permanently disabled specifically for this task
+                to complete. */}
+            <AddToCart
+              productId={product.id}
+              options={product.options}
+              variants={product.variants}
+              inStock={product.inStock}
+            />
+
+            {/* No markdown renderer exists in this codebase yet — rendering
+                descriptionMd as plain text (whitespace-pre-wrap so at least
+                line breaks survive) rather than adding one, out of scope for
+                this task. */}
+            <div className="whitespace-pre-wrap text-sm text-muted-foreground">{product.descriptionMd}</div>
+          </div>
+        </div>
+
+        {product.related.length > 0 ? (
+          <section>
+            <h2 className="mb-4 text-xl font-semibold">También te puede interesar</h2>
+            <ProductGrid products={product.related} />
+          </section>
+        ) : null}
+      </main>
+    </>
+  );
+}

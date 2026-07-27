@@ -1,0 +1,29 @@
+@import '@ventia/ui/styles.css';
+
+/* Storefront's own app/ and components/ sources aren't under @ventia/ui's
+   @source scan — declare them explicitly so Tailwind picks up utility
+   classes used in this app's pages and shared components (product-card.tsx,
+   product-grid.tsx, price.tsx). */
+@source './**/*.{ts,tsx}';
+@source '../components/**/*.{ts,tsx}';
+
+/* Tenant font pair (spec §5.4): `--font-heading`/`--font-body` are set per
+   request on <html> (app/layout.tsx, from the tenant's saved `fontPair` via
+   lib/theme.ts's `buildThemeVars`/`fontPairVars`) to one of the 10 `next/font`
+   CSS variables `lib/fonts.ts` declares. The `var(..., ...)` fallback only
+   matters if that inline style is ever missing (e.g. a static/error page
+   rendered outside RootLayout). Replaces the old hardcoded `font-sans` class
+   on <body> — headings and body text now follow the tenant's chosen pair
+   instead of one fixed generic sans font for every tenant. */
+body {
+  font-family: var(--font-body, ui-sans-serif, system-ui, sans-serif);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-heading, ui-sans-serif, system-ui, sans-serif);
+}

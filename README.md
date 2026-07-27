@@ -27,6 +27,10 @@ docker/             Dev stack: Postgres (pgvector), Redis, Caddy
   `packageManager` field — run `corepack enable` once if `pnpm` isn't already on your PATH)
 - Docker (for the dev stack, and for running the `db`/`api` test suites, which use
   [Testcontainers](https://testcontainers.com/) against the local Docker daemon)
+- Network access to `fonts.googleapis.com`/`fonts.gstatic.com` when building `apps/storefront`:
+  it loads the tenant theme's font pairs via `next/font/google` (`apps/storefront/lib/fonts.ts`),
+  which fetches font files at build time and fails the build if unreachable — the only build-time
+  network dependency in this repo; an airgapped CI runner must allow it.
 
 ## Quickstart
 
@@ -115,6 +119,45 @@ The `/v1/admin/*` endpoints (products, categories, variants, images, stock) prov
 catalog CRUD, plus bulk CSV import at `/v1/admin/import/{template,dry-run,commit}` — fetch a
 starter file from `GET /v1/admin/import/template`.
 
+The public `/v1/storefront/*` endpoints (categories, product list/detail, content) mirror that
+pattern for the storefront: no auth, tenant-scoped via the same `x-tenant-domain`/`Host`
+resolution. Admin mutations trigger on-demand ISR revalidation on the storefront via
+`REVALIDATE_SECRET` and `STOREFRONT_INTERNAL_URL` (see `services/api/src/storefront/revalidate.ts`
+and `apps/storefront/app/api/revalidate/route.ts`).
+
+### Cart, checkout & orders
+
+`/v1/storefront/cart` (get/add/update/remove) and `/v1/storefront/checkout` (shipping quote,
+order creation, confirmation lookup) are guest-cart endpoints keyed on a `ventia_cart` cookie —
+the storefront never calls these directly (its browser can't reach the API's internal host, and a
+cross-origin `Set-Cookie` wouldn't be readable back from its own domain), instead proxying through
+`apps/storefront/app/api/{cart,checkout}/[[...path]]/route.ts`. Payment is cash-on-delivery only.
+Checkout itself never touches `Product.stock` — stock is decremented on the `confirm` transition
+below (`PENDING` → `CONFIRMED`), not at order-creation time, and restocked on `cancel` from any
+status that had already decremented it; see `services/api/src/orders/orders.service.ts`.
+Manually exercising the cart/checkout flow (add → drawer → `/carrito` → `/checkout`) needs the API
+reachable from wherever the storefront dev server runs, since the proxy route calls it directly.
+
+### Order lifecycle & tracking
+
+`GET`/`PATCH /v1/admin/orders*` (list, detail, and one `PATCH` route per action — `confirm`,
+`preparing`, `shipped`, `delivered`, `cancel`) drive the order state machine (`PENDING` →
+`CONFIRMED` → `PREPARING` → `SHIPPED` → `DELIVERED`, with `cancel` reachable from every
+non-terminal status — see `services/api/src/orders/transitions.ts`'s `ALLOWED_ACTIONS`). Every
+transition is serialized per-order under a Postgres advisory lock (`pg_advisory_xact_lock`) so two
+concurrent requests on the same order (two admin tabs, a double-click) can't both win a race
+against `ALLOWED_ACTIONS`; an invalid transition is `409 INVALID_TRANSITION`. `shipped` requires a
+`carrier`/`trackingNumber` body; `cancel` requires a `reason`. Both are operational actions shared
+by `owner` and `staff` (no `@Roles()` gate), driven from the admin app's `/pedidos` (list + filter
+by status) and `/pedidos/:id` (detail, timeline, and action buttons) pages.
+
+Shoppers track their own order via `GET /v1/storefront/orders/track?orderNumber=&contact=`
+(no auth) on the storefront's `/rastrear` page — `contact` must match the order's `email` or
+`phone`. A nonexistent order number and a real order number with the WRONG contact deliberately
+return the identical `404 ORDER_NOT_FOUND` (same code path, not just the same status) — order
+numbers are sequential and guessable, so this endpoint must not let an attacker distinguish
+"guessed a real number" from "guessed wrong" by contact-checking after an existence check.
+
 ### Onboarding, staff & launch
 
 A signed-up user provisions their tenant via `POST /v1/admin/onboarding/tenant`, then drives the
@@ -126,8 +169,11 @@ accepts with `POST /v1/staff/accept`. Staff share `/v1/admin/products` etc. with
 `403 FORBIDDEN_ROLE` on `/v1/admin/settings`, `/v1/admin/staff/*`, and `/v1/admin/launch`.
 
 **Mailer:** dev/test use a console transport (`ConsoleMailer`) that logs `[mail] to=... subject=...`
-plus the body — including verification and staff-invite links — to stdout instead of sending real
-email; grep the API's dev log for the token/URL when testing these flows locally.
+plus the body — including verification, staff-invite, and order-confirmation links — to stdout
+instead of sending real email; grep the API's dev log for the token/URL when testing these flows
+locally. Setting `RESEND_API_KEY` (plus optionally `RESEND_FROM_EMAIL`, see `.env.example`) switches
+every environment sharing that API process to sending real email via
+[Resend](https://resend.com) instead.
 
 ### P1 Definition-of-Done e2e
 
@@ -136,14 +182,43 @@ Prerequisites: dev stack up + DB migrated (Quickstart steps 2–4). Then, from t
 (`apps/admin/e2e/p1-dod.spec.ts`) through Caddy, tears servers down after. Local-run only, not
 part of `pnpm turbo run test`/CI.
 
+### P2 Definition-of-Done e2e
+
+Same prerequisites and runner as P1's suite above — `bash scripts/e2e.sh` runs every spec under
+`apps/admin/e2e/` (no file filter), so it picks up `apps/admin/e2e/p2-dod.spec.ts` automatically
+alongside `p1-dod.spec.ts` in the same invocation; no separate command or script change was needed
+to wire it in. `p2-dod.spec.ts` covers the full P2 vertical slice in one flow: storefront browsing
+→ add to cart → `/carrito` → COD `/checkout` → admin `/pedidos` fulfillment (confirm → preparing →
+shipped, with a carrier/tracking number → delivered) → `/rastrear` showing the delivered status,
+carrier/tracking number, and full timeline — plus asserting a wrong-contact tracking lookup on that
+same real order renders the byte-for-byte identical message a nonexistent order number would. It
+seeds its tenant/product/shipping configuration directly via `@ventia/db`'s `platformDb` (a real
+signup still runs through `/registro` for a genuine session cookie) rather than re-driving the
+whole P1 onboarding wizard, which `p1-dod.spec.ts` already covers on its own.
+
+### Lighthouse budget check
+
+`bash scripts/lighthouse.sh` runs the `lighthouse` CLI (via `npx`, no new permanent dependency,
+reusing the Chromium already preinstalled for Playwright) against the seeded `demo-moda` tenant's
+home page, one PDP, and `/carrito` — same "check, don't start, the dev stack" posture and
+prerequisites as the e2e scripts above (also needs `pnpm --filter @ventia/db seed` to have run at
+least once). Latest run, against the Next.js **dev** server (unminified, no production
+optimizations — a floor, not a production number; re-run against `next build && next start` for a
+representative one):
+
+| Page      | Performance | Accessibility | Best Practices | SEO |
+| --------- | ----------- | -------------- | --------------- | --- |
+| Home      | 54          | 100             | 96               | 91  |
+| PDP       | 57          | 100             | 96               | 91  |
+| `/carrito`| 46          | 100             | 96               | 91  |
+
 ## Deviations
 
-- **Suspended storefront returns 200, not 503 (P1):** a suspended tenant's storefront renders an
-  "unavailable" message (`apps/storefront/app/page.tsx`) at HTTP 200 instead of a real 503 — the
-  Next.js App Router has no ergonomic way for a page component to set a non-200 status without
-  reaching for `notFound()`/`redirect()` special cases that don't fit "temporarily unavailable"
-  semantics. The strict 503, along with archived-products-404-on-storefront (also P1-deferred —
-  see `docs/SPEC.md`'s M2 AC), arrives with the storefront rebuild in P2.
+- **Suspended storefront returns 200, not 503 — closed in P2a.** `apps/storefront/middleware.ts`
+  now fetches `/v1/tenant` ahead of the route tree and returns a real HTTP 503 for a suspended
+  tenant (the App Router still has no way for a page component to set a non-200 status, so the
+  check lives in middleware instead). Archived products also now 404 on their PDP URL
+  (`services/api/src/storefront/products.service.ts`'s `detail()` only queries `status: 'active'`).
 
 ## Production notes
 
@@ -169,8 +244,15 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
 - **P0 — Foundation** ✅ (this branch): monorepo scaffold, Docker Compose dev env, Prisma schema
   v1 + migrations, RLS harness + tenant-scoped client, better-auth, tenant resolution middleware,
   CI. DoD: two seeded tenants resolve by subdomain; cross-tenant reads fail under RLS; CI green.
-- **P1 — Catalog + Admin core** ⬜
-- **P2 — Storefront + Cart + Checkout (COD end-to-end)** ⬜
+- **P1 — Catalog + Admin core** ✅: onboarding wizard, products/variants/categories CRUD, CSV
+  import, image uploads to MinIO/S3, staff roles + invites, launch checklist. DoD: a
+  non-technical tester creates a store with 10 products from a CSV without help.
+- **P2 — Storefront + Cart + Checkout (COD end-to-end)** ✅: themed public storefront with
+  search, cart, Colombian-address checkout, shipping methods, COD orders + emails at every step
+  (confirmation, COD confirmation, merchant alert, confirmed/shipped/delivered), admin order
+  fulfillment, public order tracking. DoD: first complete sale — browse → checkout → COD order →
+  merchant confirms → shipped → delivered, with emails at each step — verified end to end via
+  `apps/admin/e2e/p2-dod.spec.ts`; Lighthouse budget recorded (see `scripts/lighthouse.sh`).
 - **P3 — Online Payments + Order lifecycle** ⬜
 - **P4 — AI Agent (web)** ⬜
 - **P5 — WhatsApp + Human handoff** ⬜

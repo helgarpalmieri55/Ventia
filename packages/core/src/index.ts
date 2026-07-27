@@ -5,3 +5,6 @@ export * from './catalog-schemas.js';
 export * from './onboarding-schemas.js';
 export * from './settings-schemas.js';
 export * from './staff-schemas.js';
+export * from './colombia-locations.js';
+export * from './address-schemas.js';
+export * from './shipping-schemas.js';
