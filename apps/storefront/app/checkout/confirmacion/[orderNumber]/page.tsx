@@ -1,5 +1,6 @@
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
+import Link from 'next/link';
 import { Card, CardContent, CardHeader, CardTitle } from '@ventia/ui';
 import { fetchTenantForHost } from '../../../../lib/tenant';
 import { fetchStorefront } from '../../../../lib/storefront-api';
@@ -96,6 +97,12 @@ export default async function OrderConfirmationPage({
       <p className="mt-6 text-sm text-muted-foreground">
         Te enviamos los detalles de tu pedido y confirmación de pago contra entrega a tu correo — revisa
         tu bandeja de entrada.
+      </p>
+
+      <p className="mt-4 text-sm">
+        <Link href="/rastrear" className="underline">
+          Rastrear mi pedido
+        </Link>
       </p>
     </main>
   );
