@@ -6,6 +6,30 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # Every services/api test file that touches a tenant-resolving route
+    # (storefront, cart, checkout, orders, shipping settings — anything
+    # behind PublicTenantGuard or the admin session guards) goes through
+    # DomainResolver, which reads/writes a Redis cache with no fallback on a
+    # connection error (see services/api/src/tenants/domain-resolver.ts —
+    # `redis.get`/`redis.set` are unguarded `await`s). Those tests hardcode
+    # `REDIS_URL=redis://localhost:6379` (see e.g. test/cart.test.ts)
+    # expecting a real Redis already listening there, same as local dev's
+    # `docker compose -f docker/compose.yaml up` — unlike the `db` test
+    # suite's Postgres, this is NOT spun up per-test via Testcontainers. This
+    # `services:` block is what actually provides that Redis in CI; without
+    # it, every one of those tests 500s on an unhandled ECONNREFUSED (this
+    # exact gap escaped detection through P0/P1's much smaller/faster test
+    # phase and was only caught once P2 added enough Redis-dependent tests to
+    # run long enough for ioredis's connection-retry logic to fully exhaust).
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
