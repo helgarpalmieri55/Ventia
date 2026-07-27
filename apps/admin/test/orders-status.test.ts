@@ -9,11 +9,15 @@ import {
 
 // Hardcoded expectations, NOT imported from `services/api/src/orders/
 // transitions.ts` (this app can't depend on `services/api/src` regardless —
-// see `orders-api.ts`'s doc comment on `ALLOWED_ACTIONS`) — the entire point
-// of this test is to catch DRIFT between this client-side mirror and the
-// server's real state machine over time, so it must encode the server's
-// table as an independent, hand-typed expectation rather than re-import the
-// very thing it's meant to check.
+// see `orders-api.ts`'s doc comment on `ALLOWED_ACTIONS`), so an accidental
+// edit to `orders-api.ts`'s own `ALLOWED_ACTIONS` copy fails this test
+// immediately rather than silently shipping a UI that hides a valid action
+// or offers one the server will reject. This can only catch drift on THIS
+// side, though: if the server's `transitions.ts` changes and nobody updates
+// this hardcoded table (and `orders-api.ts`'s mirror) to match, this test
+// keeps passing while quietly going stale — an inherent limit of two
+// independently-maintained copies, not something a client-only test can
+// close on its own.
 const EXPECTED_ALLOWED_ACTIONS: Record<OrderStatus, OrderAction[]> = {
   PENDING: ['confirm', 'cancel'],
   CONFIRMED: ['preparing', 'cancel'],

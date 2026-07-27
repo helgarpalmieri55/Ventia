@@ -82,9 +82,8 @@ export interface OrderDetail {
 
 /** Order numbers are always rendered with this prefix in merchant-facing
  * text (spec's "never expose raw UUIDs... e.g. VNT-1042") — same literal
- * pattern as `services/api/src/mailer/order-emails.ts`'s `vnt()` and
- * `apps/storefront`'s tracking page, a third small copy here rather than a
- * new one. */
+ * pattern as `services/api/src/mailer/order-emails.ts`'s `vnt()`; a small
+ * per-module copy here rather than a shared one. */
 export function vnt(orderNumber: number): string {
   return `VNT-${orderNumber}`;
 }

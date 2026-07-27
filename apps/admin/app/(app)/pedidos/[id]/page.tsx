@@ -56,6 +56,22 @@ function eventFromTo(data: unknown): string | null {
   return null;
 }
 
+/** The `shipped` transition's event carries `{from, to, carrier,
+ * trackingNumber}` (see `orders.service.ts`'s `transition()`, which spreads
+ * the shipped payload into the event's `data`) — this is currently the ONLY
+ * place the carrier/tracking number is visible again after being entered
+ * once in `ShippedForm`, since `OrderDetail` itself has no `shipment` field
+ * (a Task 1 schema decision, not something this page can add). Read
+ * defensively, same posture as `eventFromTo`. */
+function eventShipment(data: unknown): { carrier: string; trackingNumber: string } | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const record = data as Record<string, unknown>;
+  if (typeof record.carrier === 'string' && typeof record.trackingNumber === 'string') {
+    return { carrier: record.carrier, trackingNumber: record.trackingNumber };
+  }
+  return null;
+}
+
 /** Order detail page: loads `GET /v1/admin/orders/:id` once, then renders
  * customer contact, full shipping address, line items, the totals
  * breakdown, the full event timeline, and action buttons gated by the
@@ -263,15 +279,23 @@ export default function PedidoDetailPage() {
         </CardHeader>
         <CardContent>
           <ul className="flex flex-col gap-2 text-sm text-foreground">
-            {order.events.map((event) => (
-              <li key={event.id} className="flex flex-col gap-0.5 border-b border-border pb-2 last:border-0">
-                <span className="font-medium">{eventLabel(event.type)}</span>
-                {eventFromTo(event.data) ? (
-                  <span className="text-muted-foreground">{eventFromTo(event.data)}</span>
-                ) : null}
-                <span className="text-xs text-muted-foreground">{formatDateCO(event.createdAt)}</span>
-              </li>
-            ))}
+            {order.events.map((event) => {
+              const shipment = eventShipment(event.data);
+              return (
+                <li key={event.id} className="flex flex-col gap-0.5 border-b border-border pb-2 last:border-0">
+                  <span className="font-medium">{eventLabel(event.type)}</span>
+                  {eventFromTo(event.data) ? (
+                    <span className="text-muted-foreground">{eventFromTo(event.data)}</span>
+                  ) : null}
+                  {shipment ? (
+                    <span className="text-muted-foreground">
+                      Transportadora: {shipment.carrier} · Guía: {shipment.trackingNumber}
+                    </span>
+                  ) : null}
+                  <span className="text-xs text-muted-foreground">{formatDateCO(event.createdAt)}</span>
+                </li>
+              );
+            })}
           </ul>
         </CardContent>
       </Card>
