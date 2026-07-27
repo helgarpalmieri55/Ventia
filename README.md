@@ -244,8 +244,15 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
 - **P0 — Foundation** ✅ (this branch): monorepo scaffold, Docker Compose dev env, Prisma schema
   v1 + migrations, RLS harness + tenant-scoped client, better-auth, tenant resolution middleware,
   CI. DoD: two seeded tenants resolve by subdomain; cross-tenant reads fail under RLS; CI green.
-- **P1 — Catalog + Admin core** ⬜
-- **P2 — Storefront + Cart + Checkout (COD end-to-end)** ⬜
+- **P1 — Catalog + Admin core** ✅: onboarding wizard, products/variants/categories CRUD, CSV
+  import, image uploads to MinIO/S3, staff roles + invites, launch checklist. DoD: a
+  non-technical tester creates a store with 10 products from a CSV without help.
+- **P2 — Storefront + Cart + Checkout (COD end-to-end)** ✅: themed public storefront with
+  search, cart, Colombian-address checkout, shipping methods, COD orders + emails at every step
+  (confirmation, COD confirmation, merchant alert, confirmed/shipped/delivered), admin order
+  fulfillment, public order tracking. DoD: first complete sale — browse → checkout → COD order →
+  merchant confirms → shipped → delivered, with emails at each step — verified end to end via
+  `apps/admin/e2e/p2-dod.spec.ts`; Lighthouse budget recorded (see `scripts/lighthouse.sh`).
 - **P3 — Online Payments + Order lifecycle** ⬜
 - **P4 — AI Agent (web)** ⬜
 - **P5 — WhatsApp + Human handoff** ⬜
