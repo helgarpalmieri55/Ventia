@@ -88,6 +88,7 @@ export function CartDrawer() {
                         <input
                           type="number"
                           min={1}
+                          aria-label={`Cantidad de ${line.name}`}
                           value={line.qty}
                           onChange={(e) => {
                             const qty = Number(e.target.value);

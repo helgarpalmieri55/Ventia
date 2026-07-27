@@ -4,6 +4,14 @@ import * as React from 'react';
 import { Button, Select } from '@ventia/ui';
 import { useCart } from '../lib/cart-context';
 
+// Same wording/pattern as `CartDrawer`'s and `/carrito`'s own
+// `MUTATION_ERROR` (cart-drawer.tsx, app/carrito/page.tsx) — this island is
+// the third and last place a cart mutation can fail, and had been the one
+// spot still silently swallowing the error (only a `console.error`, no
+// user-facing feedback at all) even after that pair was fixed to surface
+// failures; see this task's review notes for the full discrepancy.
+const ADD_ERROR = 'No pudimos agregar el producto al carrito. Intenta de nuevo.';
+
 export interface AddToCartVariant {
   id: string;
   option1: string | null;
@@ -46,6 +54,7 @@ export function AddToCart({ productId, options, variants, inStock }: AddToCartPr
   const { addItem, openCart } = useCart();
   const [selected, setSelected] = React.useState<string[]>(() => options.map(() => ''));
   const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
   const hasVariants = options.length > 0;
   const allSelected = !hasVariants || selected.every((v) => v !== '');
@@ -66,12 +75,14 @@ export function AddToCart({ productId, options, variants, inStock }: AddToCartPr
 
   async function handleAdd() {
     if (!canAdd || submitting) return;
+    setError(null);
     setSubmitting(true);
     try {
       await addItem(productId, selectedVariantId, 1);
       openCart();
     } catch (err) {
       console.error('[cart] failed to add item', err);
+      setError(ADD_ERROR);
     } finally {
       setSubmitting(false);
     }
@@ -105,7 +116,7 @@ export function AddToCart({ productId, options, variants, inStock }: AddToCartPr
         </div>
       ) : null}
 
-      <div>
+      <div className="flex flex-col gap-2">
         <Button
           onClick={() => void handleAdd()}
           disabled={!canAdd || submitting}
@@ -113,6 +124,11 @@ export function AddToCart({ productId, options, variants, inStock }: AddToCartPr
         >
           Agregar al carrito
         </Button>
+        {error ? (
+          <p className="text-sm text-destructive" role="alert">
+            {error}
+          </p>
+        ) : null}
       </div>
     </div>
   );
