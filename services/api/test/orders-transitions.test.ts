@@ -254,6 +254,45 @@ describe('confirm — stock decrement', () => {
     const movements = await prisma.inventoryMovement.count({ where: { orderId } });
     expect(movements).toBe(0); // neither line's InventoryMovement survived
   });
+
+  it('a product with trackInventory=false and stock=0 (the schema default) still confirms — untracked stock is never gated on, matching checkout.service.ts\'s own trackInventory check', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-untracked-confirm@demo.co', 'owner');
+    // A merchant who disabled inventory tracking has no reason to ever set
+    // `stock` away from its schema default (0) — checkout.service.ts already
+    // treats trackInventory=false as "don't gate on stock at all" (see its
+    // `if (product.trackInventory && stock < item.qty)` check), so the
+    // confirm-time decrement must honor the identical flag rather than
+    // unconditionally applying a floor check against a stock count the
+    // merchant never intended to track.
+    const product = await prisma.product.create({
+      data: {
+        tenantId,
+        name: 'Producto sin inventario',
+        slug: `producto-sin-inventario-${randomUUID()}`,
+        priceCents: 10_000,
+        status: 'active',
+        stock: 0,
+        trackInventory: false,
+      },
+    });
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 5 }]);
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('CONFIRMED');
+
+    // stock stays untouched — never decremented, never floored, because
+    // inventory isn't tracked for this product.
+    const updated = await prisma.product.findUnique({ where: { id: product.id } });
+    expect(updated?.stock).toBe(0);
+
+    // No InventoryMovement should be written for an untracked product either
+    // — there's no real stock change to audit.
+    const movements = await prisma.inventoryMovement.count({ where: { orderId } });
+    expect(movements).toBe(0);
+  });
 });
 
 describe('cancel — restock', () => {
@@ -573,6 +612,72 @@ describe('GET /v1/admin/orders — list', () => {
       .set('cookie', cookie);
     expect(garbage.status).toBe(200);
     expect(garbage.body.total).toBe(3); // filter ignored -> all 3 orders returned
+  });
+});
+
+describe('GET /v1/admin/orders/:id — shippingMethodLabel resolution', () => {
+  // Regression coverage for a real bug this task's whole-branch review found:
+  // `Order.shippingMethod` is an opaque id (crypto.randomUUID(), per
+  // apps/admin/lib/shipping-form.ts's method factories) — not a label — so
+  // rendering it raw on the admin order-detail page showed the merchant a
+  // meaningless UUID instead of e.g. "Envío estándar". `shippingMethodLabel`
+  // resolves it fresh against the tenant's CURRENT shipping settings.
+  it('resolves shippingMethod to its current label from settings.shipping.methods', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-shipping-label@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+
+    await request(app.getHttpServer())
+      .patch('/v1/admin/settings/shipping')
+      .set('cookie', cookie)
+      .send({
+        methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+      });
+
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 1 }]);
+    await prisma.order.update({ where: { id: orderId }, data: { shippingMethod: 'flat-1' } });
+
+    const res = await request(app.getHttpServer())
+      .get(`/v1/admin/orders/${orderId}`)
+      .set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.shippingMethod).toBe('flat-1');
+    expect(res.body.shippingMethodLabel).toBe('Envío estándar');
+  });
+
+  it('falls back to null (not the raw id) when the merchant has since deleted the method, on both GET and a transition response', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-shipping-label-deleted@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+
+    await request(app.getHttpServer())
+      .patch('/v1/admin/settings/shipping')
+      .set('cookie', cookie)
+      .send({
+        methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+      });
+
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 1 }]);
+    await prisma.order.update({ where: { id: orderId }, data: { shippingMethod: 'flat-1' } });
+
+    // Merchant deletes the method entirely (replaces the whole methods array).
+    await request(app.getHttpServer())
+      .patch('/v1/admin/settings/shipping')
+      .set('cookie', cookie)
+      .send({ methods: [] });
+
+    const getRes = await request(app.getHttpServer())
+      .get(`/v1/admin/orders/${orderId}`)
+      .set('cookie', cookie);
+    expect(getRes.status).toBe(200);
+    expect(getRes.body.shippingMethod).toBe('flat-1'); // the order's own record is untouched
+    expect(getRes.body.shippingMethodLabel).toBeNull(); // but the label can no longer be resolved
+
+    // A status-transition response carries the same resolved (null) label,
+    // not a stale/cached one — findOne() and transition() must agree.
+    const confirmRes = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+    expect(confirmRes.status).toBe(200);
+    expect(confirmRes.body.shippingMethodLabel).toBeNull();
   });
 });
 

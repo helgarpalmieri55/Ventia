@@ -69,6 +69,13 @@ export interface OrderDetail {
   shippingAddress: unknown;
   billingFields: unknown;
   shippingMethod: string | null;
+  // The tenant's CURRENT label for `shippingMethod` (an opaque id, never a
+  // label itself — resolved server-side by
+  // services/api/src/checkout/shipping.service.ts's `findMethodLabel`).
+  // `null` when the id no longer matches any of the tenant's configured
+  // methods (deleted since this order was placed) — render a graceful
+  // fallback, never the raw `shippingMethod` id itself.
+  shippingMethodLabel: string | null;
   shippingCents: number;
   subtotalCents: number;
   taxCents: number;

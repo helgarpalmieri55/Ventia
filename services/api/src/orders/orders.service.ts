@@ -1,5 +1,6 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { Prisma, platformDb, tenantDb, type CartSource, type OrderStatus, type PaymentStatus } from '@ventia/db';
+import { ShippingService } from '../checkout/shipping.service';
 import { MAILER, type Mailer } from '../mailer/mailer';
 import {
   sendOrderConfirmedEmail,
@@ -68,6 +69,19 @@ export interface OrderDTO {
 export interface OrderDetail extends OrderDTO {
   items: OrderItemDTO[];
   events: OrderEventDTO[];
+  // The tenant's CURRENT label for `shippingMethod` (an opaque id — see
+  // ShippingService.findMethodLabel's doc comment), resolved fresh on every
+  // read rather than snapshotted at checkout time: unlike OrderItem's price/
+  // tax snapshot (which must stay frozen at the value the shopper actually
+  // paid), a shipping method's label is cosmetic display text, and showing
+  // the merchant's current name for it is more useful than a frozen one —
+  // `null` when the id no longer matches any configured method (deleted
+  // since the order was placed), so the admin UI can render a graceful
+  // fallback instead of a raw, meaningless id. Only populated on `OrderDetail`
+  // (findOne/transition), not on the plain `OrderDTO` list rows, since the
+  // admin orders list doesn't display it and resolving it per-row would be
+  // an unnecessary extra read per list item.
+  shippingMethodLabel: string | null;
 }
 
 export interface OrderListQuery {
@@ -106,8 +120,8 @@ const ORDER_DETAIL_INCLUDE = {
 
 type OrderWithDetail = Prisma.OrderGetPayload<{ include: typeof ORDER_DETAIL_INCLUDE }>;
 
-function toOrderDetail(order: OrderWithDetail): OrderDetail {
-  return order;
+function toOrderDetail(order: OrderWithDetail, shippingMethodLabel: string | null): OrderDetail {
+  return { ...order, shippingMethodLabel };
 }
 
 // Restockable subset of OrderStatus: stock was decremented on `confirm`
@@ -162,6 +176,27 @@ async function adjustStockLine(
   }
   const variantId = item.variantId;
 
+  // ProductVariant has no `trackInventory` flag of its own (schema.prisma) —
+  // same "always defers to the parent product's flag" rule
+  // checkout.service.ts's own stock check already documents. A merchant who
+  // turned inventory tracking off has no reason to ever touch this product's
+  // `stock` column away from its schema default (0), so gating this
+  // decrement/restock on the SAME flag checkout.service.ts already gates its
+  // own INSUFFICIENT_STOCK check on (`if (product.trackInventory && stock <
+  // item.qty)`) is required for consistency — without it, confirming ANY
+  // order for an untracked-inventory product at its default stock=0 hit a
+  // false-positive STOCK_BELOW_ZERO here (reproduced empirically in this
+  // task's review), permanently blocking that order from ever being
+  // confirmed. No InventoryMovement is written either in this branch: there
+  // is no real stock change to audit when inventory isn't tracked.
+  const product = await tx.product.findFirst({
+    where: { id: productId, tenantId },
+    select: { trackInventory: true },
+  });
+  if (!product?.trackInventory) {
+    return;
+  }
+
   const rows = variantId
     ? await tx.$queryRaw<{ stock: number }[]>`
         UPDATE "ProductVariant" SET stock = stock + ${delta}
@@ -203,8 +238,13 @@ export class OrdersService {
   // `design:paramtypes` metadata, so Nest's implicit constructor-injection by
   // type alone can't resolve MAILER (a Symbol token, never resolvable by type
   // alone in the first place) here — same caution as checkout.service.ts's
-  // constructor.
-  constructor(@Inject(MAILER) private readonly mailer: Mailer) {}
+  // constructor. ShippingService needs the same explicit @Inject for the
+  // identical reason (esbuild drops the metadata implicit injection relies
+  // on regardless of the token type).
+  constructor(
+    @Inject(MAILER) private readonly mailer: Mailer,
+    @Inject(ShippingService) private readonly shippingService: ShippingService,
+  ) {}
 
   async list(tenantId: string, query: OrderListQuery): Promise<OrderListResult> {
     const db = tenantDb(tenantId);
@@ -246,7 +286,10 @@ export class OrdersService {
       include: ORDER_DETAIL_INCLUDE,
     });
     if (!order) throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
-    return toOrderDetail(order);
+    const shippingMethodLabel = order.shippingMethod
+      ? await this.shippingService.findMethodLabel(tenantId, order.shippingMethod)
+      : null;
+    return toOrderDetail(order, shippingMethodLabel);
   }
 
   /**
@@ -378,7 +421,21 @@ export class OrdersService {
       // second round trip after commit.
       const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId } });
 
-      return { ...toOrderDetail(updated!), tenantName: tenant.name };
+      // ShippingService.findMethodLabel runs on plain tenantDb (a read of
+      // Tenant.settings, independent of this transaction) — calling it from
+      // inside our transaction is safe for the identical reason
+      // checkout.service.ts's own isCodAllowed/priceFor calls already
+      // document: it doesn't need transactional consistency with the writes
+      // above and never touches Order/OrderItem/Shipment rows itself. Kept
+      // in sync with findOne()'s identical resolution so the admin UI's
+      // "re-set state directly from the mutation's own response" pattern
+      // (see orders.controller.ts's doc comment) never shows a stale/missing
+      // label after an action, only after a fresh GET.
+      const shippingMethodLabel = updated!.shippingMethod
+        ? await this.shippingService.findMethodLabel(tenantId, updated!.shippingMethod)
+        : null;
+
+      return { ...toOrderDetail(updated!, shippingMethodLabel), tenantName: tenant.name };
     });
 
     const { tenantName, ...detail } = result;

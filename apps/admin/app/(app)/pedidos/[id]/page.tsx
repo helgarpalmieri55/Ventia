@@ -177,7 +177,12 @@ export default function PedidoDetailPage() {
             </p>
           ) : null}
           {address.notas ? <p>Notas: {address.notas}</p> : null}
-          {order.shippingMethod ? <p>Método de envío: {order.shippingMethod}</p> : null}
+          {order.shippingMethod ? (
+            <p>
+              Método de envío:{' '}
+              {order.shippingMethodLabel ?? 'Método de envío eliminado'}
+            </p>
+          ) : null}
         </CardContent>
       </Card>
 
