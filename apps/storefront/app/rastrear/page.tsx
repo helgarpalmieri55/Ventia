@@ -49,6 +49,15 @@ const EVENT_LABEL: Record<string, string> = {
 // cause.
 const NOT_FOUND_MESSAGE = 'No encontramos ese pedido. Verifica el número de pedido y el correo o teléfono.';
 
+/** Same `VNT-####` customer-facing prefix convention as the confirmation
+ * page's own `vnt()` (`app/checkout/confirmacion/[orderNumber]/page.tsx`) and
+ * `services/api/src/mailer/order-emails.ts`'s — kept as its own local copy
+ * per this codebase's established no-shared-package-between-pages
+ * convention, not shared from either of those. */
+function vnt(orderNumber: number): string {
+  return `VNT-${orderNumber}`;
+}
+
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString('es-CO', {
     dateStyle: 'medium',
@@ -118,6 +127,7 @@ export default function TrackOrderPage() {
                 value={orderNumber}
                 onChange={(e) => setOrderNumber(e.target.value)}
                 placeholder="1042"
+                disabled={submitting}
               />
             </FormField>
             <FormField label="Correo o teléfono" htmlFor="contact" error={errors.contact}>
@@ -126,6 +136,7 @@ export default function TrackOrderPage() {
                 value={contact}
                 onChange={(e) => setContact(e.target.value)}
                 placeholder="correo@ejemplo.com"
+                disabled={submitting}
               />
             </FormField>
             <Button type="submit" disabled={submitting} className="self-end">
@@ -150,7 +161,7 @@ export default function TrackOrderPage() {
       {result ? (
         <Card>
           <CardHeader>
-            <CardTitle>Pedido #{result.orderNumber}</CardTitle>
+            <CardTitle>Pedido #{vnt(result.orderNumber)}</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <p className="text-sm">
