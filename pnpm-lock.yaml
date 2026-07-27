@@ -57,6 +57,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.0.0
         version: 19.2.3(@types/react@19.2.17)
+      '@ventia/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       tailwindcss:
         specifier: ^4.0.0
         version: 4.3.3

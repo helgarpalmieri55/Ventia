@@ -131,10 +131,32 @@ and `apps/storefront/app/api/revalidate/route.ts`).
 order creation, confirmation lookup) are guest-cart endpoints keyed on a `ventia_cart` cookie —
 the storefront never calls these directly (its browser can't reach the API's internal host, and a
 cross-origin `Set-Cookie` wouldn't be readable back from its own domain), instead proxying through
-`apps/storefront/app/api/{cart,checkout}/[[...path]]/route.ts`. Payment is cash-on-delivery only;
-checkout never decrements `Product.stock` (deferred to order-status transitions in a later phase).
+`apps/storefront/app/api/{cart,checkout}/[[...path]]/route.ts`. Payment is cash-on-delivery only.
+Checkout itself never touches `Product.stock` — stock is decremented on the `confirm` transition
+below (`PENDING` → `CONFIRMED`), not at order-creation time, and restocked on `cancel` from any
+status that had already decremented it; see `services/api/src/orders/orders.service.ts`.
 Manually exercising the cart/checkout flow (add → drawer → `/carrito` → `/checkout`) needs the API
 reachable from wherever the storefront dev server runs, since the proxy route calls it directly.
+
+### Order lifecycle & tracking
+
+`GET`/`PATCH /v1/admin/orders*` (list, detail, and one `PATCH` route per action — `confirm`,
+`preparing`, `shipped`, `delivered`, `cancel`) drive the order state machine (`PENDING` →
+`CONFIRMED` → `PREPARING` → `SHIPPED` → `DELIVERED`, with `cancel` reachable from every
+non-terminal status — see `services/api/src/orders/transitions.ts`'s `ALLOWED_ACTIONS`). Every
+transition is serialized per-order under a Postgres advisory lock (`pg_advisory_xact_lock`) so two
+concurrent requests on the same order (two admin tabs, a double-click) can't both win a race
+against `ALLOWED_ACTIONS`; an invalid transition is `409 INVALID_TRANSITION`. `shipped` requires a
+`carrier`/`trackingNumber` body; `cancel` requires a `reason`. Both are operational actions shared
+by `owner` and `staff` (no `@Roles()` gate), driven from the admin app's `/pedidos` (list + filter
+by status) and `/pedidos/:id` (detail, timeline, and action buttons) pages.
+
+Shoppers track their own order via `GET /v1/storefront/orders/track?orderNumber=&contact=`
+(no auth) on the storefront's `/rastrear` page — `contact` must match the order's `email` or
+`phone`. A nonexistent order number and a real order number with the WRONG contact deliberately
+return the identical `404 ORDER_NOT_FOUND` (same code path, not just the same status) — order
+numbers are sequential and guessable, so this endpoint must not let an attacker distinguish
+"guessed a real number" from "guessed wrong" by contact-checking after an existence check.
 
 ### Onboarding, staff & launch
 
@@ -159,6 +181,36 @@ Prerequisites: dev stack up + DB migrated (Quickstart steps 2–4). Then, from t
 `bash scripts/e2e.sh` — boots API/admin/storefront, runs the Playwright suite
 (`apps/admin/e2e/p1-dod.spec.ts`) through Caddy, tears servers down after. Local-run only, not
 part of `pnpm turbo run test`/CI.
+
+### P2 Definition-of-Done e2e
+
+Same prerequisites and runner as P1's suite above — `bash scripts/e2e.sh` runs every spec under
+`apps/admin/e2e/` (no file filter), so it picks up `apps/admin/e2e/p2-dod.spec.ts` automatically
+alongside `p1-dod.spec.ts` in the same invocation; no separate command or script change was needed
+to wire it in. `p2-dod.spec.ts` covers the full P2 vertical slice in one flow: storefront browsing
+→ add to cart → `/carrito` → COD `/checkout` → admin `/pedidos` fulfillment (confirm → preparing →
+shipped, with a carrier/tracking number → delivered) → `/rastrear` showing the delivered status,
+carrier/tracking number, and full timeline — plus asserting a wrong-contact tracking lookup on that
+same real order renders the byte-for-byte identical message a nonexistent order number would. It
+seeds its tenant/product/shipping configuration directly via `@ventia/db`'s `platformDb` (a real
+signup still runs through `/registro` for a genuine session cookie) rather than re-driving the
+whole P1 onboarding wizard, which `p1-dod.spec.ts` already covers on its own.
+
+### Lighthouse budget check
+
+`bash scripts/lighthouse.sh` runs the `lighthouse` CLI (via `npx`, no new permanent dependency,
+reusing the Chromium already preinstalled for Playwright) against the seeded `demo-moda` tenant's
+home page, one PDP, and `/carrito` — same "check, don't start, the dev stack" posture and
+prerequisites as the e2e scripts above (also needs `pnpm --filter @ventia/db seed` to have run at
+least once). Latest run, against the Next.js **dev** server (unminified, no production
+optimizations — a floor, not a production number; re-run against `next build && next start` for a
+representative one):
+
+| Page      | Performance | Accessibility | Best Practices | SEO |
+| --------- | ----------- | -------------- | --------------- | --- |
+| Home      | 54          | 100             | 96               | 91  |
+| PDP       | 57          | 100             | 96               | 91  |
+| `/carrito`| 46          | 100             | 96               | 91  |
 
 ## Deviations
 
