@@ -26,6 +26,10 @@ beforeAll(async () => {
   const prisma = new PrismaClient({ datasources: { db: { url: db.url } } });
   const tenant = await prisma.tenant.create({ data: { slug: 'demo', name: 'Demo', status: 'live' } });
   await prisma.tenantDomain.create({ data: { tenantId: tenant.id, domain: 'demo.ventia.localhost', isPrimary: true } });
+  const draftTenant = await prisma.tenant.create({ data: { slug: 'draftco', name: 'DraftCo Secret', status: 'draft' } });
+  await prisma.tenantDomain.create({ data: { tenantId: draftTenant.id, domain: 'draftco.ventia.localhost', isPrimary: true } });
+  const suspendedTenant = await prisma.tenant.create({ data: { slug: 'suspendedco', name: 'SuspendedCo', status: 'suspended' } });
+  await prisma.tenantDomain.create({ data: { tenantId: suspendedTenant.id, domain: 'suspendedco.ventia.localhost', isPrimary: true } });
   await prisma.$disconnect();
 
   const { createApp } = await import('../src/main');
@@ -70,5 +74,33 @@ describe('GET /v1/tenant', () => {
       .set('x-tenant-domain', 'demo.ventia.localhost');
     expect(res.status).toBe(200);
     expect(res.body.slug).toBe('demo');
+  });
+
+  // Cross-phase regression (final P2 review): this route predates
+  // PublicTenantGuard (added in P2a for /v1/storefront/*) and, until this
+  // fix, never enforced the same two invariants — verified to actually leak
+  // before the fix: a draft tenant came back 200 with its real name/
+  // tenantId/theme (indistinguishable-from-unresolved violated), and a
+  // suspended tenant came back a plain 200 (not 503) carrying `status:
+  // 'suspended'` for the storefront's own middleware.ts to translate — an
+  // external caller hitting the API directly (it's publicly reverse-proxied,
+  // not internal-only — see docker/Caddyfile's `api.ventia.*` block) got a
+  // 200, not the 503 M1's AC requires.
+  it('404s a draft tenant exactly like an unresolved one — no name/id/theme leak', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/tenant')
+      .set('Host', 'draftco.ventia.localhost');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('TENANT_NOT_FOUND');
+    expect(res.body).not.toHaveProperty('name');
+    expect(res.body).not.toHaveProperty('tenantId');
+  });
+
+  it('503s a suspended tenant at the API layer itself, not just a 200 with a status field', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/tenant')
+      .set('Host', 'suspendedco.ventia.localhost');
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('TENANT_SUSPENDED');
   });
 });
