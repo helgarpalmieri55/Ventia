@@ -326,35 +326,35 @@ model Customer {
 }
 
 model Order {
-  id              String        @id @default(uuid()) @db.Uuid
-  tenantId        String        @db.Uuid
-  number          Int
-  status          OrderStatus   @default(PENDING)
-  paymentStatus   PaymentStatus @default(PENDING)
-  paymentProvider String?
+  id                 String        @id @default(uuid()) @db.Uuid
+  tenantId           String        @db.Uuid
+  number             Int
+  status             OrderStatus   @default(PENDING)
+  paymentStatus      PaymentStatus @default(PENDING)
+  paymentProvider    String?
   // null = no active stock reservation (every COD order, and any order past
   // the pending/reserved stage). Set to now()+15min when an online-payment
   // checkout reserves stock at order-creation time; cleared to null once the
   // payment webhook confirms (or the reservation expires and is restocked).
   stockReservedUntil DateTime?
-  customerId      String?       @db.Uuid
-  email           String
-  phone           String
-  shippingAddress Json
-  billingFields   Json?
-  shippingMethod  String?
-  shippingCents   Int           @default(0)
-  subtotalCents   Int
-  taxCents        Int
-  totalCents      Int
-  source          CartSource    @default(web)
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer        Customer?     @relation(fields: [customerId], references: [id])
-  items           OrderItem[]
-  events          OrderEvent[]
-  payments        Payment[]
+  customerId         String?       @db.Uuid
+  email              String
+  phone              String
+  shippingAddress    Json
+  billingFields      Json?
+  shippingMethod     String?
+  shippingCents      Int           @default(0)
+  subtotalCents      Int
+  taxCents           Int
+  totalCents         Int
+  source             CartSource    @default(web)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  tenant             Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer           Customer?     @relation(fields: [customerId], references: [id])
+  items              OrderItem[]
+  events             OrderEvent[]
+  payments           Payment[]
 
   @@unique([tenantId, number])
   @@index([tenantId, status])
