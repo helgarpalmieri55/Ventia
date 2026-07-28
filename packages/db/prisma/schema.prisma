@@ -332,6 +332,11 @@ model Order {
   status          OrderStatus   @default(PENDING)
   paymentStatus   PaymentStatus @default(PENDING)
   paymentProvider String?
+  // null = no active stock reservation (every COD order, and any order past
+  // the pending/reserved stage). Set to now()+15min when an online-payment
+  // checkout reserves stock at order-creation time; cleared to null once the
+  // payment webhook confirms (or the reservation expires and is restocked).
+  stockReservedUntil DateTime?
   customerId      String?       @db.Uuid
   email           String
   phone           String
