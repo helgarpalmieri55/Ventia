@@ -154,6 +154,31 @@ describe('WompiProvider.verifyAndParseWebhook', () => {
     await expect(provider.verifyAndParseWebhook(toRawRequest(payload), cfg)).rejects.toThrow(/signature mismatch/);
   });
 
+  it('rejects a validly-checksummed payload whose signature.properties omits a field this method relies on', async () => {
+    const provider = new WompiProvider();
+    // The checksum here is genuinely valid FOR THE NARROWER properties list
+    // (only transaction.id is signed) — an attacker who controls the
+    // transport (or a Wompi event type that only signs a subset of fields)
+    // could flip `transaction.status`/`amount_in_cents` freely without
+    // invalidating this checksum, since those fields were never bound into
+    // it. Without the properties-coverage check, this payload would be
+    // accepted with `status: 'DECLINED'` silently trusted despite having
+    // zero cryptographic backing.
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-1234-abcd',
+      status: 'DECLINED',
+      amountInCents: 4990000,
+      reference: 'ORD-0001',
+      timestamp: 1700000000,
+      eventsSecret: cfg.eventsSecret!,
+      properties: ['transaction.id'],
+    });
+
+    await expect(provider.verifyAndParseWebhook(toRawRequest(payload), cfg)).rejects.toThrow(
+      /doesn't cover required field/,
+    );
+  });
+
   it('rejects malformed JSON bodies', async () => {
     const provider = new WompiProvider();
     const req: RawRequest = { headers: {}, rawBody: Buffer.from('not json', 'utf8') };

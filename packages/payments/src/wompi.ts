@@ -217,6 +217,25 @@ export class WompiProvider implements PaymentProvider {
       throw new Error('wompi webhook: signature mismatch');
     }
 
+    // Defense-in-depth: `properties` naming a field is what actually binds
+    // its value into `checksum` above — a valid checksum only proves the
+    // FIELDS LISTED IN `properties` weren't tampered with, not any other
+    // field in the payload. Wompi's docs say the properties list "can vary
+    // per event," so without this check, an event whose `properties` array
+    // happened to omit one of the fields this method reads below (e.g. a
+    // future/unexpected event type that signs only `transaction.id`) would
+    // let `transaction.status`/`amount_in_cents` be read and trusted even
+    // though nothing cryptographically verified them. Every field this
+    // method relies on below must be explicitly present in the SIGNED list.
+    const requiredSignedPaths = ['transaction.id', 'transaction.status', 'transaction.amount_in_cents'];
+    const stringProperties = properties.map((path) => String(path));
+    const missingFromSignature = requiredSignedPaths.filter((path) => !stringProperties.includes(path));
+    if (missingFromSignature.length > 0) {
+      throw new Error(
+        `wompi webhook: signature.properties doesn't cover required field(s): ${missingFromSignature.join(', ')}`,
+      );
+    }
+
     const transaction = (data as Record<string, unknown> | undefined)?.transaction as
       | Record<string, unknown>
       | undefined;
