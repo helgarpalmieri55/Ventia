@@ -11,6 +11,18 @@ export interface TenantProviderConfig {
   publicKey: string;
   privateKey: string;
   sandbox: boolean;
+  // Wompi-specific, added for Task 2 (`wompi.ts`). Verified against Wompi's
+  // real docs (docs.wompi.co "Environments and Keys"): `integritySecret` and
+  // `eventsSecret` are two DISTINCT dashboard secrets, each with its own
+  // sandbox/production key prefix (`test_integrity_`/`prod_integrity_` vs.
+  // `test_events_`/`prod_events_`) — neither is derivable from `publicKey` or
+  // `privateKey`, and they are not the same secret wearing two names. Both
+  // are optional here (not every `PaymentProviderId` needs them — only
+  // Wompi's checkout-signing and webhook-checksum schemes do), so a future
+  // provider (mercadopago/epayco, P3b) that doesn't use this exact scheme
+  // isn't forced to populate fields that mean nothing to it.
+  integritySecret?: string;
+  eventsSecret?: string;
 }
 
 export interface RawRequest {
@@ -35,3 +47,5 @@ export interface PaymentProvider {
   getTransactionStatus(providerRef: string, cfg: TenantProviderConfig): Promise<NormalizedStatus>;
   refund?(providerRef: string, amountCents: number, cfg: TenantProviderConfig): Promise<void>;
 }
+
+export { WompiProvider } from './wompi.js';
