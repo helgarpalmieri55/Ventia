@@ -35,6 +35,30 @@ export async function createApp(): Promise<INestApplication> {
   // the global middleware just passes it through, while every other route
   // still gets the conservative 100kb default.
   httpAdapter.use('/v1/admin/import', express.json({ limit: '10mb' }));
+  // Path-scoped raw-body exception for the payments webhook endpoint
+  // (services/api/src/payments/webhooks.controller.ts, POST
+  // /webhooks/payments/:provider/:tenantId). Signature verification
+  // (WompiProvider.verifyAndParseWebhook, packages/payments/src/wompi.ts)
+  // needs the EXACT original bytes the gateway signed — re-serializing a
+  // JSON-parsed body (different key order, whitespace, number formatting)
+  // would silently produce a different string than what was hashed on the
+  // sender's side, breaking the checksum even for a genuinely-untampered
+  // payload. `type: '*/*'` (rather than a specific content-type matcher)
+  // is deliberate: it's safer against variance in exactly what content-type
+  // a real Wompi delivery sends (e.g. `application/json; charset=utf-8`
+  // vs. plain `application/json`) — this route's own controller is the only
+  // thing that ever reads this body, so accepting any content-type as raw
+  // bytes here costs nothing.
+  //
+  // Must be mounted BEFORE the global express.json() below, same ordering
+  // reason as the /v1/admin/import exception above: body-parser's json
+  // middleware skips re-parsing a request whose body an earlier middleware
+  // already parsed (or, in this case, already consumed as a raw Buffer) —
+  // mounting this first means /webhooks/* requests get `req.body` as a raw
+  // Buffer, and the global express.json() below passes them through
+  // untouched, while every other route still gets its parsed JSON body as
+  // before.
+  httpAdapter.use('/webhooks', express.raw({ type: '*/*', limit: '1mb' }));
   httpAdapter.use(express.json());
   return app;
 }

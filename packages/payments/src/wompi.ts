@@ -227,7 +227,18 @@ export class WompiProvider implements PaymentProvider {
     // let `transaction.status`/`amount_in_cents` be read and trusted even
     // though nothing cryptographically verified them. Every field this
     // method relies on below must be explicitly present in the SIGNED list.
-    const requiredSignedPaths = ['transaction.id', 'transaction.status', 'transaction.amount_in_cents'];
+    const requiredSignedPaths = [
+      'transaction.id',
+      'transaction.status',
+      'transaction.amount_in_cents',
+      // Added alongside the `reference` field on `NormalizedPaymentEvent`
+      // (Task 4 fix to Task 2's shipped interface): `reference` is now a
+      // field this method relies on to route the event to the correct
+      // order, so — for the identical defense-in-depth reason as the other
+      // three entries above — it must be cryptographically bound by the
+      // checksum too, not just conveniently present in the payload.
+      'transaction.reference',
+    ];
     const stringProperties = properties.map((path) => String(path));
     const missingFromSignature = requiredSignedPaths.filter((path) => !stringProperties.includes(path));
     if (missingFromSignature.length > 0) {
@@ -246,6 +257,16 @@ export class WompiProvider implements PaymentProvider {
     if (typeof amountInCents !== 'number') {
       throw new Error('wompi webhook: missing data.transaction.amount_in_cents');
     }
+    // `reference` is Wompi's real transaction `reference` field — the exact
+    // same string `createCheckoutSession` sent as `reference: order.orderNumber`
+    // when it built the checkout redirect. Same rigor as the other required
+    // fields above: reject rather than silently substitute/omit if it's
+    // missing or not a string, since this is now the field a webhook
+    // controller relies on to resolve which Order this event is about.
+    const reference = transaction.reference;
+    if (typeof reference !== 'string') {
+      throw new Error('wompi webhook: missing data.transaction.reference');
+    }
 
     return {
       provider: 'wompi',
@@ -260,6 +281,7 @@ export class WompiProvider implements PaymentProvider {
       // composition is inferred, not something Wompi's docs prescribe.
       eventId: `${transaction.id}:${timestamp}`,
       providerRef: transaction.id,
+      reference,
       status: mapStatus(transaction.status),
       amountCents: amountInCents,
     };

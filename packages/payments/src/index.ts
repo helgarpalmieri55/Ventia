@@ -36,6 +36,24 @@ export interface NormalizedPaymentEvent {
   provider: PaymentProviderId;
   eventId: string;
   providerRef: string;
+  // The merchant-side order identifier this event is ABOUT — Wompi's real
+  // `transaction.reference` field, which is exactly the same string
+  // `WompiProvider.createCheckoutSession` sends as `reference` when it built
+  // the checkout redirect (see `createCheckoutSession`: `reference =
+  // order.orderNumber`). `providerRef` (above) is Wompi's OWN transaction id,
+  // which our side never stores anywhere at checkout time — `reference` is
+  // the only field a webhook handler can use to resolve this event back to
+  // one of our `Order` rows.
+  //
+  // Contract for callers (services/api's webhook controller, Task 4/5): this
+  // is the PLAIN STRING form of `Order.number` (the Prisma `Int` column),
+  // e.g. `String(order.number)` — e.g. `"42"`, NOT the `VNT-`-prefixed
+  // display string (`"VNT-000042"`) used in emails/UI. That prefix is purely
+  // a display-layer convention from earlier tasks and is never used as a
+  // lookup/storage key. A webhook controller resolving this back to an order
+  // must do `Number(event.reference)` and look up by `Order.number`, not by
+  // any prefixed/formatted string.
+  reference: string;
   status: NormalizedStatus;
   amountCents: number;
 }

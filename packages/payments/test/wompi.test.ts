@@ -62,7 +62,12 @@ function buildSignedWebhookPayload(opts: {
   eventsSecret: string;
   properties?: string[];
 }) {
-  const properties = opts.properties ?? ['transaction.id', 'transaction.status', 'transaction.amount_in_cents'];
+  const properties = opts.properties ?? [
+    'transaction.id',
+    'transaction.status',
+    'transaction.amount_in_cents',
+    'transaction.reference',
+  ];
   const data = {
     transaction: {
       id: opts.transactionId,
@@ -117,6 +122,7 @@ describe('WompiProvider.verifyAndParseWebhook', () => {
       provider: 'wompi',
       eventId: 'txn-1234-abcd:1700000000',
       providerRef: 'txn-1234-abcd',
+      reference: 'ORD-0001',
       status: 'PAID',
       amountCents: 4990000,
     });
@@ -172,6 +178,30 @@ describe('WompiProvider.verifyAndParseWebhook', () => {
       timestamp: 1700000000,
       eventsSecret: cfg.eventsSecret!,
       properties: ['transaction.id'],
+    });
+
+    await expect(provider.verifyAndParseWebhook(toRawRequest(payload), cfg)).rejects.toThrow(
+      /doesn't cover required field/,
+    );
+  });
+
+  it('rejects a validly-checksummed payload whose signature.properties omits transaction.reference', async () => {
+    const provider = new WompiProvider();
+    // The checksum here is genuinely valid for the narrower properties list
+    // (transaction.reference is not signed) — an attacker who controls the
+    // transport could substitute a DIFFERENT reference (routing this event
+    // to someone else's order) without invalidating this checksum, since
+    // `reference` was never bound into it. Without the properties-coverage
+    // check, this payload would have its (tampered) reference silently
+    // trusted despite zero cryptographic backing on that field.
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-1234-abcd',
+      status: 'APPROVED',
+      amountInCents: 4990000,
+      reference: 'ORD-0001',
+      timestamp: 1700000000,
+      eventsSecret: cfg.eventsSecret!,
+      properties: ['transaction.id', 'transaction.status', 'transaction.amount_in_cents'],
     });
 
     await expect(provider.verifyAndParseWebhook(toRawRequest(payload), cfg)).rejects.toThrow(
