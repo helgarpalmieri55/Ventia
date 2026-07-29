@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
+import { StockReservationWorker } from './stock-reservation.worker';
 import { WebhooksController } from './webhooks.controller';
 
 // Not @Global(): MailerModule is Global because a single MAILER token/factory
@@ -17,9 +18,18 @@ import { WebhooksController } from './webhooks.controller';
 // regardless of depth, and PaymentsModule already is (via SettingsModule's
 // `imports: [PaymentsModule]`), so no change to app.module.ts is needed for
 // this route to be picked up.
+// StockReservationWorker (Task 6) is registered as an ordinary provider
+// here too — same non-Global reasoning as PaymentsService above. Registering
+// it does NOT start its BullMQ Queue/Worker: that class deliberately
+// implements no Nest lifecycle hook that would auto-start anything (see its
+// own doc comment for why — `createApp()` runs in every test file's
+// `beforeAll`, so anything that started real BullMQ machinery from
+// `onModuleInit` would start it in every test run too). `main.ts`'s
+// `if (require.main === module)` real-boot block is the ONLY caller of
+// `app.get(StockReservationWorker).start()`.
 @Module({
   controllers: [WebhooksController],
-  providers: [PaymentsService],
-  exports: [PaymentsService],
+  providers: [PaymentsService, StockReservationWorker],
+  exports: [PaymentsService, StockReservationWorker],
 })
 export class PaymentsModule {}

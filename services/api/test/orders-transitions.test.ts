@@ -341,6 +341,63 @@ describe('cancel — restock', () => {
     const movements = await prisma.inventoryMovement.count({ where: { orderId } });
     expect(movements).toBe(0);
   });
+
+  // P3a Task 6: this is the ONE new case the widened cancel condition
+  // (`RESTOCKABLE_STATUSES.has(order.status) || order.stockReservedUntil !==
+  // null`) is meant to fix — a `wompi` order sitting in PENDING with real,
+  // already-decremented (reserved) stock, unlike the COD PENDING case just
+  // above (which never decremented anything and correctly restocks
+  // nothing). Constructed to match exactly what checkout.service.ts's
+  // `wompi` branch actually produces at order-creation time (Task 5):
+  // `paymentProvider: 'wompi'`, `paymentStatus: 'PENDING'`, `status:
+  // 'PENDING'`, and `stockReservedUntil` set ~15 minutes out — seeded
+  // directly via Prisma (this file's established convention for orders
+  // parked at an arbitrary state — see seedOrder's doc comment) rather than
+  // through the real checkout HTTP flow, since this test only needs the
+  // resulting Order shape, not checkout's own request/response contract.
+  it('cancelling a wompi order reserved in PENDING (stockReservedUntil set) DOES restock — previously silently skipped', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-cancel-wompi-reserved@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 4 }]);
+    // seedOrder's default paymentStatus is 'COD' — overwrite to the exact
+    // wompi-reserved shape checkout.service.ts's `wompi` branch writes, and
+    // simulate its adjustStockLine(-4) decrement (this test seeds the order
+    // directly rather than going through checkout, so it must simulate that
+    // earlier decrement itself, same convention as the CONFIRMED/PREPARING/
+    // SHIPPED cases above): stock goes from 10 down to 6.
+    await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        paymentStatus: 'PENDING',
+        paymentProvider: 'wompi',
+        stockReservedUntil: new Date(Date.now() + 15 * 60_000),
+      },
+    });
+    await prisma.product.update({ where: { id: product.id }, data: { stock: 6 } });
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/cancel`)
+      .set('cookie', cookie)
+      .send({ reason: 'Cliente canceló antes de pagar' });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('CANCELLED');
+
+    const updatedProduct = await prisma.product.findUnique({ where: { id: product.id } });
+    expect(updatedProduct?.stock).toBe(10); // restocked back up
+
+    // Still 'order_cancelled', NOT 'order_expired' — this is a merchant-
+    // initiated cancel action (the HTTP cancel endpoint), not the
+    // automatic TTL-expiry sweep (stock-reservation-worker.test.ts covers
+    // that separate reason string).
+    const movements = await prisma.inventoryMovement.findMany({ where: { orderId } });
+    expect(movements).toHaveLength(1);
+    expect(movements[0]).toMatchObject({ productId: product.id, delta: 4, reason: 'order_cancelled' });
+
+    // Data-hygiene assertion (step 1's judgment call): stockReservedUntil is
+    // cleared to null on the now-CANCELLED order, not left stale.
+    const updatedOrder = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(updatedOrder?.stockReservedUntil).toBeNull();
+  });
 });
 
 describe('concurrent transitions on the SAME order — advisory lock', () => {

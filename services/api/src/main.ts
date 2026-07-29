@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser';
 import { toNodeHandler } from 'better-auth/node';
 import { AppModule } from './app.module';
 import { AUTH_INSTANCE, type AuthInstance } from './admin/auth-instance';
+import { StockReservationWorker } from './payments/stock-reservation.worker';
 
 export async function createApp(): Promise<INestApplication> {
   // bodyParser: false — better-auth's toNodeHandler needs the raw (unparsed)
@@ -73,5 +74,17 @@ if (require.main === module) {
     // Tests call app.close() directly, which always runs these hooks anyway.
     app.enableShutdownHooks();
     await app.listen(env.API_PORT);
+    // Starts the stock-reservation TTL-expiry BullMQ scheduling (Task 6) —
+    // deliberately called ONLY here, in the real-process-boot branch, never
+    // inside createApp() itself. createApp() is the same factory every test
+    // file's beforeAll calls (`await createApp(); await app.init();`), so
+    // anything that started real BullMQ Queue/Worker machinery from inside
+    // createApp() (or from a Nest lifecycle hook any provider it constructs
+    // implements) would silently start a real repeatable job + Worker
+    // against every test's own ephemeral Testcontainers Postgres+Redis, on
+    // every test run in this repo. StockReservationWorker (see that file's
+    // doc comment) implements no such lifecycle hook — `start()` is a plain
+    // method nothing but this line calls.
+    await app.get(StockReservationWorker).start();
   })();
 }
