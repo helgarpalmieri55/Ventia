@@ -191,7 +191,11 @@ describe('PATCH /v1/admin/settings/payments', () => {
     expect(res.status).toBe(200);
 
     const getRes = await request(app.getHttpServer()).get('/v1/admin/settings').set('cookie', cookie);
-    expect(getRes.body.payments).toEqual({ codEnabled: true });
+    // Not `toEqual` any more: P3a Task 3 widened `payments` with a masked
+    // `providers.wompi` view (see settings.controller.ts's `toResponse`)
+    // alongside the pre-existing `codEnabled` — this test only cares about
+    // `codEnabled` here, so `toMatchObject` deliberately ignores the new key.
+    expect(getRes.body.payments).toMatchObject({ codEnabled: true });
 
     const tenant = await platformDb.tenant.findUniqueOrThrow({ where: { id: tenantId } });
     const settings = tenant.settings as Record<string, unknown>;

@@ -49,12 +49,46 @@ export const themeSchema = z.object({
   radius: z.enum(RADIUS_OPTIONS),
 });
 
+/** `providers.wompi` credentials, as accepted by `PATCH
+ * /v1/admin/settings/payments` — see `packages/payments/src/index.ts`'s
+ * `TenantProviderConfig` (P3a Task 2) for why `integritySecret` and
+ * `eventsSecret` are two distinct optional fields rather than one. `sandbox`
+ * is required (not optional): unlike the two secrets, which genuinely don't
+ * apply to every future provider, every Wompi credential set needs SOME
+ * explicit environment, and defaulting it silently (e.g. to `true`) would be
+ * a real footgun (an owner who forgets to flip it to `false` before going
+ * live, or vice versa) — better to make the caller say it every time. */
+export const wompiCredentialsSchema = z.object({
+  publicKey: z.string().min(1),
+  privateKey: z.string().min(1),
+  integritySecret: z.string().min(1).optional(),
+  eventsSecret: z.string().min(1).optional(),
+  sandbox: z.boolean(),
+});
+
 /** `PATCH /v1/admin/settings/payments` body — merged into
- * `tenants.settings.payments`, same shape as onboarding's `payments` step. */
+ * `tenants.settings.payments`, same shape as onboarding's `payments` step,
+ * now widened (P3a Task 3) with an optional nested `providers.wompi` object.
+ *
+ * Both `codEnabled` and `providers` are optional at the top level so a
+ * caller can PATCH just one without the other (`settings.controller.ts`'s
+ * `updatePayments` merges each in-place independently) — a design doc
+ * decision 8. This deliberately does NOT `.refine()` to reject a body with
+ * neither key present: a `{}` PATCH is simply accepted as a no-op (nothing
+ * to merge, nothing changes) rather than rejected as an error. That's a
+ * conscious choice, not an oversight — an empty PATCH is harmless, and a
+ * rejection would just be one more edge case for callers to special-case for
+ * no real safety benefit. */
 export const paymentsSettingsSchema = z.object({
-  codEnabled: z.boolean(),
+  codEnabled: z.boolean().optional(),
+  providers: z
+    .object({
+      wompi: wompiCredentialsSchema.optional(),
+    })
+    .optional(),
 });
 
 export type StoreSettingsInput = z.infer<typeof storeSettingsSchema>;
 export type ThemeInput = z.infer<typeof themeSchema>;
+export type WompiCredentialsInput = z.infer<typeof wompiCredentialsSchema>;
 export type PaymentsSettingsInput = z.infer<typeof paymentsSettingsSchema>;
