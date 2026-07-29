@@ -25,6 +25,17 @@ export const PROVIDERS: Partial<Record<PaymentProviderId, PaymentProvider>> = {
 };
 
 /**
+ * Shared across two independent call sites — `getProvider` below (id not in
+ * `PROVIDERS` at all) and `checkout.service.ts`'s wompi branch (id is valid
+ * and implemented, but THIS tenant never saved credentials for it) — two
+ * different underlying causes that both collapse to the same client-facing
+ * meaning ("can't check out with this provider right now"). Exported as one
+ * constant rather than left as a duplicated string literal so the two sites
+ * can't drift apart.
+ */
+export const PAYMENT_PROVIDER_NOT_CONFIGURED = 'PAYMENT_PROVIDER_NOT_CONFIGURED';
+
+/**
  * Looks up a configured provider implementation, throwing a 400
  * `PAYMENT_PROVIDER_NOT_CONFIGURED` HttpException for any `PaymentProviderId`
  * that doesn't have one yet (`mercadopago`/`epayco` today) — a 400, not a
@@ -35,7 +46,7 @@ export const PROVIDERS: Partial<Record<PaymentProviderId, PaymentProvider>> = {
 export function getProvider(id: PaymentProviderId): PaymentProvider {
   const provider = PROVIDERS[id];
   if (!provider) {
-    throw new HttpException({ error: 'PAYMENT_PROVIDER_NOT_CONFIGURED' }, 400);
+    throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
   }
   return provider;
 }

@@ -6,7 +6,7 @@ import { MAILER, type Mailer } from '../mailer/mailer';
 import { sendOrderEmails, type OrderEmailContext } from '../mailer/order-emails';
 import { adjustStockLine } from '../orders/orders.service';
 import { PaymentsService } from '../payments/payments.service';
-import { getProvider } from '../payments/provider-registry';
+import { getProvider, PAYMENT_PROVIDER_NOT_CONFIGURED } from '../payments/provider-registry';
 import { ShippingService } from './shipping.service';
 import { nextOrderNumber } from './order-number';
 
@@ -123,7 +123,7 @@ export class CheckoutService {
     if (input.paymentMethod === 'wompi') {
       wompiConfig = await this.paymentsService.getTenantProviderConfig(tenantId, 'wompi');
       if (!wompiConfig) {
-        throw new HttpException({ error: 'PAYMENT_PROVIDER_NOT_CONFIGURED' }, 400);
+        throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
       }
     }
 
