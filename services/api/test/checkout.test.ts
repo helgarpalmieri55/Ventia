@@ -19,6 +19,7 @@ const CHECKOUT_TEST_DOMAINS = [
   'checkout-i.ventia.localhost',
   'checkout-j.ventia.localhost',
   'checkout-k.ventia.localhost',
+  'checkout-l.ventia.localhost',
 ];
 
 // Same fixture shape as payments-service.test.ts/webhooks.test.ts's own
@@ -52,6 +53,7 @@ let tenantHId: string; // wompi insufficient stock (wompi credentials configured
 let tenantIId: string; // wompi checkout, tenant never configured wompi credentials
 let tenantJId: string; // wompi concurrent-checkout stock-reservation race (STOCK_BELOW_ZERO -> INSUFFICIENT_STOCK remap)
 let tenantKId: string; // wompi checkout, credentials saved but missing integritySecret/eventsSecret
+let tenantLId: string; // mercadopago checkout, tenant never configured mercadopago credentials — no real adapter exists yet (P3b Task 1)
 
 // Product fixture ids, populated in beforeAll.
 let productXId: string; // tenant A — 45900 cents
@@ -66,6 +68,7 @@ let wompiStockShortProductId: string; // tenant H — insufficient stock, wompi 
 let wompiUnconfiguredProductId: string; // tenant I — wompi checkout, no provider credentials saved
 let wompiRaceProductId: string; // tenant J — stock 1, two concurrent wompi checkouts race for it
 let wompiIncompleteCredsProductId: string; // tenant K — wompi credentials missing integritySecret/eventsSecret
+let mercadopagoUnconfiguredProductId: string; // tenant L — mercadopago checkout, no provider credentials saved
 
 const BOGOTA_ADDRESS = {
   nombreCompleto: 'Ana Ejemplo',
@@ -361,6 +364,32 @@ beforeAll(async () => {
     data: { tenantId: tenantKId, name: 'Producto Wompi Incompleto', slug: 'producto-wompi-incompleto', priceCents: 18000, status: 'active', stock: 10 },
   });
   wompiIncompleteCredsProductId = wompiIncompleteCredsProduct.id;
+
+  // Tenant L: `mercadopago` checkout — no adapter exists yet (P3b Task 1 ships
+  // deliberately before Tasks 2-4 add one), and this tenant never saved
+  // mercadopago credentials either. Exercises the widened validation layer
+  // (`mercadopago` is now an accepted `paymentMethod`) + the generalized
+  // credential check (`input.paymentMethod !== 'cod'`) end-to-end, proving
+  // the whole generalized chain still cleanly 400s — never a raw 500 —
+  // for a `PaymentProviderId` with zero adapter code behind it.
+  const tenantL = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-l',
+      name: 'Checkout L',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantLId = tenantL.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantLId, domain: 'checkout-l.ventia.localhost', isPrimary: true } });
+  const mercadopagoUnconfiguredProduct = await prisma.product.create({
+    data: { tenantId: tenantLId, name: 'Producto Sin Mercado Pago', slug: 'producto-sin-mercadopago', priceCents: 22000, status: 'active', stock: 10 },
+  });
+  mercadopagoUnconfiguredProductId = mercadopagoUnconfiguredProduct.id;
 
   const { createApp } = await import('../src/main');
   app = await createApp();
@@ -1058,5 +1087,39 @@ describe('POST /v1/storefront/checkout — wompi concurrent reservation race (ad
 
     const product = await prisma.product.findUniqueOrThrow({ where: { id: wompiRaceProductId } });
     expect(product.stock).toBe(0); // decremented exactly once, by the winner only
+  });
+});
+
+describe('POST /v1/storefront/checkout — mercadopago checkout, no adapter/credentials configured yet (P3b Task 1)', () => {
+  it("400 PAYMENT_PROVIDER_NOT_CONFIGURED for paymentMethod 'mercadopago', with ZERO DB side effects — the widened validation layer + generalized credential check reject this cleanly even though no mercadopago adapter exists yet", async () => {
+    const cookieValue = await newCartWithItem('checkout-l.ventia.localhost', mercadopagoUnconfiguredProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: mercadopagoUnconfiguredProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-l.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'mercadopago-unconfigured@example.com',
+        phone: '3009990007',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'mercadopago',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    // Same "zero side effects" shape as the wompi-unconfigured test above —
+    // this check runs before checkout.service.ts ever opens its transaction.
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantLId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: mercadopagoUnconfiguredProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantLId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
   });
 });

@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpException, Inject, Param, Post, Query, Res, 
 import type { Response } from 'express';
 import { Prisma, tenantDb } from '@ventia/db';
 import { checkoutAddressSchema, DEPARTAMENTOS, type CheckoutAddressInput } from '@ventia/core';
+import type { PaymentProviderId } from '@ventia/payments';
 import { PublicTenantGuard } from '../storefront/public-tenant.guard';
 import { StorefrontTenantId } from '../storefront/storefront-tenant.decorator';
 import { CartCookieGuard } from './cart-cookie.guard';
@@ -42,6 +43,12 @@ const CART_COOKIE_NAME = 'ventia_cart';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Every online provider id (`wompi`/`mercadopago`/`epayco`) is a valid
+// `paymentMethod` at the validation layer, same as `wompi` alone was before
+// this task — imported from @ventia/payments rather than hand-rolled so this
+// list can never drift from `PaymentProviderId` itself.
+const VALID_PAYMENT_METHODS: readonly PaymentProviderId[] = ['wompi', 'mercadopago', 'epayco'];
+
 // Hand-rolled top-level shape validation, same rationale as
 // cart.controller.ts's parseAddItemBody: this package avoids a direct `zod`
 // dependency (see catalog/parse.ts's ParsableSchema doc comment), so a
@@ -69,8 +76,8 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
   if (typeof b.shippingMethodId !== 'string' || b.shippingMethodId.length === 0) {
     details.shippingMethodId = 'shippingMethodId es requerido';
   }
-  if (b.paymentMethod !== 'cod' && b.paymentMethod !== 'wompi') {
-    details.paymentMethod = "paymentMethod debe ser 'cod' o 'wompi'";
+  if (b.paymentMethod !== 'cod' && !VALID_PAYMENT_METHODS.includes(b.paymentMethod as PaymentProviderId)) {
+    details.paymentMethod = "paymentMethod debe ser 'cod', 'wompi', 'mercadopago' o 'epayco'";
   }
 
   const addressResult = checkoutAddressSchema.safeParse(b.address);
@@ -92,7 +99,7 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
     phone: b.phone as string,
     address,
     shippingMethodId: b.shippingMethodId as string,
-    paymentMethod: b.paymentMethod as 'cod' | 'wompi',
+    paymentMethod: b.paymentMethod as 'cod' | PaymentProviderId,
   };
 }
 

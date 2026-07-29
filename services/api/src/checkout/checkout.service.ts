@@ -1,7 +1,7 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { Prisma, platformDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
 import { DEPARTAMENTOS, type CheckoutAddressInput, type TaxRateValue } from '@ventia/core';
-import type { TenantProviderConfig } from '@ventia/payments';
+import type { PaymentProviderId, TenantProviderConfig } from '@ventia/payments';
 import { MAILER, type Mailer } from '../mailer/mailer';
 import { sendOrderEmails, type OrderEmailContext } from '../mailer/order-emails';
 import { adjustStockLine } from '../orders/orders.service';
@@ -10,7 +10,7 @@ import { getProvider, PAYMENT_PROVIDER_NOT_CONFIGURED } from '../payments/provid
 import { ShippingService } from './shipping.service';
 import { nextOrderNumber } from './order-number';
 
-// Stock is held for 15 minutes while a `wompi` order's payment is pending
+// Stock is held for 15 minutes while a non-`cod` order's payment is pending
 // (P3a design doc decision 2) — released by a later BullMQ job (a
 // subsequent task) if it's abandoned. `null` for every `cod` order.
 const STOCK_RESERVATION_MS = 15 * 60_000;
@@ -54,22 +54,23 @@ export interface CheckoutInput {
   phone: string;
   address: CheckoutAddressInput; // from @ventia/core — already validated by the controller before this service is called
   shippingMethodId: string;
-  paymentMethod: 'cod' | 'wompi';
+  paymentMethod: 'cod' | PaymentProviderId;
 }
 
 export interface CheckoutResult {
   orderNumber: number;
   totalCents: number;
-  // Only present for a `wompi` checkout (design decision 8) — the storefront
-  // redirects the browser here instead of going straight to the order-
-  // confirmation page. Absent entirely (not `undefined`-valued) on every
-  // `cod` response, matching this file's own test suite's exact-equality
-  // assertion on the `cod` response shape.
+  // Only present for a non-`cod` checkout (design decision 8) — the
+  // storefront redirects the browser here instead of going straight to the
+  // order-confirmation page. Absent entirely (not `undefined`-valued) on
+  // every `cod` response, matching this file's own test suite's exact-
+  // equality assertion on the `cod` response shape.
   redirectUrl?: string;
 }
 
-// Everything the post-checkout email flow (and, for `wompi`, the post-commit
-// createCheckoutSession call) needs, computed once inside the transaction
+// Everything the post-checkout email flow (and, for a non-`cod` payment
+// method, the post-commit createCheckoutSession call) needs, computed once
+// inside the transaction
 // (cheap, since it's all already loaded/derived there) rather than re-queried
 // afterward. `CheckoutResult` (the actual HTTP response shape, asserted
 // verbatim by test/checkout.test.ts for the `cod` path) stays exactly
@@ -110,31 +111,56 @@ export class CheckoutService {
   ) {}
 
   async checkout(tenantId: string, cartCookieKey: string, input: CheckoutInput): Promise<CheckoutResult> {
-    // `wompi`'s tenant-provider-config check happens FIRST, before this
-    // method touches the database at all — deliberately BEFORE the
-    // transaction below, not after it commits. If this ran after commit (or
-    // inside the transaction but after the Order/stock-reservation writes),
-    // a tenant that never configured Wompi credentials would still get a
-    // real Order row created and real stock decremented, only to then fail
-    // on a condition that was knowable up front with zero side effects. A
-    // `cod` checkout never reaches this branch at all (`wompiConfig` stays
-    // `null` and unused for it).
-    let wompiConfig: TenantProviderConfig | null = null;
-    if (input.paymentMethod === 'wompi') {
-      wompiConfig = await this.paymentsService.getTenantProviderConfig(tenantId, 'wompi');
-      // `integritySecret`/`eventsSecret` are optional on `wompiCredentialsSchema`
-      // (a merchant can save public/private keys alone), but there is no real
-      // Wompi checkout for which they're actually dispensable: this method's
-      // own post-commit `createCheckoutSession` call needs `integritySecret`
-      // to sign the checkout request, and a webhook can never be verified
-      // without `eventsSecret` either — so an order paid for by a wompi
-      // checkout that lacks either would be created successfully now and only
-      // fail later (createCheckoutSession, or forever at the webhook), after
-      // this transaction has already decremented real stock. Checking both
-      // here, alongside the existing !wompiConfig check and for the identical
-      // reason (see the comment above), catches that case before any side
-      // effect exists at all.
-      if (!wompiConfig || !wompiConfig.integritySecret || !wompiConfig.eventsSecret) {
+    // The chosen online provider's tenant-provider-config check happens
+    // FIRST, before this method touches the database at all — deliberately
+    // BEFORE the transaction below, not after it commits. If this ran after
+    // commit (or inside the transaction but after the Order/stock-reservation
+    // writes), a tenant that never configured credentials for the chosen
+    // provider would still get a real Order row created and real stock
+    // decremented, only to then fail on a condition that was knowable up
+    // front with zero side effects. A `cod` checkout never reaches this
+    // branch at all (`onlineProviderConfig` stays `null` and unused for it).
+    let onlineProviderConfig: TenantProviderConfig | null = null;
+    if (input.paymentMethod !== 'cod') {
+      onlineProviderConfig = await this.paymentsService.getTenantProviderConfig(tenantId, input.paymentMethod);
+      if (!onlineProviderConfig) {
+        throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
+      }
+      // NOT generalized to every provider — this completeness check is
+      // deliberately still `wompi`-specific. `integritySecret`/`eventsSecret`
+      // are optional on `wompiCredentialsSchema` (a merchant can save
+      // public/private keys alone), but there is no real Wompi checkout for
+      // which they're actually dispensable: this method's own post-commit
+      // `createCheckoutSession` call needs `integritySecret` to sign the
+      // checkout request, and a webhook can never be verified without
+      // `eventsSecret` either — so an order paid for by a wompi checkout that
+      // lacks either would be created successfully now and only fail later
+      // (createCheckoutSession, or forever at the webhook), after this
+      // transaction has already decremented real stock. Checking both here,
+      // alongside the `!onlineProviderConfig` check above and for the
+      // identical reason, catches that case before any side effect exists at
+      // all.
+      //
+      // Mercado Pago/ePayco's own real completeness requirements are NOT
+      // known yet at this task's scope (P3b Task 1 ships deliberately before
+      // either adapter exists — see this file's module-level context /
+      // docs/superpowers/plans/2026-07-29-p3b-mercadopago-epayco.md). Per the
+      // design doc (decisions 3-5), Mercado Pago's real credential model has
+      // no `integritySecret` concept at all (only ever populates
+      // `eventsSecret`), and ePayco needs `eventsSecret` (its `P_KEY`) AND a
+      // not-yet-existing `epaycoCustomerId` field (`TenantProviderConfig`
+      // doesn't have it yet — Task 2 adds it). Blanket-generalizing this
+      // check to `!onlineProviderConfig.integritySecret ||
+      // !onlineProviderConfig.eventsSecret` for every provider would be WRONG
+      // (it would wrongly reject a fully-configured Mercado Pago tenant that
+      // correctly has no `integritySecret` at all), so this stays a literal
+      // `wompi` check, nested inside the now-generic `!== 'cod'` block rather
+      // than replacing it. TODO(P3b Task 4, provider registry/schema wiring):
+      // revisit this once Mercado Pago/ePayco's adapters and
+      // `TenantProviderConfig` widen enough to know their real per-provider
+      // completeness rules — this is a known, deliberate gap, not an
+      // oversight.
+      if (input.paymentMethod === 'wompi' && (!onlineProviderConfig.integritySecret || !onlineProviderConfig.eventsSecret)) {
         throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
       }
     }
@@ -313,12 +339,13 @@ export class CheckoutService {
             tenantId,
             number: orderNumber,
             status: 'PENDING',
-            // `cod` keeps its original literal `'COD'`; `wompi` is `'PENDING'`
-            // (already the schema default, but set explicitly per the design
-            // doc/brief) — the only other Order-create fields that differ by
-            // paymentMethod (`paymentProvider`, `stockReservedUntil`) are
-            // spread in below, never present at all for `cod`.
-            paymentStatus: input.paymentMethod === 'wompi' ? 'PENDING' : 'COD',
+            // `cod` keeps its original literal `'COD'`; any non-`cod`
+            // payment method is `'PENDING'` (already the schema default, but
+            // set explicitly per the design doc/brief) — the only other
+            // Order-create fields that differ by paymentMethod
+            // (`paymentProvider`, `stockReservedUntil`) are spread in below,
+            // never present at all for `cod`.
+            paymentStatus: input.paymentMethod !== 'cod' ? 'PENDING' : 'COD',
             customerId: customer.id,
             email: input.email,
             phone: input.phone,
@@ -329,16 +356,16 @@ export class CheckoutService {
             taxCents,
             totalCents,
             source: 'web',
-            ...(input.paymentMethod === 'wompi'
+            ...(input.paymentMethod !== 'cod'
               ? {
-                  paymentProvider: 'wompi',
+                  paymentProvider: input.paymentMethod,
                   stockReservedUntil: new Date(Date.now() + STOCK_RESERVATION_MS),
                 }
               : {}),
           },
         });
 
-        if (input.paymentMethod === 'wompi') {
+        if (input.paymentMethod !== 'cod') {
           // Stock reservation (design doc decision 2): an online-payment
           // order actually decrements Product/ProductVariant.stock right now
           // (reusing orders.service.ts's own atomic floor-checked
@@ -482,18 +509,18 @@ export class CheckoutService {
       });
     }
 
-    if (input.paymentMethod === 'wompi') {
-      // `wompiConfig` is guaranteed non-null here: the only way to reach this
-      // branch is `input.paymentMethod === 'wompi'`, and this method already
-      // threw PAYMENT_PROVIDER_NOT_CONFIGURED and returned before the
+    if (input.paymentMethod !== 'cod') {
+      // `onlineProviderConfig` is guaranteed non-null here: the only way to
+      // reach this branch is `input.paymentMethod !== 'cod'`, and this method
+      // already threw PAYMENT_PROVIDER_NOT_CONFIGURED and returned before the
       // transaction ever opened if it were null (see the top of this
       // method). Unlike the fire-and-forget email above, this call's result
       // (the redirect URL) IS needed synchronously for this method's own
       // return value/the HTTP response, so it's awaited, not fire-and-forget
-      // — a real failure here (the Wompi API/network) surfaces as a genuine
-      // error to the caller instead of being swallowed, since the shopper
-      // has no usable checkout outcome without a redirect URL.
-      const { redirectUrl } = await getProvider('wompi').createCheckoutSession(
+      // — a real failure here (the provider's API/network) surfaces as a
+      // genuine error to the caller instead of being swallowed, since the
+      // shopper has no usable checkout outcome without a redirect URL.
+      const { redirectUrl } = await getProvider(input.paymentMethod).createCheckoutSession(
         {
           orderId: result.orderId,
           // CRITICAL contract with the webhook handler (Task 4,
@@ -508,7 +535,7 @@ export class CheckoutService {
           totalCents: result.totalCents,
           customerEmail: result.email,
         },
-        wompiConfig!,
+        onlineProviderConfig!,
       );
       return { orderNumber: result.orderNumber, totalCents: result.totalCents, redirectUrl };
     }
