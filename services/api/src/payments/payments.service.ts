@@ -208,4 +208,58 @@ export class PaymentsService {
       });
     });
   }
+
+  /**
+   * Webhook-reported failed payment ATTEMPT (a `FAILED` event — the
+   * shopper's payment was declined/errored, not cancelled) — mirrors
+   * `markPaid`'s guard/locking discipline exactly, for the same reason: a
+   * webhook for one attempt racing an admin action, or a LATER webhook for a
+   * different attempt on the same order (a shopper who retries Wompi's
+   * checkout after a decline), must serialize and must never clobber a
+   * transition that already happened.
+   *
+   * Found in review: the original implementation of this webhook branch did
+   * a bare `tenantDb(tenantId).order.update({data:{paymentStatus:'FAILED'}})`
+   * directly in the controller, with no precondition check and no lock —
+   * reproducibly overwrote an already-CONFIRMED/PAID order's `paymentStatus`
+   * back to `FAILED` if a late-arriving webhook for an earlier failed
+   * attempt on the same order was processed after a later attempt's `PAID`
+   * webhook already confirmed it. Only `status === 'PENDING' &&
+   * paymentStatus === 'PENDING'` may ever move to `FAILED` here — a stray/
+   * late FAILED event for an order that's already `CONFIRMED`/`PAID` (or
+   * already `FAILED`, or `CANCELLED`) is a safe, idempotent no-op, exactly
+   * like `markPaid`'s own no-op branch.
+   *
+   * Deliberately does NOT touch `status` or `stockReservedUntil` (design
+   * decision: a failed attempt doesn't cancel the order or release its stock
+   * hold — the shopper may retry; the TTL expiry job, Task 6, is the only
+   * thing that ever restocks a reserved-but-unpaid order).
+   */
+  async markFailed(tenantId: string, orderId: string, provider: string, providerRef: string): Promise<void> {
+    await platformDb.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`;
+
+      const order = await tx.order.findFirst({ where: { id: orderId, tenantId } });
+      if (!order || order.status !== 'PENDING' || order.paymentStatus !== 'PENDING') {
+        return;
+      }
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: { paymentStatus: 'FAILED' },
+      });
+
+      await tx.orderEvent.create({
+        data: {
+          tenantId,
+          orderId,
+          type: 'payment_failed',
+          actor: 'system',
+          data: { provider, providerRef } as Prisma.InputJsonValue,
+        },
+      });
+    });
+  }
 }

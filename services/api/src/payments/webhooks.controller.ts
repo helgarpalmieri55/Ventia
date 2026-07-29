@@ -203,30 +203,16 @@ export class WebhooksController {
       // Design decision (spec + design doc decision 3's neighboring intent):
       // a failed payment ATTEMPT does not cancel the order or touch stock —
       // the shopper may retry a different payment method, or retry Wompi's
-      // checkout again for the same order. Only `paymentStatus` moves;
-      // `status` stays PENDING and `stockReservedUntil` is left alone (the
-      // TTL expiry job, Task 6, is the only thing that ever restocks a
-      // reserved-but-unpaid order).
-      await tenantDb(tenantId).order.update({
-        where: { id: order.id },
-        data: { paymentStatus: 'FAILED' },
-      });
-      // Recorded as an OrderEvent for the same auditability every other
-      // order state change gets (orders.service.ts's `type`/`actor`
-      // vocabulary — 'system' actor, matching markPaid's own
-      // 'payment_confirmed' event) — this is additive to the brief's literal
-      // AC (which only requires the paymentStatus field change), not a
-      // requirement, but keeping a failed-payment attempt invisible in the
-      // order's own event history seemed like a real gap.
-      await tenantDb(tenantId).orderEvent.create({
-        data: {
-          tenantId,
-          orderId: order.id,
-          type: 'payment_failed',
-          actor: 'system',
-          data: { provider: providerId, providerRef: event.providerRef } as Prisma.InputJsonValue,
-        },
-      });
+      // checkout again for the same order. Routed through
+      // PaymentsService.markFailed (same advisory-lock-per-order + PENDING/
+      // PENDING precondition guard as markPaid), NOT a bare tenantDb update:
+      // review found the original bare-update version here could silently
+      // overwrite an already-CONFIRMED/PAID order's paymentStatus back to
+      // FAILED if a late-arriving webhook for an earlier failed attempt on
+      // the same order (a shopper retry) was processed after a later
+      // attempt's PAID webhook already confirmed it — markFailed's
+      // precondition makes that a safe no-op instead.
+      await this.paymentsService.markFailed(tenantId, order.id, providerId, event.providerRef);
       await platformDb.webhookEvent.update({
         where: { provider_eventId: { provider: event.provider, eventId: event.eventId } },
         data: { processedAt: new Date(), result: 'failed' },

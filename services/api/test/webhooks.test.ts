@@ -395,6 +395,64 @@ describe('POST /webhooks/payments/:provider/:tenantId', () => {
       expect(webhookEvents[0].result).toBe('failed');
     });
 
+    it('a late-arriving DECLINED event for an EARLIER attempt does NOT clobber an order already CONFIRMED/PAID by a LATER attempt', async () => {
+      // Regression test: a shopper's first checkout attempt is declined, they
+      // retry and succeed — Wompi delivers the APPROVED webhook for the
+      // retry before the DECLINED webhook for the original attempt (a
+      // perfectly ordinary delivery-order race, not a contrived edge case).
+      // Both events carry the SAME order `reference` but DIFFERENT
+      // transaction ids (two distinct attempts), so neither is a replay of
+      // the other — both must be processed as genuinely new events, but the
+      // order's final state must reflect reality (paid), not whichever
+      // event happened to arrive last.
+      const { tenantId } = await signUpWithTenant('webhooks-late-failed@demo.co', 'owner');
+      await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+      const { orderId, orderNumber, productId, stockAfterReservation } = await seedOrderWithProduct(tenantId);
+
+      const approvedPayload = buildSignedWebhookPayload({
+        transactionId: 'txn-retry-success',
+        status: 'APPROVED',
+        amountInCents: 30_000,
+        reference: String(orderNumber),
+        timestamp: 1_700_000_500,
+        eventsSecret: FAKE_CREDS.eventsSecret,
+      });
+      const approvedRes = await postWebhook(tenantId, approvedPayload);
+      expect(approvedRes.status).toBe(200);
+
+      let order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+      expect(order.status).toBe('CONFIRMED');
+      expect(order.paymentStatus).toBe('PAID');
+
+      // The earlier attempt's DECLINED webhook arrives AFTER the order is
+      // already confirmed/paid — a different transaction id, so this is a
+      // genuinely new event (not caught by the WebhookEvent replay guard),
+      // but it must still be a safe no-op on the order itself.
+      const declinedPayload = buildSignedWebhookPayload({
+        transactionId: 'txn-retry-original-declined',
+        status: 'DECLINED',
+        amountInCents: 30_000,
+        reference: String(orderNumber),
+        timestamp: 1_700_000_490,
+        eventsSecret: FAKE_CREDS.eventsSecret,
+      });
+      const declinedRes = await postWebhook(tenantId, declinedPayload);
+      expect(declinedRes.status).toBe(200);
+
+      order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+      expect(order.status).toBe('CONFIRMED');
+      expect(order.paymentStatus).toBe('PAID'); // must NOT have been clobbered back to FAILED
+
+      const product = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+      expect(product.stock).toBe(stockAfterReservation); // untouched by either event
+
+      // Both events were genuinely distinct and both durably recorded.
+      const confirmedEvents = await prisma.orderEvent.findMany({ where: { orderId, type: 'payment_confirmed' } });
+      expect(confirmedEvents).toHaveLength(1);
+      const failedEvents = await prisma.orderEvent.findMany({ where: { orderId, type: 'payment_failed' } });
+      expect(failedEvents).toHaveLength(0); // markFailed's precondition made this a no-op — no event written
+    });
+
     it('a verified event whose reference matches no order for this tenant -> 200, no mutation, WebhookEvent.result reflects the anomaly', async () => {
       const { tenantId } = await signUpWithTenant('webhooks-order-not-found@demo.co', 'owner');
       await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
