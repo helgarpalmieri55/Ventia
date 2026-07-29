@@ -155,13 +155,20 @@ interface StockAdjustableItem {
  * STOCK_BELOW_ZERO here rolls back every earlier line's already-applied
  * decrement in the same loop automatically — no hand-rolled compensation
  * needed.
+ *
+ * Exported (was module-private) for Task 5's checkout.service.ts `wompi`
+ * branch, which reuses this exact atomic primitive to reserve stock at
+ * checkout time (P3a design decision 2: an online-payment order actually
+ * decrements stock immediately, using the new `'order_reserved'`
+ * InventoryMovement reason below, rather than a separate reservation
+ * ledger).
  */
-async function adjustStockLine(
+export async function adjustStockLine(
   tx: Prisma.TransactionClient,
   tenantId: string,
   item: StockAdjustableItem,
   delta: number,
-  reason: 'order_confirmed' | 'order_cancelled',
+  reason: 'order_confirmed' | 'order_cancelled' | 'order_reserved',
   orderId: string,
   actorUserId: string,
 ): Promise<void> {

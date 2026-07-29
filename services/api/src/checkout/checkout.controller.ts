@@ -69,8 +69,8 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
   if (typeof b.shippingMethodId !== 'string' || b.shippingMethodId.length === 0) {
     details.shippingMethodId = 'shippingMethodId es requerido';
   }
-  if (b.paymentMethod !== 'cod') {
-    details.paymentMethod = "paymentMethod debe ser 'cod'";
+  if (b.paymentMethod !== 'cod' && b.paymentMethod !== 'wompi') {
+    details.paymentMethod = "paymentMethod debe ser 'cod' o 'wompi'";
   }
 
   const addressResult = checkoutAddressSchema.safeParse(b.address);
@@ -92,7 +92,7 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
     phone: b.phone as string,
     address,
     shippingMethodId: b.shippingMethodId as string,
-    paymentMethod: 'cod',
+    paymentMethod: b.paymentMethod as 'cod' | 'wompi',
   };
 }
 
