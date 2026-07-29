@@ -89,4 +89,30 @@ describe('submitCheckout', () => {
     expect(err).toBeInstanceOf(CheckoutApiError);
     expect((err as CheckoutApiError).code).toBe('UNKNOWN');
   });
+
+  it('passes a wompi paymentMethod through in the request body and round-trips redirectUrl from the response', async () => {
+    const wompiInput = { ...input, paymentMethod: 'wompi' as const };
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          orderNumber: 43,
+          totalCents: 100000,
+          redirectUrl: 'https://checkout.wompi.co/p/?public-key=pub_test_x&signature:integrity=abc',
+        }),
+        { status: 201 },
+      ),
+    );
+    const result = await submitCheckout(wompiInput, fetchImpl);
+    expect(result).toEqual({
+      orderNumber: 43,
+      totalCents: 100000,
+      redirectUrl: 'https://checkout.wompi.co/p/?public-key=pub_test_x&signature:integrity=abc',
+    });
+    expect(fetchImpl).toHaveBeenCalledWith('/api/checkout', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(wompiInput),
+      credentials: 'include',
+    });
+  });
 });

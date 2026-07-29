@@ -38,12 +38,15 @@ export interface CheckoutSubmitInput {
     notas?: string;
   };
   shippingMethodId: string;
-  paymentMethod: 'cod';
+  paymentMethod: 'cod' | 'wompi';
 }
 
 export interface CheckoutResult {
   orderNumber: number;
   totalCents: number;
+  // Only present for a `wompi` checkout — see checkout.service.ts's
+  // `CheckoutResult` for the full contract. Absent entirely for `cod`.
+  redirectUrl?: string;
 }
 
 interface ErrorBody {

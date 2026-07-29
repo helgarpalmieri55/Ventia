@@ -19,6 +19,7 @@ function validState(overrides: Partial<CheckoutFormState> = {}): CheckoutFormSta
     barrio: '',
     notas: '',
     shippingMethodId: 'flat-1',
+    paymentMethod: 'cod',
     ...overrides,
   };
 }
@@ -89,6 +90,23 @@ describe("validateCheckoutStep('shipping', ...)", () => {
   });
 });
 
+describe("validateCheckoutStep('payment', ...)", () => {
+  it('flags an empty paymentMethod', () => {
+    const errors = validateCheckoutStep('payment', validState({ paymentMethod: '' }));
+    expect(errors.paymentMethod).toBeTruthy();
+  });
+
+  it("does not flag 'cod'", () => {
+    const errors = validateCheckoutStep('payment', validState({ paymentMethod: 'cod' }));
+    expect(errors.paymentMethod).toBeUndefined();
+  });
+
+  it("does not flag 'wompi'", () => {
+    const errors = validateCheckoutStep('payment', validState({ paymentMethod: 'wompi' }));
+    expect(errors.paymentMethod).toBeUndefined();
+  });
+});
+
 describe('a fully valid state', () => {
   it("returns {} for 'contact'", () => {
     expect(validateCheckoutStep('contact', validState())).toEqual({});
@@ -100,5 +118,9 @@ describe('a fully valid state', () => {
 
   it("returns {} for 'shipping'", () => {
     expect(validateCheckoutStep('shipping', validState())).toEqual({});
+  });
+
+  it("returns {} for 'payment'", () => {
+    expect(validateCheckoutStep('payment', validState())).toEqual({});
   });
 });

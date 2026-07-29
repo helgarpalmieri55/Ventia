@@ -18,6 +18,7 @@ export interface CheckoutFormState {
   barrio: string;
   notas: string;
   shippingMethodId: string;
+  paymentMethod: 'cod' | 'wompi' | '';
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -38,7 +39,7 @@ export function municipioOptionsFor(departamentoCode: string): { value: string; 
  * a `{field: message}` map; `{}` means every field relevant to this step is
  * valid. */
 export function validateCheckoutStep(
-  step: 'contact' | 'address' | 'shipping',
+  step: 'contact' | 'address' | 'shipping' | 'payment',
   state: CheckoutFormState,
 ): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -75,6 +76,12 @@ export function validateCheckoutStep(
   if (step === 'shipping') {
     if (!state.shippingMethodId) {
       errors.shippingMethodId = 'Selecciona un método de envío.';
+    }
+  }
+
+  if (step === 'payment') {
+    if (!state.paymentMethod) {
+      errors.paymentMethod = 'Selecciona un método de pago.';
     }
   }
 
