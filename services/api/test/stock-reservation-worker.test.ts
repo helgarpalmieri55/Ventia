@@ -6,6 +6,7 @@ import type { PrismaClient as PrismaClientType, OrderStatus, PaymentStatus } fro
 import { startTestDb } from './helpers';
 import type { signUpWithTenant as SignUpWithTenant } from './admin-helpers';
 import type { expireReservations as ExpireReservations } from '../src/payments/stock-reservation.worker';
+import type { PaymentsService as PaymentsServiceType } from '../src/payments/payments.service';
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
 let redisContainer: StartedTestContainer;
@@ -13,6 +14,7 @@ let app: INestApplication;
 let signUpWithTenant: typeof SignUpWithTenant;
 let prisma: PrismaClientType;
 let expireReservations: typeof ExpireReservations;
+let paymentsService: PaymentsServiceType;
 
 beforeAll(async () => {
   db = await startTestDb();
@@ -47,6 +49,8 @@ beforeAll(async () => {
   ({ signUpWithTenant } = await import('./admin-helpers'));
   ({ platformDb: prisma } = (await import('@ventia/db')) as unknown as { platformDb: PrismaClientType });
   ({ expireReservations } = await import('../src/payments/stock-reservation.worker'));
+  const { PaymentsService } = await import('../src/payments/payments.service');
+  paymentsService = app.get(PaymentsService);
 }, 120_000);
 
 afterAll(async () => {
@@ -306,5 +310,55 @@ describe('expireReservations — cross-tenant sweep', () => {
     expect(orderCAfter?.status).toBe('PENDING');
     const productCAfter = await prisma.product.findUnique({ where: { id: productC.id } });
     expect(productCAfter?.stock).toBe(8);
+  });
+});
+
+describe('expireReservations — genuine concurrent race with a real webhook (markPaid)', () => {
+  // Unlike the earlier "race" test in this file (a synthetic already-
+  // CONFIRMED row, since there's no seam to pause mid-function between the
+  // candidate SELECT and the per-order transaction), this fires a REAL
+  // concurrent webhook-equivalent call (PaymentsService.markPaid, the same
+  // method the webhook controller calls) against the SAME order the sweep is
+  // also processing, via Promise.all — mirroring
+  // orders-transitions.test.ts's "two concurrent cancels" pattern. Both
+  // paths share the identical `pg_advisory_xact_lock(hashtext(orderId))` key
+  // (orders.service.ts, payments.service.ts, and this worker all use it), so
+  // whichever call acquires the lock first should run to completion and the
+  // second should see the now-updated row and correctly no-op — never a
+  // double-restock, never a corrupted mixed state.
+  it('sweep racing a real markPaid on the same order: exactly one outcome wins, never both partially applied', async () => {
+    const { tenantId } = await signUpWithTenant('worker-race-markpaid@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 6); // already reserved: 10 -> 6 for qty 4
+    const orderId = await seedReservedOrder(tenantId, product.id, 4, {
+      status: 'PENDING',
+      paymentStatus: 'PENDING',
+      stockReservedUntil: new Date(Date.now() - 60_000), // already expired
+    });
+
+    await Promise.all([expireReservations(), paymentsService.markPaid(tenantId, orderId, 'wompi', 'evt_race_1')]);
+
+    const orderAfter = await prisma.order.findUnique({ where: { id: orderId } });
+    // Exactly one of the two outcomes — never a mix (e.g. CANCELLED but
+    // still paymentStatus PENDING, or CONFIRMED but also restocked).
+    const isExpired = orderAfter?.status === 'CANCELLED' && orderAfter.paymentStatus === 'EXPIRED';
+    const isPaid = orderAfter?.status === 'CONFIRMED' && orderAfter.paymentStatus === 'PAID';
+    expect(isExpired || isPaid).toBe(true);
+    expect(orderAfter?.stockReservedUntil).toBeNull();
+
+    const productAfter = await prisma.product.findUnique({ where: { id: product.id } });
+    if (isExpired) {
+      // The sweep won: stock restocked back to 10, exactly once.
+      expect(productAfter?.stock).toBe(10);
+      const movements = await prisma.inventoryMovement.count({ where: { orderId, reason: 'order_expired' } });
+      expect(movements).toBe(1);
+    } else {
+      // markPaid won: markPaid never restocks (the reservation just stops
+      // being reversible) — stock stays at the already-reserved 6, and the
+      // sweep's own re-read-then-check guard must have skipped this order
+      // rather than restocking a now-CONFIRMED order.
+      expect(productAfter?.stock).toBe(6);
+      const movements = await prisma.inventoryMovement.count({ where: { orderId, reason: 'order_expired' } });
+      expect(movements).toBe(0);
+    }
   });
 });

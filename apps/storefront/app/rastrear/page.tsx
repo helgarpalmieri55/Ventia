@@ -41,6 +41,9 @@ const STATUS_LABEL: Record<OrderStatus, string> = {
 const EVENT_LABEL: Record<string, string> = {
   created: 'Pedido creado',
   status_changed: 'Estado actualizado',
+  reservation_expired: 'Reserva de stock expirada',
+  payment_confirmed: 'Pago confirmado',
+  payment_failed: 'Pago fallido',
 };
 
 // Deliberately the ONE error message for every non-2xx case (see the
