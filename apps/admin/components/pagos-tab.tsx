@@ -3,7 +3,7 @@
 import { useState, type FormEvent } from 'react';
 import { Alert, Button, FormField, Input, Label } from '@ventia/ui';
 import { ApiError, apiFetch } from '../lib/api';
-import { errorMessage } from '../lib/errors';
+import { errorMessage, fieldErrors } from '../lib/errors';
 import { BLANK_WOMPI_FORM, buildWompiCredentialsPayload, type WompiFormFields } from '../lib/wompi-form';
 import type { SettingsResponse, TabProps } from '../app/(app)/configuracion/page';
 
@@ -97,6 +97,7 @@ function WompiSection({ settings, onSaved }: TabProps) {
 
   const [fields, setFields] = useState<WompiFormFields>(BLANK_WOMPI_FORM);
   const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [environmentError, setEnvironmentError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -112,6 +113,7 @@ function WompiSection({ settings, onSaved }: TabProps) {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    setErrors({});
     setEnvironmentError(null);
     setSaved(false);
     setTestResult(null);
@@ -138,7 +140,12 @@ function WompiSection({ settings, onSaved }: TabProps) {
       // they just saved without re-typing it on the next unrelated edit).
       setFields((prev) => ({ ...prev, privateKey: '', integritySecret: '', eventsSecret: '' }));
     } catch (e) {
-      setError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
+      if (e instanceof ApiError) {
+        if (e.code === 'VALIDATION_FAILED') setErrors(fieldErrors(e));
+        else setError(errorMessage(e));
+      } else {
+        setError('Ocurrió un error inesperado. Intenta de nuevo.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -180,6 +187,15 @@ function WompiSection({ settings, onSaved }: TabProps) {
 
       <form className="flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
         {error ? <Alert variant="error">{error}</Alert> : null}
+        {/* zod's `.flatten()` keys a nested-object field by its first path
+            segment only (same limitation TiendaTab/MarcaTab already document
+            for their own nested `storeInfo`/`colors` fields) — a validation
+            failure anywhere under `providers.wompi.*` surfaces as one
+            `providers` key, never `publicKey`/`privateKey` individually, so
+            this is a single alert above the credential fields rather than
+            per-FormField `error` props (which would always be undefined for
+            this shape). */}
+        {errors.providers ? <Alert variant="error">{errors.providers}</Alert> : null}
         {saved ? <Alert variant="success">Los cambios se guardaron correctamente.</Alert> : null}
 
         <p className="text-sm text-muted-foreground">
