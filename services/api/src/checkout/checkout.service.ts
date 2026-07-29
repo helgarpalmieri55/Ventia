@@ -285,9 +285,9 @@ export class CheckoutService {
         // need transactional consistency with the order write below, and
         // they never touch Cart/Order/Customer rows themselves.
         //
-        // `isCodAllowed` is a COD-only concept (design doc decision 8) — a
-        // `wompi` checkout skips this check entirely, same as it would for
-        // any other non-COD payment method. This is the ONE place the `cod`
+        // `isCodAllowed` is a COD-only concept (design doc decision 8) — any
+        // non-COD checkout (wompi, mercadopago, epayco, ...) skips this check
+        // entirely. This is the ONE place the `cod`
         // branch's own pre-existing 3 lines are now conditionally reached
         // rather than unconditionally reached; their own content/behavior for
         // an actual `cod` checkout is unchanged.
@@ -482,16 +482,18 @@ export class CheckoutService {
     //
     // `cod`-only: sendOrderEmails' own template (order-emails.ts) explicitly
     // says "Tu pedido ... se pagará contra entrega" (COD-specific wording) —
-    // sending that to a `wompi` shopper who hasn't paid yet (they're about to
-    // be redirected to Wompi's checkout, and may never come back / may pay
-    // with a different attempt) would be actively misleading. No equivalent
-    // "your order is confirmed" email is sent for `wompi` at THIS point in
-    // the flow — `PaymentsService.markPaid` (Task 4, fires from the webhook
-    // once Wompi actually confirms payment) does not currently send any
-    // email either, so a `wompi` shopper gets no order email at all until a
-    // later task adds one to `markPaid`. Flagged here deliberately: this is a
-    // real, known gap in this task's scope, not an oversight — sending the
-    // wrong (COD-worded) email would be worse than sending none.
+    // sending that to a shopper checking out with any online provider
+    // (wompi, mercadopago, epayco, ...) who hasn't paid yet (they're about to
+    // be redirected to that provider's checkout, and may never come back /
+    // may pay with a different attempt) would be actively misleading. No
+    // equivalent "your order is confirmed" email is sent for an online-
+    // provider checkout at THIS point in the flow — `PaymentsService.markPaid`
+    // (fires from the provider's webhook once payment is actually confirmed)
+    // does not currently send any email either, so that shopper gets no order
+    // email at all until a later task adds one to `markPaid`. Flagged here
+    // deliberately: this is a real, known gap in this task's scope, not an
+    // oversight — sending the wrong (COD-worded) email would be worse than
+    // sending none.
     if (input.paymentMethod === 'cod') {
       const departamentoName = DEPARTAMENTOS.find((d) => d.code === result.departamentoCode)?.name ?? result.departamentoCode;
       const emailCtx: OrderEmailContext = {
@@ -530,7 +532,7 @@ export class CheckoutService {
           // emails/UI. The webhook handler resolves an incoming event back to
           // this order via `Number(event.reference)` against `Order.number`
           // — sending the prefixed form here would silently break webhook
-          // resolution for every real Wompi order.
+          // resolution for every real order, on any online provider.
           orderNumber: String(result.orderNumber),
           totalCents: result.totalCents,
           customerEmail: result.email,
