@@ -122,7 +122,19 @@ export class CheckoutService {
     let wompiConfig: TenantProviderConfig | null = null;
     if (input.paymentMethod === 'wompi') {
       wompiConfig = await this.paymentsService.getTenantProviderConfig(tenantId, 'wompi');
-      if (!wompiConfig) {
+      // `integritySecret`/`eventsSecret` are optional on `wompiCredentialsSchema`
+      // (a merchant can save public/private keys alone), but there is no real
+      // Wompi checkout for which they're actually dispensable: this method's
+      // own post-commit `createCheckoutSession` call needs `integritySecret`
+      // to sign the checkout request, and a webhook can never be verified
+      // without `eventsSecret` either — so an order paid for by a wompi
+      // checkout that lacks either would be created successfully now and only
+      // fail later (createCheckoutSession, or forever at the webhook), after
+      // this transaction has already decremented real stock. Checking both
+      // here, alongside the existing !wompiConfig check and for the identical
+      // reason (see the comment above), catches that case before any side
+      // effect exists at all.
+      if (!wompiConfig || !wompiConfig.integritySecret || !wompiConfig.eventsSecret) {
         throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
       }
     }

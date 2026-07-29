@@ -266,6 +266,33 @@ describe('POST /webhooks/payments/:provider/:tenantId', () => {
     expect(errorSpy).toHaveBeenCalled();
   });
 
+  it('malformed/nonexistent :tenantId -> 401 WEBHOOK_INVALID_SIGNATURE, not an uncaught 500', async () => {
+    // Reviewer-found gap: getTenantProviderConfig resolves the tenant via
+    // tenantDb(tenantId).tenant.findUniqueOrThrow, which throws Prisma's
+    // NotFoundError for a UUID-shaped-but-nonexistent id (or a UUID cast
+    // error for outright garbage) — before this fix, neither case was
+    // caught, so this public, unauthenticated, internet-facing route (bound
+    // to see scanner/garbage traffic in production) 500'd instead of
+    // responding the same way a real "no provider configured" case already
+    // does. Two shapes of bad id, both must degrade the same way.
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-bad-tenant',
+      status: 'APPROVED',
+      amountInCents: 30_000,
+      reference: '1',
+      timestamp: 1_700_000_150,
+      eventsSecret: 'whatever-secret-nobody-saved',
+    });
+
+    const wellFormedButNonexistent = await postWebhook('00000000-0000-0000-0000-000000000000', payload);
+    expect(wellFormedButNonexistent.status).toBe(401);
+    expect(wellFormedButNonexistent.body).toEqual({ error: 'WEBHOOK_INVALID_SIGNATURE' });
+
+    const outrightGarbage = await postWebhook('not-a-uuid-at-all', payload);
+    expect(outrightGarbage.status).toBe(401);
+    expect(outrightGarbage.body).toEqual({ error: 'WEBHOOK_INVALID_SIGNATURE' });
+  });
+
   describe('valid signed payload', () => {
     it('APPROVED -> 200, order CONFIRMED/PAID, stockReservedUntil cleared, stock NOT decremented again by the webhook', async () => {
       const { tenantId } = await signUpWithTenant('webhooks-happy-path@demo.co', 'owner');

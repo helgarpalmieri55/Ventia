@@ -18,6 +18,7 @@ const CHECKOUT_TEST_DOMAINS = [
   'checkout-h.ventia.localhost',
   'checkout-i.ventia.localhost',
   'checkout-j.ventia.localhost',
+  'checkout-k.ventia.localhost',
 ];
 
 // Same fixture shape as payments-service.test.ts/webhooks.test.ts's own
@@ -50,6 +51,7 @@ let tenantGId: string; // wompi happy path
 let tenantHId: string; // wompi insufficient stock (wompi credentials configured)
 let tenantIId: string; // wompi checkout, tenant never configured wompi credentials
 let tenantJId: string; // wompi concurrent-checkout stock-reservation race (STOCK_BELOW_ZERO -> INSUFFICIENT_STOCK remap)
+let tenantKId: string; // wompi checkout, credentials saved but missing integritySecret/eventsSecret
 
 // Product fixture ids, populated in beforeAll.
 let productXId: string; // tenant A — 45900 cents
@@ -63,6 +65,7 @@ let wompiHappyProductId: string; // tenant G — enough stock, wompi checkout
 let wompiStockShortProductId: string; // tenant H — insufficient stock, wompi checkout
 let wompiUnconfiguredProductId: string; // tenant I — wompi checkout, no provider credentials saved
 let wompiRaceProductId: string; // tenant J — stock 1, two concurrent wompi checkouts race for it
+let wompiIncompleteCredsProductId: string; // tenant K — wompi credentials missing integritySecret/eventsSecret
 
 const BOGOTA_ADDRESS = {
   nombreCompleto: 'Ana Ejemplo',
@@ -332,6 +335,33 @@ beforeAll(async () => {
   });
   wompiRaceProductId = wompiRaceProduct.id;
 
+  // Tenant K: `wompi` credentials saved with ONLY publicKey/privateKey — no
+  // integritySecret/eventsSecret (both optional on wompiCredentialsSchema,
+  // since a merchant technically can save partial credentials via the admin
+  // UI). Reviewer-found gap: checkout used to only check `!wompiConfig`
+  // here, not that these two fields were actually present, so a checkout
+  // would commit a real Order + decrement real stock before later failing
+  // post-commit in WompiProvider.createCheckoutSession (which needs
+  // integritySecret to sign the redirect) with no way back for the shopper.
+  const tenantK = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-k',
+      name: 'Checkout K',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantKId = tenantK.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantKId, domain: 'checkout-k.ventia.localhost', isPrimary: true } });
+  const wompiIncompleteCredsProduct = await prisma.product.create({
+    data: { tenantId: tenantKId, name: 'Producto Wompi Incompleto', slug: 'producto-wompi-incompleto', priceCents: 18000, status: 'active', stock: 10 },
+  });
+  wompiIncompleteCredsProductId = wompiIncompleteCredsProduct.id;
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
@@ -346,6 +376,12 @@ beforeAll(async () => {
   await paymentsService.saveProviderCredentials(tenantHId, 'wompi', FAKE_WOMPI_CREDS);
   await paymentsService.saveProviderCredentials(tenantJId, 'wompi', FAKE_WOMPI_CREDS);
   // Tenant I deliberately gets NO saved credentials.
+  await paymentsService.saveProviderCredentials(tenantKId, 'wompi', {
+    publicKey: FAKE_WOMPI_CREDS.publicKey,
+    privateKey: FAKE_WOMPI_CREDS.privateKey,
+    sandbox: true,
+    // integritySecret/eventsSecret deliberately omitted.
+  });
 
   // RESEND_API_KEY is unset in this test environment, so MailerModule's
   // factory (see src/mailer/mailer.module.ts) wires MAILER to a ConsoleMailer
@@ -898,6 +934,44 @@ describe('POST /v1/storefront/checkout — wompi checkout for a tenant with no W
     // The cart must also survive, exactly like any other pre-transaction
     // rejection in this file (e.g. the "no cart cookie" test).
     const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantIId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — wompi credentials saved but missing integritySecret/eventsSecret', () => {
+  it('400 PAYMENT_PROVIDER_NOT_CONFIGURED, with ZERO DB side effects — reviewer-found gap: a present-but-incomplete config must fail BEFORE the transaction, same as a wholly-absent one', async () => {
+    const cookieValue = await newCartWithItem('checkout-k.ventia.localhost', wompiIncompleteCredsProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: wompiIncompleteCredsProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-k.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'wompi-incomplete@example.com',
+        phone: '3009990004',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'wompi',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    // Before this fix, this check only looked at `!wompiConfig` — a present
+    // config missing integritySecret/eventsSecret would sail past it, open
+    // the transaction, create a real Order, and decrement real stock, only
+    // to fail later in WompiProvider.createCheckoutSession (post-commit,
+    // with no way to undo it from the shopper's side). Asserting zero
+    // side effects here is the actual regression test for that gap.
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantKId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: wompiIncompleteCredsProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantKId, cookieKey: cookieValue } });
     expect(cartStillThere).not.toBeNull();
   });
 });

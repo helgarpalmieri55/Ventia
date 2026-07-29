@@ -76,7 +76,22 @@ export class WebhooksController {
       ? req.body
       : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body ?? {}), 'utf8');
 
-    const cfg = await this.paymentsService.getTenantProviderConfig(tenantId, providerId);
+    // getTenantProviderConfig resolves the tenant via tenantDb(tenantId)'s
+    // findUniqueOrThrow — a malformed or genuinely nonexistent :tenantId
+    // (garbage/scanner traffic hitting this public, unauthenticated,
+    // internet-facing route, or a stale/mistyped webhook URL) throws
+    // Prisma's NotFoundError there rather than returning null, which this
+    // route must not let propagate as an uncaught 500: caught and folded
+    // into the exact same WEBHOOK_INVALID_SIGNATURE 401 the !cfg branch
+    // below already uses, for the identical reason that branch documents —
+    // an external caller must not be able to distinguish "bad tenantId"
+    // from "wrong signature" from "tenant has no provider config".
+    let cfg: Awaited<ReturnType<PaymentsService['getTenantProviderConfig']>>;
+    try {
+      cfg = await this.paymentsService.getTenantProviderConfig(tenantId, providerId);
+    } catch {
+      cfg = null;
+    }
     if (!cfg) {
       // A webhook arriving for a provider this tenant never configured
       // credentials for is a genuinely anomalous/suspicious event — there is
