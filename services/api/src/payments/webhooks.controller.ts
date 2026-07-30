@@ -134,10 +134,31 @@ export class WebhooksController {
     // Re-parse the SAME bytes verifyAndParseWebhook just verified, purely to
     // get a JSON-serializable value for the Json column below — Prisma's
     // Json column can't take a raw Buffer/string-of-JSON directly the way we
-    // want it queryable. This can't itself throw: verifyAndParseWebhook
-    // above already proved rawBody.toString('utf8') is valid JSON (it does
-    // its own JSON.parse internally and throws first if that fails).
-    const parsedPayload = JSON.parse(rawBody.toString('utf8')) as Prisma.InputJsonValue;
+    // want it queryable. For Wompi/Mercado Pago, verifyAndParseWebhook above
+    // already proved rawBody.toString('utf8') is valid JSON (each does its
+    // own JSON.parse internally and throws first if that fails) — but
+    // ePayco's real confirmation POST is application/x-www-form-urlencoded,
+    // NOT JSON (see epayco.ts's own parseConfirmationBody and its module doc
+    // comment's "content-type" finding), so a bare JSON.parse here throws on
+    // every genuine ePayco webhook even after a fully valid signature check.
+    // Found live during P3b Task 7's smoke test (every real ePayco
+    // confirmation 500'd at this exact line) — no existing test caught this
+    // because webhooks.test.ts (the only full-HTTP-path webhook controller
+    // suite) never exercised ePayco, only Wompi/JSON payloads. Falls back to
+    // parsing as a URL-encoded form when the body isn't valid JSON, mirroring
+    // epayco.ts's own defensive parse — this is purely for the durable
+    // WebhookEvent.payload audit record; verifyAndParseWebhook above has
+    // already independently verified and parsed the real fields it needs.
+    let parsedPayload: Prisma.InputJsonValue;
+    try {
+      parsedPayload = JSON.parse(rawBody.toString('utf8')) as Prisma.InputJsonValue;
+    } catch {
+      const formFields: Record<string, string> = {};
+      for (const [key, value] of new URLSearchParams(rawBody.toString('utf8'))) {
+        formFields[key] = value;
+      }
+      parsedPayload = formFields;
+    }
 
     // WebhookEvent deliberately goes through platformDb, NOT tenantDb.
     // WebhookEvent has no RLS policy at all — the `ventia_app` role tenantDb

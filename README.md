@@ -131,13 +131,14 @@ and `apps/storefront/app/api/revalidate/route.ts`).
 order creation, confirmation lookup) are guest-cart endpoints keyed on a `ventia_cart` cookie —
 the storefront never calls these directly (its browser can't reach the API's internal host, and a
 cross-origin `Set-Cookie` wouldn't be readable back from its own domain), instead proxying through
-`apps/storefront/app/api/{cart,checkout}/[[...path]]/route.ts`. `paymentMethod` is `cod` or
-`wompi` (P3a — see the Payments section below). For `cod`, checkout never touches `Product.stock`
-— stock is decremented on the `confirm` transition below (`PENDING` → `CONFIRMED`), not at
-order-creation time, and restocked on `cancel` from any status that had already decremented it. For
-`wompi`, stock IS decremented immediately at order-creation time (an online-payment order's stock
-"reservation" *is* the real decrement, reusing the same primitive) and restocked on `cancel` or by
-the TTL-expiry worker if the shopper never completes payment; see
+`apps/storefront/app/api/{cart,checkout}/[[...path]]/route.ts`. `paymentMethod` is `cod`, `wompi`
+(P3a), or `mercadopago`/`epayco` (P3b — see the Payments section below). For `cod`, checkout never
+touches `Product.stock` — stock is decremented on the `confirm` transition below (`PENDING` →
+`CONFIRMED`), not at order-creation time, and restocked on `cancel` from any status that had already
+decremented it. For any online provider (`wompi`/`mercadopago`/`epayco`), stock IS decremented
+immediately at order-creation time (an online-payment order's stock "reservation" *is* the real
+decrement, reusing the same primitive) and restocked on `cancel` or by the TTL-expiry worker if the
+shopper never completes payment; see
 `services/api/src/orders/orders.service.ts`'s `adjustStockLine` and
 `services/api/src/checkout/checkout.service.ts`. Manually exercising the cart/checkout flow (add →
 drawer → `/carrito` → `/checkout`) needs the API reachable from wherever the storefront dev server
@@ -163,22 +164,32 @@ return the identical `404 ORDER_NOT_FOUND` (same code path, not just the same st
 numbers are sequential and guessable, so this endpoint must not let an attacker distinguish
 "guessed a real number" from "guessed wrong" by contact-checking after an existence check.
 
-### Payments (Wompi) — P3a
+### Payments (Wompi, Mercado Pago, ePayco) — P3a/P3b
 
-Online payments (P3a) currently cover **Wompi only** — Colombia's hosted "Web Checkout" — end to
-end: admin credential UI, encrypted storage, checkout redirect, and webhook confirmation. Mercado
-Pago and ePayco are **not implemented yet** (planned for P3b, reusing this same infrastructure); do
-not assume broader gateway support than this from the codebase as it stands.
+Online payments now cover **three gateways** end to end: admin credential UI, encrypted storage,
+checkout redirect, and webhook confirmation — **Wompi** (P3a), Colombia's hosted "Web Checkout";
+**Mercado Pago** (P3b), whose `createCheckoutSession` makes a real server-side "Checkout Pro"
+preference-creation HTTP call (unlike Wompi's locally-signed redirect URL) against a single API
+host (`api.mercadopago.com`) shared by sandbox and production — `cfg.sandbox` only picks which
+field of that one response to read (`sandbox_init_point` vs `init_point`); and **ePayco** (P3b),
+whose real checkout is a client-side JS widget rather than a plain redirect URL — its
+`createCheckoutSession` returns a redirect to this codebase's own storefront `/pago/epayco` bridge
+page (`apps/storefront/app/pago/epayco/`), which opens the widget with a server-created session id.
+All three share the same provider-registry/webhook-controller/stock-reservation plumbing
+(`services/api/src/payments/`) — a shopper's `paymentMethod` is `cod`, `wompi`, `mercadopago`, or
+`epayco`.
 
 - **`PAYMENTS_ENCRYPTION_KEY`** (see `.env.example`) is a required env var for any environment that
   saves or reads payment-provider credentials: a base64-encoded 32-byte AES-256-GCM key (generate
-  one with `openssl rand -base64 32`). A tenant's Wompi private key / integrity secret / events
+  one with `openssl rand -base64 32`). Every provider's private key / integrity secret / events
   secret are encrypted with it before being persisted to
-  `Tenant.settings.payments.providers.wompi` (the `publicKey` is stored in cleartext — Wompi's own
-  public keys aren't secrets, and it's meant to appear in the client-visible checkout redirect
-  URL); the plaintext is only ever decrypted in-memory, at the moment a real provider call needs
-  it — never returned in any API response. See `services/api/src/payments/encryption.ts` and
-  `payments.service.ts`.
+  `Tenant.settings.payments.providers.<provider>` (the `publicKey` is stored in cleartext — none of
+  the three providers' public keys are secrets, and Wompi's/Mercado Pago's is meant to appear in a
+  client-visible checkout redirect URL); the plaintext is only ever decrypted in-memory, at the
+  moment a real provider call needs it — never returned in any API response. ePayco additionally
+  needs `epaycoCustomerId` (its merchant-account id, `P_CUST_ID_CLIENTE`, half of its webhook
+  signature formula alongside `eventsSecret`/`P_KEY`) — the one provider-specific extra field on
+  top of the shared shape. See `services/api/src/payments/encryption.ts` and `payments.service.ts`.
 - Merchants configure credentials via the admin's `/configuracion` page
   (`PATCH /v1/admin/settings/payments`) and can test the saved connection with
   `POST /v1/admin/settings/payments/:provider/test-connection`.
@@ -186,11 +197,14 @@ not assume broader gateway support than this from the codebase as it stands.
   (`services/api/src/payments/webhooks.controller.ts`) — a **machine-to-machine endpoint the
   gateway is configured to call out-of-band** (at credential-save time), never something a
   browser or an admin session hits. It carries no session/tenant-header resolution of its own; the
-  tenant comes straight from the URL path segment. Signature verification
-  (`WompiProvider.verifyAndParseWebhook`) needs the exact original request bytes, so this route is
-  exempted from the API's global JSON body-parser in favor of a path-scoped raw-body middleware
-  (see `services/api/src/main.ts`). A verified `APPROVED` event transitions the order to
-  `CONFIRMED`/`PAID` and clears its stock reservation; idempotency is enforced by
+  tenant comes straight from the URL path segment. Signature verification (each provider's own
+  `verifyAndParseWebhook` — Wompi's SHA-256 checksum, Mercado Pago's HMAC-SHA256 `x-signature`
+  manifest, ePayco's `^`-joined SHA-256 formula) needs the exact original request bytes, so this
+  route is exempted from the API's global JSON body-parser in favor of a path-scoped raw-body
+  middleware (see `services/api/src/main.ts`) — this matters even for ePayco, whose real
+  confirmation POST is `application/x-www-form-urlencoded`, not JSON, unlike the other two. A
+  verified `APPROVED`/`approved`/`Aceptada` event transitions the order to `CONFIRMED`/`PAID` and
+  clears its stock reservation; idempotency is enforced by
   `WebhookEvent`'s `@@unique([provider, eventId])` constraint — replaying the identical webhook
   any number of times returns `200` every time but only ever transitions the order once.
 
@@ -299,7 +313,27 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
     real Wompi sandbox account available in this environment; verified with well-formed fake
     credentials exercising the real encryption/signature-verification code paths, not mocked at
     the provider level). P3b (Mercado Pago, ePayco) and P3c (payment-status reconciliation job)
-    remain undone.
+    remained undone at this point.
+  - **P3b — Mercado Pago + ePayco** done: generalized `checkout.service.ts`'s payment-method
+    branching to any online provider (zero behavior change for `cod`/`wompi`), a Mercado Pago
+    adapter (real server-side Checkout Pro preference creation + HMAC-SHA256 webhook
+    verification), an ePayco adapter (Smart Checkout session creation + `^`-joined SHA-256
+    webhook verification) plus its storefront `/pago/epayco` bridge page for the client-side
+    widget, admin credentials UI for both, and checkout/webhook wiring reusing P3a's registry
+    unchanged. DoD: for BOTH new gateways independently, a checkout reserves stock, a real
+    validly-signed webhook confirms payment and decrements stock exactly once, and replaying the
+    identical webhook is a verified no-op — proven end to end via real HTTP + a real Postgres (no
+    real Mercado Pago/ePayco sandbox account available in this environment; verified with
+    well-formed fake credentials exercising the real encryption/signature-verification code
+    paths, not mocked at the provider level). ePayco's full chain (webhook → confirm →
+    stock-decrement → idempotency) was verified live end to end; Mercado Pago's webhook path
+    could only be verified through its signature-verification step live (proven via a real,
+    correctly-signed payload reaching Mercado Pago's own live API for the mandatory follow-up
+    `GET /v1/payments/:id` lookup, vs. a tampered signature failing earlier, with a different
+    error) — the follow-up call itself needs real Mercado Pago credentials to succeed, so
+    `markPaid`/stock-decrement/idempotency for Mercado Pago rely on its own mocked-fetch unit
+    tests (`packages/payments/test/mercadopago.test.ts`) rather than a live pass. P3c
+    (payment-status reconciliation job) remains undone.
 - **P4 — AI Agent (web)** ⬜
 - **P5 — WhatsApp + Human handoff** ⬜
 - **P6 — Platform Admin + Hardening + Pilot** ⬜

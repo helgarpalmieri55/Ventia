@@ -81,6 +81,17 @@ const FAKE_CREDS = {
   sandbox: true,
 };
 
+// Same shape as packages/payments/test/epayco.test.ts's own `cfg` fixture —
+// duplicated here for the same cross-package-import-friction reason
+// documented on buildSignedWebhookPayload below.
+const FAKE_EPAYCO_CREDS = {
+  publicKey: 'pub_test_epayco_abc123',
+  privateKey: 'priv_test_epayco_abc123',
+  eventsSecret: 'test_epayco_p_key_secret',
+  epaycoCustomerId: '1234567',
+  sandbox: true,
+};
+
 function sha256Hex(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
 }
@@ -150,6 +161,44 @@ async function postWebhook(tenantId: string, payload: unknown, provider = 'wompi
     .post(`/webhooks/payments/${provider}/${tenantId}`)
     .set('Content-Type', 'application/json')
     .send(JSON.stringify(payload));
+}
+
+/** Builds a validly-signed, form-urlencoded ePayco confirmation and POSTs it
+ * to the REAL running app (not JSON — see epayco.ts's own module doc comment
+ * on ePayco's real content-type). Same signing formula as
+ * packages/payments/test/epayco.test.ts's own `buildSignedWebhookRequest`,
+ * recomputed independently here rather than imported (same cross-package
+ * test-helper-duplication convention as buildSignedWebhookPayload above). */
+async function postEpaycoWebhook(
+  tenantId: string,
+  opts: {
+    xRefPayco: string;
+    xTransactionId: string;
+    xAmount: string;
+    xCurrencyCode: string;
+    xResponse: string;
+    xExtra1: string;
+    epaycoCustomerId: string;
+    eventsSecret: string;
+  },
+) {
+  const signature = sha256Hex(
+    `${opts.epaycoCustomerId}^${opts.eventsSecret}^${opts.xRefPayco}^${opts.xTransactionId}^${opts.xAmount}^${opts.xCurrencyCode}`,
+  );
+  const fields = {
+    x_ref_payco: opts.xRefPayco,
+    x_transaction_id: opts.xTransactionId,
+    x_amount: opts.xAmount,
+    x_currency_code: opts.xCurrencyCode,
+    x_response: opts.xResponse,
+    x_extra1: opts.xExtra1,
+    x_signature: signature,
+  };
+  const rawBody = new URLSearchParams(fields).toString();
+  return request(app.getHttpServer())
+    .post(`/webhooks/payments/epayco/${tenantId}`)
+    .set('Content-Type', 'application/x-www-form-urlencoded')
+    .send(rawBody);
 }
 
 let orderNumberSeq = 1;
@@ -576,6 +625,91 @@ describe('POST /webhooks/payments/:provider/:tenantId', () => {
         where: { provider: 'wompi', eventId: 'txn-tampered-1:1700000700' },
       });
       expect(webhookEvents).toHaveLength(0);
+    });
+  });
+
+  // Regression coverage for a real bug found live during P3b Task 7's smoke
+  // test: every prior test in this file posts a JSON body (Wompi's real
+  // shape) — ePayco's real confirmation POST is
+  // application/x-www-form-urlencoded (see epayco.ts's own module doc
+  // comment), which the controller's unconditional
+  // `JSON.parse(rawBody.toString('utf8'))` (building the durable
+  // WebhookEvent.payload audit record) 500'd on for every genuine ePayco
+  // delivery, even after a fully valid signature check. No test caught this
+  // before now because this file — the only full-HTTP-path webhook
+  // controller suite — never exercised ePayco at all; packages/payments/
+  // test/epayco.test.ts only calls `verifyAndParseWebhook` directly, never
+  // through this controller.
+  describe('epayco form-urlencoded confirmation (regression: full HTTP path, not just verifyAndParseWebhook in isolation)', () => {
+    it('validly-signed form-urlencoded confirmation -> 200 (not 500), order CONFIRMED/PAID, stock not decremented again', async () => {
+      const { tenantId } = await signUpWithTenant('webhooks-epayco-happy@demo.co', 'owner');
+      await paymentsService.saveProviderCredentials(tenantId, 'epayco', FAKE_EPAYCO_CREDS);
+      const { orderId, orderNumber, productId, stockAfterReservation } = await seedOrderWithProduct(tenantId);
+
+      const res = await postEpaycoWebhook(tenantId, {
+        xRefPayco: 'ref-epayco-happy-1',
+        xTransactionId: 'txn-epayco-happy-1',
+        xAmount: '30000.00',
+        xCurrencyCode: 'COP',
+        xResponse: 'Aceptada',
+        xExtra1: String(orderNumber),
+        epaycoCustomerId: FAKE_EPAYCO_CREDS.epaycoCustomerId,
+        eventsSecret: FAKE_EPAYCO_CREDS.eventsSecret,
+      });
+
+      expect(res.status).toBe(200);
+
+      const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+      expect(order.status).toBe('CONFIRMED');
+      expect(order.paymentStatus).toBe('PAID');
+      expect(order.stockReservedUntil).toBeNull();
+
+      const product = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+      expect(product.stock).toBe(stockAfterReservation);
+
+      const webhookEvents = await prisma.webhookEvent.findMany({
+        where: { provider: 'epayco', eventId: 'ref-epayco-happy-1:txn-epayco-happy-1' },
+      });
+      expect(webhookEvents).toHaveLength(1);
+      expect(webhookEvents[0].result).toBe('confirmed');
+      // The durable audit payload is the parsed FORM FIELDS (this fix's own
+      // fallback path), not a JSON-parse failure swallowed into some other
+      // shape — proves the fallback actually ran, not just that the request
+      // happened to succeed some other way.
+      expect(webhookEvents[0].payload).toMatchObject({ x_ref_payco: 'ref-epayco-happy-1', x_response: 'Aceptada' });
+    });
+
+    it('tampered x_signature -> 401, order untouched (form-urlencoded path still verifies correctly)', async () => {
+      const { tenantId } = await signUpWithTenant('webhooks-epayco-tampered@demo.co', 'owner');
+      await paymentsService.saveProviderCredentials(tenantId, 'epayco', FAKE_EPAYCO_CREDS);
+      const { orderId, orderNumber } = await seedOrderWithProduct(tenantId);
+
+      const goodSig = sha256Hex(
+        `${FAKE_EPAYCO_CREDS.epaycoCustomerId}^${FAKE_EPAYCO_CREDS.eventsSecret}^ref-epayco-tampered-1^txn-epayco-tampered-1^30000.00^COP`,
+      );
+      const badSig = goodSig.slice(0, -1) + (goodSig.endsWith('0') ? '1' : '0');
+      const fields = {
+        x_ref_payco: 'ref-epayco-tampered-1',
+        x_transaction_id: 'txn-epayco-tampered-1',
+        x_amount: '30000.00',
+        x_currency_code: 'COP',
+        x_response: 'Aceptada',
+        x_extra1: String(orderNumber),
+        x_signature: badSig,
+      };
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const res = await request(app.getHttpServer())
+        .post(`/webhooks/payments/epayco/${tenantId}`)
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(new URLSearchParams(fields).toString());
+
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({ error: 'WEBHOOK_INVALID_SIGNATURE' });
+      expect(errorSpy).toHaveBeenCalled();
+
+      const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+      expect(order.status).toBe('PENDING');
+      expect(order.paymentStatus).toBe('PENDING');
     });
   });
 });
