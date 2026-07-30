@@ -81,3 +81,4 @@ export interface PaymentProvider {
 
 export { WompiProvider } from './wompi.js';
 export { MercadoPagoProvider } from './mercadopago.js';
+export { EpaycoProvider } from './epayco.js';
