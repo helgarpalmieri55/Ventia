@@ -30,13 +30,18 @@ export interface SettingsResponse {
   theme: Record<string, unknown>;
   payments: {
     codEnabled: boolean;
-    // Widened (P3a Task 7) for Wompi credentials — see
-    // services/api/src/settings/settings.controller.ts's `maskedWompiView`.
-    // `publicKeyMasked` is null until a credential set has ever been saved;
-    // `connected`/`sandbox` reflect whatever was last saved via `PATCH
-    // /v1/admin/settings/payments`, never unsaved form input.
+    // Widened (P3a Task 7) for Wompi credentials, then widened again (P3b
+    // Task 5, matching the server's own P3b Task 4 generalization — see
+    // services/api/src/settings/settings.controller.ts's `maskedProviderView`,
+    // renamed from a Wompi-only `maskedWompiView`) to cover all three
+    // providers with the identical shape. `publicKeyMasked` is null until a
+    // credential set has ever been saved; `connected`/`sandbox` reflect
+    // whatever was last saved via `PATCH /v1/admin/settings/payments`, never
+    // unsaved form input.
     providers: {
       wompi: { connected: boolean; publicKeyMasked: string | null; sandbox: boolean };
+      mercadopago: { connected: boolean; publicKeyMasked: string | null; sandbox: boolean };
+      epayco: { connected: boolean; publicKeyMasked: string | null; sandbox: boolean };
     };
   };
   shipping: Record<string, unknown>;
