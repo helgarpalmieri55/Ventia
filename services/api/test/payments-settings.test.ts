@@ -768,4 +768,37 @@ describe('GET /v1/admin/settings — providers view shows all 3 providers simult
     expect(providers.wompi.publicKeyMasked.endsWith(WOMPI_CREDS_BODY.publicKey.slice(-4))).toBe(true);
     expect(providers.mercadopago.publicKeyMasked.endsWith(MERCADOPAGO_CREDS_BODY.publicKey.slice(-4))).toBe(true);
   });
+
+  it('a SINGLE PATCH carrying all 3 providers at once saves all 3, none clobbering another', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('payments-settings-multi-provider-one-patch@demo.co', 'owner');
+
+    const res = await request(app.getHttpServer())
+      .patch('/v1/admin/settings/payments')
+      .set('cookie', cookie)
+      .send({
+        providers: {
+          wompi: WOMPI_CREDS_BODY,
+          mercadopago: MERCADOPAGO_CREDS_BODY,
+          epayco: EPAYCO_CREDS_BODY,
+        },
+      });
+    expect(res.status).toBe(200);
+
+    const providers = res.body.payments.providers;
+    expect(providers.wompi.connected).toBe(true);
+    expect(providers.mercadopago.connected).toBe(true);
+    expect(providers.epayco.connected).toBe(true);
+    expect(providers.wompi.publicKeyMasked.endsWith(WOMPI_CREDS_BODY.publicKey.slice(-4))).toBe(true);
+    expect(providers.mercadopago.publicKeyMasked.endsWith(MERCADOPAGO_CREDS_BODY.publicKey.slice(-4))).toBe(true);
+    expect(providers.epayco.publicKeyMasked.endsWith(EPAYCO_CREDS_BODY.publicKey.slice(-4))).toBe(true);
+
+    // Confirm each provider's OWN raw stored blob really has its own
+    // credentials (not, say, all 3 accidentally sharing the last-written
+    // provider's data via a read-modify-write race inside the loop).
+    const tenant = await platformDb.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    const settings = tenant.settings as { payments: { providers: Record<string, { publicKey: string }> } };
+    expect(settings.payments.providers.wompi.publicKey).toBe(WOMPI_CREDS_BODY.publicKey);
+    expect(settings.payments.providers.mercadopago.publicKey).toBe(MERCADOPAGO_CREDS_BODY.publicKey);
+    expect(settings.payments.providers.epayco.publicKey).toBe(EPAYCO_CREDS_BODY.publicKey);
+  });
 });

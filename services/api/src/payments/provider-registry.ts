@@ -47,10 +47,16 @@ export const PAYMENT_PROVIDER_NOT_CONFIGURED = 'PAYMENT_PROVIDER_NOT_CONFIGURED'
 /**
  * Looks up a configured provider implementation, throwing a 400
  * `PAYMENT_PROVIDER_NOT_CONFIGURED` HttpException for any `PaymentProviderId`
- * that doesn't have one yet (`mercadopago`/`epayco` today) — a 400, not a
- * 404/500, because the *id* itself is valid per the type union, it's just not
- * wired up on this deployment yet; that's a client-correctable-by-choosing-
- * another-provider condition, not "resource doesn't exist" or "server broke".
+ * that doesn't have one — a 400, not a 404/500, because the *id* itself is
+ * valid per the type union, it's just not wired up on this deployment yet;
+ * that's a client-correctable-by-choosing-another-provider condition, not
+ * "resource doesn't exist" or "server broke". All 3 current members of
+ * `PaymentProviderId` (`wompi`/`mercadopago`/`epayco`, as of P3b Task 4) have
+ * real entries in `PROVIDERS` below, so this branch is unreachable for any
+ * value that type-checks today — it remains as the defensive fallback for
+ * whenever a future provider id is added to the union before its adapter
+ * lands in this registry (the exact sequencing P3b's own Task 1 deliberately
+ * exercised for mercadopago/epayco).
  */
 export function getProvider(id: PaymentProviderId): PaymentProvider {
   const provider = PROVIDERS[id];
