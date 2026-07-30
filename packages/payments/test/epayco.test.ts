@@ -78,6 +78,10 @@ describe('EpaycoProvider.createCheckoutSession', () => {
     expect(url.pathname).toBe('/pago/epayco');
     expect(url.searchParams.get('session')).toBe('session-xyz-789');
     expect(url.searchParams.get('sandbox')).toBe('true');
+    // Task 6 addition: the bridge page has no other way to learn the order
+    // number (neither configure()'s widget config nor ePayco's hooks carry
+    // it back), so it must ride along in this redirect's query string too.
+    expect(url.searchParams.get('orderNumber')).toBe('ORD-0001');
   });
 
   it('uses the sandbox_init_point-equivalent sandbox flag verbatim (false) when cfg.sandbox is false', async () => {

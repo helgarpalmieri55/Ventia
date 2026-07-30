@@ -398,7 +398,20 @@ export class EpaycoProvider implements PaymentProvider {
       throw new Error('epayco createCheckoutSession: malformed session/create response (missing data.sessionId)');
     }
 
-    const params = new URLSearchParams({ session: sessionId, sandbox: String(cfg.sandbox) });
+    // `orderNumber` added here (Task 6, closing a real gap left open by this
+    // task's own original version): the bridge page at `/pago/epayco` has no
+    // other way to learn which order it's bridging for, since neither
+    // `configure()`'s widget config nor ePayco's hooks below carry the
+    // order number back — see Task 6's report for the full reasoning. Safe,
+    // additive change: order numbers are already shown to the shopper
+    // unencrypted on the confirmation URL itself
+    // (`/checkout/confirmacion/{orderNumber}`), so putting the same value in
+    // this redirect's query string leaks nothing new.
+    const params = new URLSearchParams({
+      session: sessionId,
+      sandbox: String(cfg.sandbox),
+      orderNumber: String(order.orderNumber),
+    });
     return { redirectUrl: `${resolveStorefrontBase()}/pago/epayco?${params.toString()}` };
   }
 

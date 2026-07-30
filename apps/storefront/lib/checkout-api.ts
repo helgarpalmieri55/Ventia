@@ -38,14 +38,24 @@ export interface CheckoutSubmitInput {
     notas?: string;
   };
   shippingMethodId: string;
-  paymentMethod: 'cod' | 'wompi';
+  // Widened for P3b (Task 6) to include 'mercadopago'/'epayco' — see
+  // `checkout-form.ts`'s identical widening for why this stays a local,
+  // hand-rolled union rather than importing `PaymentProviderId` from
+  // `@ventia/payments`.
+  paymentMethod: 'cod' | 'wompi' | 'mercadopago' | 'epayco';
 }
 
 export interface CheckoutResult {
   orderNumber: number;
   totalCents: number;
-  // Only present for a `wompi` checkout — see checkout.service.ts's
-  // `CheckoutResult` for the full contract. Absent entirely for `cod`.
+  // Only present for an online-provider checkout (`wompi`/`mercadopago`/
+  // `epayco`) — see checkout.service.ts's `CheckoutResult` for the full
+  // contract. Absent entirely for `cod`. For `epayco` specifically, this
+  // points at THIS storefront's own `/pago/epayco` bridge page rather than
+  // an epayco.co URL directly (design doc decision 6) — the calling page
+  // doesn't need to know or care about that distinction, since
+  // `window.location.href = redirectUrl` works identically for a
+  // same-origin or cross-origin URL.
   redirectUrl?: string;
 }
 

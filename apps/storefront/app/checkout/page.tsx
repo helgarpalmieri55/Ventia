@@ -99,11 +99,29 @@ function fieldErrorsFrom(details: unknown): Record<string, string> {
   return result;
 }
 
+/** es-CO display name for each online payment provider, used only to
+ * personalize the `PAYMENT_PROVIDER_NOT_CONFIGURED` banner below — brand
+ * proper nouns, not translated. */
+const PROVIDER_LABELS: Record<string, string> = {
+  wompi: 'Wompi',
+  mercadopago: 'Mercado Pago',
+  epayco: 'ePayco',
+};
+
 /** Maps a `CheckoutApiError`'s code to a top-of-page es-CO banner message.
  * `productName` (looked up from the current cart, when available) lets the
  * `INSUFFICIENT_STOCK` case name the specific product per the task brief,
- * rather than only a generic "something's out of stock". */
-function bannerMessageFor(err: CheckoutApiError, productName: string | undefined): string {
+ * rather than only a generic "something's out of stock". `paymentMethod` is
+ * the method the shopper actually selected when the submit failed — needed
+ * so `PAYMENT_PROVIDER_NOT_CONFIGURED` can name whichever of the three
+ * online providers was chosen (Task 6 widened this from a Wompi-only
+ * codebase to three online providers; this message must not keep saying
+ * "Wompi" when a shopper picked Mercado Pago or ePayco). */
+function bannerMessageFor(
+  err: CheckoutApiError,
+  productName: string | undefined,
+  paymentMethod: string,
+): string {
   switch (err.code) {
     case 'CART_EMPTY':
       return 'Tu carrito está vacío.';
@@ -113,8 +131,12 @@ function bannerMessageFor(err: CheckoutApiError, productName: string | undefined
         : 'Uno de los productos de tu carrito ya no tiene inventario suficiente.';
     case 'SHIPPING_METHOD_UNAVAILABLE':
       return 'El método de envío elegido ya no está disponible. Elige otro.';
-    case 'PAYMENT_PROVIDER_NOT_CONFIGURED':
-      return 'Wompi no está disponible en este momento para esta tienda. Elige otro método de pago.';
+    case 'PAYMENT_PROVIDER_NOT_CONFIGURED': {
+      const providerLabel = PROVIDER_LABELS[paymentMethod];
+      return providerLabel
+        ? `${providerLabel} no está disponible en este momento para esta tienda. Elige otro método de pago.`
+        : 'Este método de pago no está disponible en este momento. Elige otro.';
+    }
     case 'VALIDATION_FAILED':
       return 'Revisa los campos marcados.';
     default:
@@ -247,16 +269,23 @@ export default function CheckoutPage() {
         // Safe cast: validateCheckoutStep('payment', ...) above already
         // guarantees form.paymentMethod is non-empty by the time this runs
         // (same pattern as shippingMethodId, a plain `string` here relied on
-        // having already been validated non-empty).
-        paymentMethod: form.paymentMethod as 'cod' | 'wompi',
+        // having already been validated non-empty). Widened for Task 6 to
+        // the full online-provider union.
+        paymentMethod: form.paymentMethod as 'cod' | 'wompi' | 'mercadopago' | 'epayco',
       });
       if (result.redirectUrl) {
-        // A `wompi` checkout: the order exists but payment isn't confirmed
-        // yet (Wompi's webhook confirms it asynchronously later), so the
-        // cart is NOT cleared here — this browser is about to navigate away
-        // to Wompi's hosted checkout entirely, and clearing first would only
+        // Any online-provider checkout (`wompi`/`mercadopago`/`epayco`): the
+        // order exists but payment isn't confirmed yet (each provider's
+        // webhook confirms it asynchronously later), so the cart is NOT
+        // cleared here — this browser is about to navigate away to the
+        // provider's hosted checkout (Wompi/Mercado Pago directly, or
+        // ePayco's own same-origin `/pago/epayco` bridge page, which itself
+        // then hands off to ePayco's widget), and clearing first would only
         // risk a flash of an "empty cart" state if that navigation were ever
-        // interrupted before it actually leaves this page.
+        // interrupted before it actually leaves this page. `window.location
+        // .href` works identically whether `redirectUrl` is same-origin
+        // (epayco's bridge page) or cross-origin (wompi/mercadopago's
+        // hosted checkouts) — no special-casing needed here.
         window.location.href = result.redirectUrl;
       } else {
         clearCart();
@@ -267,7 +296,7 @@ export default function CheckoutPage() {
         setErrors((prev) => ({ ...prev, ...fieldErrorsFrom(err.details) }));
         const details = err.details as { productId?: string } | undefined;
         const productName = cart?.lines.find((l) => l.productId === details?.productId)?.name;
-        setBannerError(bannerMessageFor(err, productName));
+        setBannerError(bannerMessageFor(err, productName, form.paymentMethod));
       } else {
         console.error('[checkout] submit failed', err);
         setBannerError(GENERIC_ERROR);
@@ -474,6 +503,26 @@ export default function CheckoutPage() {
                   onChange={() => setField('paymentMethod', 'wompi')}
                 />
                 Wompi (tarjeta, PSE, Nequi, Bancolombia)
+              </label>
+              <label className="flex items-center gap-2 rounded-md border border-border p-3 text-sm">
+                <input
+                  type="radio"
+                  name="paymentMethod"
+                  value="mercadopago"
+                  checked={form.paymentMethod === 'mercadopago'}
+                  onChange={() => setField('paymentMethod', 'mercadopago')}
+                />
+                Mercado Pago
+              </label>
+              <label className="flex items-center gap-2 rounded-md border border-border p-3 text-sm">
+                <input
+                  type="radio"
+                  name="paymentMethod"
+                  value="epayco"
+                  checked={form.paymentMethod === 'epayco'}
+                  onChange={() => setField('paymentMethod', 'epayco')}
+                />
+                ePayco
               </label>
             </div>
             {errors.paymentMethod ? (

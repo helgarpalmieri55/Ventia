@@ -18,7 +18,17 @@ export interface CheckoutFormState {
   barrio: string;
   notas: string;
   shippingMethodId: string;
-  paymentMethod: 'cod' | 'wompi' | '';
+  // Widened for P3b (Task 6): 'mercadopago'/'epayco' join 'wompi' as the
+  // online-payment options, matching `services/api/src/checkout/
+  // checkout.service.ts`'s `'cod' | PaymentProviderId` union. Kept as a
+  // plain hand-rolled literal union here rather than importing
+  // `PaymentProviderId` from `@ventia/payments` — this app has no existing
+  // dependency on that package, and this codebase's established convention
+  // (see e.g. this file's own header comment, `checkout-api.ts`'s
+  // `CheckoutSubmitInput`, and the order-confirmation page's local
+  // `OrderConfirmationDto`) is to keep storefront-local types hand-rolled
+  // rather than share DTOs with the API/packages layer.
+  paymentMethod: 'cod' | 'wompi' | 'mercadopago' | 'epayco' | '';
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
