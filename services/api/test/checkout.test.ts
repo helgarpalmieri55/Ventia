@@ -20,6 +20,8 @@ const CHECKOUT_TEST_DOMAINS = [
   'checkout-j.ventia.localhost',
   'checkout-k.ventia.localhost',
   'checkout-l.ventia.localhost',
+  'checkout-m.ventia.localhost',
+  'checkout-n.ventia.localhost',
 ];
 
 // Same fixture shape as payments-service.test.ts/webhooks.test.ts's own
@@ -54,6 +56,8 @@ let tenantIId: string; // wompi checkout, tenant never configured wompi credenti
 let tenantJId: string; // wompi concurrent-checkout stock-reservation race (STOCK_BELOW_ZERO -> INSUFFICIENT_STOCK remap)
 let tenantKId: string; // wompi checkout, credentials saved but missing integritySecret/eventsSecret
 let tenantLId: string; // mercadopago checkout, tenant never configured mercadopago credentials — no real adapter exists yet (P3b Task 1)
+let tenantMId: string; // mercadopago checkout, credentials saved but missing eventsSecret (phase-7 review gap)
+let tenantNId: string; // epayco checkout, credentials saved but missing epaycoCustomerId (phase-7 review gap)
 
 // Product fixture ids, populated in beforeAll.
 let productXId: string; // tenant A — 45900 cents
@@ -69,6 +73,8 @@ let wompiUnconfiguredProductId: string; // tenant I — wompi checkout, no provi
 let wompiRaceProductId: string; // tenant J — stock 1, two concurrent wompi checkouts race for it
 let wompiIncompleteCredsProductId: string; // tenant K — wompi credentials missing integritySecret/eventsSecret
 let mercadopagoUnconfiguredProductId: string; // tenant L — mercadopago checkout, no provider credentials saved
+let mercadopagoIncompleteCredsProductId: string; // tenant M — mercadopago credentials missing eventsSecret
+let epaycoIncompleteCredsProductId: string; // tenant N — epayco credentials missing epaycoCustomerId
 
 const BOGOTA_ADDRESS = {
   nombreCompleto: 'Ana Ejemplo',
@@ -391,6 +397,54 @@ beforeAll(async () => {
   });
   mercadopagoUnconfiguredProductId = mercadopagoUnconfiguredProduct.id;
 
+  // Tenant M: `mercadopago` checkout, credentials saved but missing
+  // eventsSecret — a phase-7 review finding: checkout.service.ts's
+  // credential-completeness guard was hardcoded to wompi only, so this
+  // exact case (present-but-incomplete mercadopago config) would have
+  // sailed past it, created a real Order, decremented real stock, and only
+  // failed forever afterward at every real webhook delivery.
+  const tenantM = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-m',
+      name: 'Checkout M',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantMId = tenantM.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantMId, domain: 'checkout-m.ventia.localhost', isPrimary: true } });
+  const mercadopagoIncompleteCredsProduct = await prisma.product.create({
+    data: { tenantId: tenantMId, name: 'Producto Mercado Pago Incompleto', slug: 'producto-mercadopago-incompleto', priceCents: 19000, status: 'active', stock: 10 },
+  });
+  mercadopagoIncompleteCredsProductId = mercadopagoIncompleteCredsProduct.id;
+
+  // Tenant N: `epayco` checkout, credentials saved but missing
+  // epaycoCustomerId — same phase-7 review finding as tenant M, for
+  // ePayco's own two-field completeness requirement (eventsSecret AND
+  // epaycoCustomerId together).
+  const tenantN = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-n',
+      name: 'Checkout N',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantNId = tenantN.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantNId, domain: 'checkout-n.ventia.localhost', isPrimary: true } });
+  const epaycoIncompleteCredsProduct = await prisma.product.create({
+    data: { tenantId: tenantNId, name: 'Producto ePayco Incompleto', slug: 'producto-epayco-incompleto', priceCents: 21000, status: 'active', stock: 10 },
+  });
+  epaycoIncompleteCredsProductId = epaycoIncompleteCredsProduct.id;
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
@@ -410,6 +464,19 @@ beforeAll(async () => {
     privateKey: FAKE_WOMPI_CREDS.privateKey,
     sandbox: true,
     // integritySecret/eventsSecret deliberately omitted.
+  });
+  await paymentsService.saveProviderCredentials(tenantMId, 'mercadopago', {
+    publicKey: 'APP_USR-fake-pub-key',
+    privateKey: 'APP_USR-fake-priv-key',
+    sandbox: true,
+    // eventsSecret deliberately omitted.
+  });
+  await paymentsService.saveProviderCredentials(tenantNId, 'epayco', {
+    publicKey: 'fake-epayco-pub-key',
+    privateKey: 'fake-epayco-priv-key',
+    eventsSecret: 'fake-P_KEY',
+    sandbox: true,
+    // epaycoCustomerId (P_CUST_ID_CLIENTE) deliberately omitted.
   });
 
   // RESEND_API_KEY is unset in this test environment, so MailerModule's
@@ -1001,6 +1068,74 @@ describe('POST /v1/storefront/checkout — wompi credentials saved but missing i
     expect(stockAfter.stock).toBe(stockBefore.stock);
 
     const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantKId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — mercadopago credentials saved but missing eventsSecret', () => {
+  it('400 PAYMENT_PROVIDER_NOT_CONFIGURED, with ZERO DB side effects — phase-7 review gap: the completeness guard was hardcoded to wompi only', async () => {
+    const cookieValue = await newCartWithItem('checkout-m.ventia.localhost', mercadopagoIncompleteCredsProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: mercadopagoIncompleteCredsProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-m.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'mercadopago-incomplete@example.com',
+        phone: '3009990005',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'mercadopago',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    // Before this fix, a present-but-incomplete mercadopago config would
+    // sail past the check (hardcoded to `=== 'wompi'`), open the
+    // transaction, create a real Order, and decrement real stock, only to
+    // fail FOREVER at every real webhook delivery afterward (no way back).
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantMId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: mercadopagoIncompleteCredsProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantMId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — epayco credentials saved but missing epaycoCustomerId', () => {
+  it('400 PAYMENT_PROVIDER_NOT_CONFIGURED, with ZERO DB side effects — same phase-7 review gap, for ePayco\'s own two-field requirement', async () => {
+    const cookieValue = await newCartWithItem('checkout-n.ventia.localhost', epaycoIncompleteCredsProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: epaycoIncompleteCredsProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-n.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'epayco-incomplete@example.com',
+        phone: '3009990006',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'epayco',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantNId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: epaycoIncompleteCredsProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantNId, cookieKey: cookieValue } });
     expect(cartStillThere).not.toBeNull();
   });
 });

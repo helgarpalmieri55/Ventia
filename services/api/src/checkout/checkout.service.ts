@@ -126,41 +126,34 @@ export class CheckoutService {
       if (!onlineProviderConfig) {
         throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
       }
-      // NOT generalized to every provider — this completeness check is
-      // deliberately still `wompi`-specific. `integritySecret`/`eventsSecret`
-      // are optional on `wompiCredentialsSchema` (a merchant can save
-      // public/private keys alone), but there is no real Wompi checkout for
-      // which they're actually dispensable: this method's own post-commit
-      // `createCheckoutSession` call needs `integritySecret` to sign the
-      // checkout request, and a webhook can never be verified without
-      // `eventsSecret` either — so an order paid for by a wompi checkout that
-      // lacks either would be created successfully now and only fail later
-      // (createCheckoutSession, or forever at the webhook), after this
-      // transaction has already decremented real stock. Checking both here,
+      // Per-provider completeness check, generalized (closing a gap P3b's
+      // phase-7 review found still open): each provider's fields are
+      // OPTIONAL on their own credentials schema (a merchant can save
+      // public/private keys alone), but there is no real checkout for which
+      // they're actually dispensable in practice — a webhook can never be
+      // verified without them, so an order paid for by a checkout that lacks
+      // them would be created successfully now and only fail forever
+      // afterward (at createCheckoutSession, or permanently at the webhook —
+      // `401 WEBHOOK_INVALID_SIGNATURE` on every delivery, stranding the
+      // order at PENDING/PENDING with no merchant-facing signal), after this
+      // transaction has already decremented real stock. Checking this here,
       // alongside the `!onlineProviderConfig` check above and for the
       // identical reason, catches that case before any side effect exists at
-      // all.
-      //
-      // Mercado Pago/ePayco's own real completeness requirements are NOT
-      // known yet at this task's scope (P3b Task 1 ships deliberately before
-      // either adapter exists — see this file's module-level context /
-      // docs/superpowers/plans/2026-07-29-p3b-mercadopago-epayco.md). Per the
-      // design doc (decisions 3-5), Mercado Pago's real credential model has
-      // no `integritySecret` concept at all (only ever populates
-      // `eventsSecret`), and ePayco needs `eventsSecret` (its `P_KEY`) AND a
-      // not-yet-existing `epaycoCustomerId` field (`TenantProviderConfig`
-      // doesn't have it yet — Task 2 adds it). Blanket-generalizing this
-      // check to `!onlineProviderConfig.integritySecret ||
-      // !onlineProviderConfig.eventsSecret` for every provider would be WRONG
-      // (it would wrongly reject a fully-configured Mercado Pago tenant that
-      // correctly has no `integritySecret` at all), so this stays a literal
-      // `wompi` check, nested inside the now-generic `!== 'cod'` block rather
-      // than replacing it. TODO(P3b Task 4, provider registry/schema wiring):
-      // revisit this once Mercado Pago/ePayco's adapters and
-      // `TenantProviderConfig` widen enough to know their real per-provider
-      // completeness rules — this is a known, deliberate gap, not an
-      // oversight.
-      if (input.paymentMethod === 'wompi' && (!onlineProviderConfig.integritySecret || !onlineProviderConfig.eventsSecret)) {
+      // all. Per-provider, not a blanket `!eventsSecret` check, because the
+      // three providers' real requirements genuinely differ (verified
+      // against each adapter's own `require*` guards, packages/payments/src/
+      // {wompi,mercadopago,epayco}.ts): Wompi needs BOTH `integritySecret`
+      // (signs the outbound checkout redirect) AND `eventsSecret` (verifies
+      // the webhook); Mercado Pago has no `integritySecret` concept at all
+      // and needs only `eventsSecret`; ePayco needs `eventsSecret` (its
+      // `P_KEY`) AND `epaycoCustomerId` (its `P_CUST_ID_CLIENTE`) together.
+      const incomplete =
+        input.paymentMethod === 'wompi'
+          ? !onlineProviderConfig.integritySecret || !onlineProviderConfig.eventsSecret
+          : input.paymentMethod === 'epayco'
+            ? !onlineProviderConfig.eventsSecret || !onlineProviderConfig.epaycoCustomerId
+            : !onlineProviderConfig.eventsSecret; // mercadopago
+      if (incomplete) {
         throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
       }
     }
