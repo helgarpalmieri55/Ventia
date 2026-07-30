@@ -13,19 +13,33 @@ function asRecord(value: Prisma.JsonValue | null | undefined): JsonRecord {
 /** The shape persisted at `tenant.settings.payments.providers.<provider>` —
  * NOT the same shape as `TenantProviderConfig` (packages/payments). Per
  * design decision 6, `publicKey` is stored in CLEARTEXT (it's meant to
- * appear in client-side checkout redirect URLs — Wompi's own public keys are
- * not secrets), while `privateKey`/`integritySecret`/`eventsSecret` are
- * stored as `encrypt(...)` ciphertext strings. This split is what lets
- * `settings.controller.ts`'s `toResponse` show "connected" + a masked
- * `publicKey` suffix directly off the stored JSON, with NO decryption round
- * trip needed just to answer "is something saved" — decrypting only ever
- * happens inside `getTenantProviderConfig`, at the moment a real provider
- * call needs the plaintext secrets. */
-interface StoredWompiCredentials {
+ * appear in client-side checkout redirect URLs — none of the three
+ * providers' public keys are secrets), while `privateKey`/`integritySecret`/
+ * `eventsSecret`/`epaycoCustomerId` are stored as `encrypt(...)` ciphertext
+ * strings. This split is what lets `settings.controller.ts`'s `toResponse`
+ * show "connected" + a masked `publicKey` suffix directly off the stored
+ * JSON, with NO decryption round trip needed just to answer "is something
+ * saved" — decrypting only ever happens inside `getTenantProviderConfig`, at
+ * the moment a real provider call needs the plaintext secrets.
+ *
+ * Named/shaped generically (P3b Task 4) rather than Wompi-specifically
+ * (`StoredWompiCredentials`, as this was originally called): it was already
+ * used generically — keyed by `PaymentProviderId`, not hardcoded to
+ * `'wompi'` anywhere in `getTenantProviderConfig`/`saveProviderCredentials`'s
+ * own logic — only the TYPE NAME was Wompi-specific, which was misleading
+ * now that mercadopago/epayco share this exact shape.
+ * `epaycoCustomerIdEncrypted` is the one new field, added for ePayco's
+ * `P_CUST_ID_CLIENTE`: encrypted at rest even though it's an account
+ * identifier, not a secret on its own — it's one half of ePayco's webhook
+ * signature formula whose OTHER half (`eventsSecret`/`P_KEY`) is already
+ * encrypted here, and an asymmetric sensitive/not-sensitive judgment call
+ * baked into this stored shape isn't worth the (nonexistent) savings. */
+interface StoredProviderCredentials {
   publicKey: string;
   privateKeyEncrypted: string;
   integritySecretEncrypted?: string;
   eventsSecretEncrypted?: string;
+  epaycoCustomerIdEncrypted?: string;
   sandbox: boolean;
 }
 
@@ -34,6 +48,7 @@ export interface SaveProviderCredentialsInput {
   privateKey: string;
   integritySecret?: string;
   eventsSecret?: string;
+  epaycoCustomerId?: string;
   sandbox: boolean;
 }
 
@@ -42,7 +57,7 @@ export interface TestConnectionResult {
   error?: string;
 }
 
-function isStoredWompiCredentials(value: unknown): value is StoredWompiCredentials {
+function isStoredProviderCredentials(value: unknown): value is StoredProviderCredentials {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const v = value as JsonRecord;
   return typeof v.publicKey === 'string' && typeof v.privateKeyEncrypted === 'string' && typeof v.sandbox === 'boolean';
@@ -67,7 +82,7 @@ export class PaymentsService {
     const providers = asRecord(payments.providers as Prisma.JsonValue | undefined);
     const stored = providers[provider];
 
-    if (!isStoredWompiCredentials(stored)) return null;
+    if (!isStoredProviderCredentials(stored)) return null;
 
     const key = loadEncryptionKey();
     return {
@@ -76,6 +91,7 @@ export class PaymentsService {
       sandbox: stored.sandbox,
       integritySecret: stored.integritySecretEncrypted ? decrypt(stored.integritySecretEncrypted, key) : undefined,
       eventsSecret: stored.eventsSecretEncrypted ? decrypt(stored.eventsSecretEncrypted, key) : undefined,
+      epaycoCustomerId: stored.epaycoCustomerIdEncrypted ? decrypt(stored.epaycoCustomerIdEncrypted, key) : undefined,
     };
   }
 
@@ -94,12 +110,13 @@ export class PaymentsService {
     creds: SaveProviderCredentialsInput,
   ): Promise<void> {
     const key = loadEncryptionKey();
-    const stored: StoredWompiCredentials = {
+    const stored: StoredProviderCredentials = {
       publicKey: creds.publicKey,
       privateKeyEncrypted: encrypt(creds.privateKey, key),
       sandbox: creds.sandbox,
       ...(creds.integritySecret ? { integritySecretEncrypted: encrypt(creds.integritySecret, key) } : {}),
       ...(creds.eventsSecret ? { eventsSecretEncrypted: encrypt(creds.eventsSecret, key) } : {}),
+      ...(creds.epaycoCustomerId ? { epaycoCustomerIdEncrypted: encrypt(creds.epaycoCustomerId, key) } : {}),
     };
 
     const db = tenantDb(tenantId);

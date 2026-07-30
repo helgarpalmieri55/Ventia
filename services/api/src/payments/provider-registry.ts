@@ -1,27 +1,36 @@
 import { HttpException } from '@nestjs/common';
-import { WompiProvider, type PaymentProvider, type PaymentProviderId } from '@ventia/payments';
+import {
+  EpaycoProvider,
+  MercadoPagoProvider,
+  WompiProvider,
+  type PaymentProvider,
+  type PaymentProviderId,
+} from '@ventia/payments';
 
 /**
  * The concrete provider registry. `PaymentProviderId` (packages/payments/src/
- * index.ts) is a 3-member union (`'wompi' | 'mercadopago' | 'epayco'`), but
- * only `wompi` has a real `PaymentProvider` implementation as of P3a — P3b's
- * job is to add `mercadopago`/`epayco` entries.
+ * index.ts) is a 3-member union (`'wompi' | 'mercadopago' | 'epayco'`) — as of
+ * P3b (this task) all three have real `PaymentProvider` implementations.
  *
  * Deliberately typed `Partial<Record<PaymentProviderId, PaymentProvider>>`,
  * NOT the design doc's literal `Record<PaymentProviderId, PaymentProvider>`
  * snippet: a full `Record` would force this file to either fabricate fake
- * `mercadopago`/`epayco` entries (worse than useless — a caller could
- * accidentally exercise them) or fight the type checker with an `as` cast
- * that defeats the whole point of the exhaustiveness check. `Partial` is
- * honest about "not every provider id has an implementation yet" and pushes
- * the "is this one actually configured" question to `getProvider` below,
- * which is exactly where callers (this task's `PaymentsService`, and later
- * the webhook controller / checkout's wompi branch) need to handle it
- * anyway. This is a deliberate, documented deviation from the brief — not an
+ * entries for any provider id lacking an implementation (worse than useless —
+ * a caller could accidentally exercise them) or fight the type checker with
+ * an `as` cast that defeats the whole point of the exhaustiveness check.
+ * `Partial` is honest about "not every provider id is guaranteed to have an
+ * implementation" (still true in principle even though all three are filled
+ * in today — a future 4th `PaymentProviderId` would land here unimplemented
+ * first) and pushes the "is this one actually configured" question to
+ * `getProvider` below, which is exactly where callers (`PaymentsService`, the
+ * webhook controller, checkout's provider branches) need to handle it anyway.
+ * This is a deliberate, documented deviation from the brief — not an
  * oversight.
  */
 export const PROVIDERS: Partial<Record<PaymentProviderId, PaymentProvider>> = {
   wompi: new WompiProvider(),
+  mercadopago: new MercadoPagoProvider(),
+  epayco: new EpaycoProvider(),
 };
 
 /**

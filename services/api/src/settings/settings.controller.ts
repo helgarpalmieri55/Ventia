@@ -26,30 +26,50 @@ function maskPublicKey(publicKey: string): string {
   return `${hidden}${visible}`;
 }
 
-/** Builds the masked `providers.wompi` view for `GET /v1/admin/settings` /
- * the PATCH response, reading DIRECTLY off the stored settings JSON —
- * deliberately NOT calling `PaymentsService.getTenantProviderConfig` (which
- * decrypts `privateKey`/`integritySecret`/`eventsSecret`). Answering
- * "is Wompi connected" + "what's the masked public key" never needs the
- * plaintext secrets, only the cleartext `publicKey` and the presence of the
- * encrypted-private-key blob — both already sitting in `payments.providers.
- * wompi` as saved by `PaymentsService.saveProviderCredentials`. This keeps
- * `toResponse` synchronous (no encryption-key/async round trip just to
- * render a settings page) and, more importantly, makes it structurally
- * impossible for this code path to ever touch — let alone leak — a
- * decrypted secret. */
-function maskedWompiView(payments: JsonRecord): { connected: boolean; publicKeyMasked: string | null; sandbox: boolean } {
+/** Builds the masked `providers.<provider>` view for `GET
+ * /v1/admin/settings` / the PATCH response, reading DIRECTLY off the stored
+ * settings JSON — deliberately NOT calling
+ * `PaymentsService.getTenantProviderConfig` (which decrypts
+ * `privateKey`/`integritySecret`/`eventsSecret`/`epaycoCustomerId`).
+ * Answering "is this provider connected" + "what's the masked public key"
+ * never needs the plaintext secrets, only the cleartext `publicKey` and the
+ * presence of the encrypted-private-key blob — both already sitting in
+ * `payments.providers.<provider>` as saved by
+ * `PaymentsService.saveProviderCredentials`. This keeps `toResponse`
+ * synchronous (no encryption-key/async round trip just to render a settings
+ * page) and, more importantly, makes it structurally impossible for this
+ * code path to ever touch — let alone leak — a decrypted secret.
+ *
+ * Generalized (P3b Task 4) from a Wompi-only `maskedWompiView` to a shared
+ * helper parameterized by `provider` — this was a plan gap: the plan's
+ * stated Task 4 file list didn't mention this controller at all, but leaving
+ * it hardcoded to `wompi` would have made the new
+ * `mercadopago`/`epayco` schemas unreachable in practice (a PATCH could still
+ * save mercadopago/epayco credentials, but `GET`/every PATCH response would
+ * never show their connection status, matching neither `wompi`'s existing UX
+ * nor Task 5's admin UI needs). Same generalization discipline as this
+ * phase's Task 1 `checkout.service.ts` `!== 'cod'` refactor. */
+function maskedProviderView(
+  payments: JsonRecord,
+  provider: PaymentProviderId,
+): { connected: boolean; publicKeyMasked: string | null; sandbox: boolean } {
   const providers = asRecord(payments.providers as Prisma.JsonValue | undefined);
-  const wompi = asRecord(providers.wompi as Prisma.JsonValue | undefined);
-  const publicKey = typeof wompi.publicKey === 'string' ? wompi.publicKey : null;
-  const connected = typeof wompi.privateKeyEncrypted === 'string';
-  const sandbox = wompi.sandbox === true;
+  const stored = asRecord(providers[provider] as Prisma.JsonValue | undefined);
+  const publicKey = typeof stored.publicKey === 'string' ? stored.publicKey : null;
+  const connected = typeof stored.privateKeyEncrypted === 'string';
+  const sandbox = stored.sandbox === true;
   return {
     connected,
     publicKeyMasked: publicKey ? maskPublicKey(publicKey) : null,
     sandbox,
   };
 }
+
+/** Every `PaymentProviderId` with a real schema/UI slot — used to loop over
+ * `input.providers` generically in `updatePayments` and to build the full
+ * `providers` view in `toResponse`, rather than hand-enumerating `wompi`/
+ * `mercadopago`/`epayco` at each call site. */
+const ALL_PROVIDER_IDS: readonly PaymentProviderId[] = ['wompi', 'mercadopago', 'epayco'];
 
 /**
  * Owner-only: every route here is behind both AdminSessionGuard (requires a
@@ -123,22 +143,31 @@ export class SettingsController {
 
   /**
    * Extended (P3a Task 3) to accept an optional nested `providers.wompi`
-   * object alongside the pre-existing `codEnabled` toggle. Both are
-   * merge-in-place, INDEPENDENTLY of each other — a PATCH sending only one
-   * must never clobber the other (design decision 8's explicit regression
-   * risk callout). Deliberately does NOT spread `input` directly into
-   * `settings.payments` the way the pre-P3a version did: `input.providers.
-   * wompi`, if present, carries PLAINTEXT `privateKey`/`integritySecret`/
-   * `eventsSecret` — those must go through `PaymentsService.
-   * saveProviderCredentials` (which encrypts before persisting), never
-   * written to `settings` as-is.
+   * object alongside the pre-existing `codEnabled` toggle, and further
+   * widened (P3b Task 4, a plan gap — the plan's stated file list for this
+   * task never mentioned this controller, but leaving it hardcoded to
+   * `wompi` would leave the new `mercadopago`/`epayco` schemas unreachable
+   * through this endpoint) to loop over EVERY `PaymentProviderId` present in
+   * `input.providers`. All of `codEnabled` and each configured provider are
+   * merge-in-place, INDEPENDENTLY of each other and of one another — a PATCH
+   * sending only one must never clobber any of the others (design decision
+   * 8's explicit regression risk callout, now generalized to 3 providers +
+   * codEnabled = 4 independently-mergeable pieces). Deliberately does NOT
+   * spread `input` directly into `settings.payments` the way the pre-P3a
+   * version did: `input.providers.<id>`, if present, carries PLAINTEXT
+   * `privateKey`/`integritySecret`/`eventsSecret`/`epaycoCustomerId` — those
+   * must go through `PaymentsService.saveProviderCredentials` (which encrypts
+   * before persisting), never written to `settings` as-is.
    */
   @Patch('payments')
   async updatePayments(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
     const input = parseOr400(paymentsSettingsSchema, body);
 
-    if (input.providers?.wompi) {
-      await this.paymentsService.saveProviderCredentials(session.tenantId, 'wompi', input.providers.wompi);
+    for (const providerId of ALL_PROVIDER_IDS) {
+      const creds = input.providers?.[providerId];
+      if (creds) {
+        await this.paymentsService.saveProviderCredentials(session.tenantId, providerId, creds);
+      }
     }
 
     if (input.codEnabled !== undefined) {
@@ -159,15 +188,21 @@ export class SettingsController {
       });
     }
 
-    // Audit log: NEVER pass `input` verbatim — `input.providers.wompi`
-    // carries plaintext secrets, and `writeAudit` persists `data` as-is into
+    // Audit log: NEVER pass `input` verbatim — `input.providers.<id>` carries
+    // plaintext secrets, and `writeAudit` persists `data` as-is into
     // `AuditLog.data` (a real, separate leak vector from the API response
-    // one this task's tests focus on). Only non-secret shape is recorded.
+    // one this task's tests focus on). Only non-secret shape is recorded,
+    // for whichever provider(s) were actually present in this PATCH.
+    const auditedProviders: Record<string, { publicKey: string; sandbox: boolean }> = {};
+    for (const providerId of ALL_PROVIDER_IDS) {
+      const creds = input.providers?.[providerId];
+      if (creds) {
+        auditedProviders[providerId] = { publicKey: creds.publicKey, sandbox: creds.sandbox };
+      }
+    }
     await writeAudit(session, 'settings.payments', 'Tenant', session.tenantId, {
       ...(input.codEnabled !== undefined ? { codEnabled: input.codEnabled } : {}),
-      ...(input.providers?.wompi
-        ? { providers: { wompi: { publicKey: input.providers.wompi.publicKey, sandbox: input.providers.wompi.sandbox } } }
-        : {}),
+      ...(Object.keys(auditedProviders).length > 0 ? { providers: auditedProviders } : {}),
     });
 
     const tenant = await tenantDb(session.tenantId).tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
@@ -236,7 +271,16 @@ export class SettingsController {
       theme,
       payments: {
         codEnabled: payments.codEnabled === true,
-        providers: { wompi: maskedWompiView(payments) },
+        // Generalized (P3b Task 4) from a wompi-only view to all 3
+        // providers, so `GET /v1/admin/settings` and every PATCH response
+        // consistently show connection status for wompi/mercadopago/epayco
+        // going forward — see `maskedProviderView`'s doc comment for why
+        // this generalization was necessary, not optional.
+        providers: {
+          wompi: maskedProviderView(payments, 'wompi'),
+          mercadopago: maskedProviderView(payments, 'mercadopago'),
+          epayco: maskedProviderView(payments, 'epayco'),
+        },
       },
       // Defaults to `{}` when unset — the admin UI (a later task) handles
       // defaulting this to `{ methods: [] }` client-side.
