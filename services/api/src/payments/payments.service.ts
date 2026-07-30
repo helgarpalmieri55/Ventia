@@ -211,6 +211,14 @@ export class PaymentsService {
           // again here is harmless and explicit, not a correctness
           // requirement.
           paymentProvider: provider,
+          // P3c: also stamp the queryable `Order.providerRef` column (not
+          // just the OrderEvent's JSON `data` below) — the lowest-risk of
+          // the three providerRef sources (design decision 2), since it only
+          // ever runs after a real signature check already passed. Purely
+          // best-effort record-keeping for a LATER reconciliation pass on
+          // this same order; not itself a correctness requirement of this
+          // transition.
+          providerRef,
         },
       });
 
@@ -265,7 +273,15 @@ export class PaymentsService {
 
       await tx.order.update({
         where: { id: orderId },
-        data: { paymentStatus: 'FAILED' },
+        data: {
+          paymentStatus: 'FAILED',
+          // P3c: same best-effort providerRef stamp as markPaid — see that
+          // method's comment. A later shopper retry (a new attempt, possibly
+          // a different providerRef) simply overwrites this on its own
+          // markPaid/markFailed call; nothing here depends on this value
+          // being "the final" one.
+          providerRef,
+        },
       });
 
       await tx.orderEvent.create({

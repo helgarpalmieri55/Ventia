@@ -77,6 +77,19 @@ export interface PaymentProvider {
   verifyAndParseWebhook(req: RawRequest, cfg: TenantProviderConfig): Promise<NormalizedPaymentEvent>;
   getTransactionStatus(providerRef: string, cfg: TenantProviderConfig): Promise<NormalizedStatus>;
   refund?(providerRef: string, amountCents: number, cfg: TenantProviderConfig): Promise<void>;
+  // P3c, optional (like `refund?` above) — only `MercadoPagoProvider`
+  // implements this (its real `/v1/payments/search?external_reference=`
+  // endpoint, see mercadopago.ts). Wompi/ePayco have no documented
+  // lookup-by-OUR-reference endpoint (design doc's research section), so
+  // this stays undefined for both, exactly like `refund?` is undefined for
+  // all three today. Used ONLY as a fallback when an order has no
+  // `providerRef` at all yet (reconciliation job, P3c Task 4) — resolves to
+  // the most relevant of possibly several payment attempts sharing one
+  // `reference`, or `null` if none exist.
+  searchByReference?(
+    reference: string,
+    cfg: TenantProviderConfig,
+  ): Promise<{ providerRef: string; status: NormalizedStatus } | null>;
 }
 
 export { WompiProvider } from './wompi.js';

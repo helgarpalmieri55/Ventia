@@ -337,6 +337,15 @@ model Order {
   // checkout reserves stock at order-creation time; cleared to null once the
   // payment webhook confirms (or the reservation expires and is restocked).
   stockReservedUntil DateTime?
+  // Best-effort gateway transaction/payment reference for THIS order,
+  // written from three sources (P3c design decision 2), none authoritative
+  // on its own: (1) markPaid/markFailed, after a real signature-verified
+  // webhook already ran; (2) Wompi's redirect-return `?id=` hint; (3)
+  // ePayco's onResponse hook, if it carries x_ref_payco. Never itself proof
+  // of payment status — only a hint the reconciliation job (P3c) feeds into
+  // each gateway's own authenticated getTransactionStatus/searchByReference
+  // call. Null until any of the three sources fires.
+  providerRef        String?
   customerId         String?       @db.Uuid
   email              String
   phone              String

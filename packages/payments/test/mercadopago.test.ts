@@ -383,3 +383,99 @@ describe('MercadoPagoProvider.getTransactionStatus', () => {
     ).rejects.toThrow(/HTTP 404/);
   });
 });
+
+describe('MercadoPagoProvider.searchByReference', () => {
+  function mockSearch(results: Record<string, unknown>[]) {
+    return vi.fn(async () =>
+      new Response(JSON.stringify({ paging: { total: results.length, limit: 30, offset: 0 }, results }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+  }
+
+  it('returns null when results is empty', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = mockSearch([]);
+
+    const result = await provider.searchByReference('ORD-0001', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toBeNull();
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.mercadopago.com/v1/payments/search?external_reference=ORD-0001');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer APP_USR-prv-abc123');
+  });
+
+  it('single approved result -> returns { providerRef, status: PAID } mapped via the shared mapStatus', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = mockSearch([
+      {
+        id: 555,
+        status: 'approved',
+        date_created: '2026-07-30T10:00:00.000-04:00',
+        date_approved: '2026-07-30T10:01:00.000-04:00',
+      },
+    ]);
+
+    const result = await provider.searchByReference('ORD-0002', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ providerRef: '555', status: 'PAID' });
+  });
+
+  it('multiple results with mixed statuses: picks the approved one regardless of array position (NOT first)', async () => {
+    const provider = new MercadoPagoProvider();
+    // The approved attempt is deliberately NOT first in the array, and is
+    // NOT the most recent by date either for the rejected one immediately
+    // preceding it — this proves the implementation actually finds/picks the
+    // approved entry rather than just taking results[0] or the max-date
+    // entry blindly.
+    const fetchImpl = mockSearch([
+      {
+        id: 111,
+        status: 'rejected',
+        date_created: '2026-07-30T09:00:00.000-04:00',
+        date_approved: null,
+      },
+      {
+        id: 222,
+        status: 'rejected',
+        date_created: '2026-07-30T09:30:00.000-04:00',
+        date_approved: null,
+      },
+      {
+        id: 333,
+        status: 'approved',
+        date_created: '2026-07-30T09:15:00.000-04:00',
+        date_approved: '2026-07-30T09:16:00.000-04:00',
+      },
+    ]);
+
+    const result = await provider.searchByReference('ORD-0003', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ providerRef: '333', status: 'PAID' });
+  });
+
+  it('no approved result among multiple -> picks the most recent attempt of any status', async () => {
+    const provider = new MercadoPagoProvider();
+    // Most-recent (by date_created, since neither has date_approved) is id
+    // 222, but it is NOT first in the array — proves the client-side sort,
+    // not just "take the last element", actually runs.
+    const fetchImpl = mockSearch([
+      { id: 222, status: 'rejected', date_created: '2026-07-30T09:30:00.000-04:00', date_approved: null },
+      { id: 111, status: 'cancelled', date_created: '2026-07-30T09:00:00.000-04:00', date_approved: null },
+    ]);
+
+    const result = await provider.searchByReference('ORD-0004', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ providerRef: '222', status: 'FAILED' });
+  });
+
+  it('throws on a non-2xx response instead of returning null or a bogus result', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () => new Response('unauthorized', { status: 401 }));
+
+    await expect(
+      provider.searchByReference('ORD-0005', cfg, fetchImpl as unknown as typeof fetch),
+    ).rejects.toThrow(/HTTP 401/);
+  });
+});

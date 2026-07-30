@@ -92,6 +92,40 @@ import type {
 //    the design doc for the full reasoning on `cancelled`→`FAILED` vs.
 //    `refunded`/`charged_back`→`EXPIRED`).
 //
+// --- P3c Task 1 additions (`searchByReference`) — re-verified independently
+// of the design doc's own citation, per that phase's own instruction that
+// docs sites restructure and an earlier URL had already gone stale once:
+//  - `GET https://api.mercadopago.com/v1/payments/search` (query param
+//    `external_reference={reference}`) is real and confirmed — but NOT at
+//    the URL shape the design doc expected. Both `mercadopago.com.co` and
+//    `mercadopago.com.ar`'s `/developers/en/reference/payments/_payments_search/get`
+//    404'd directly during THIS task (the design doc's own `.co` citation is
+//    now stale — a live instance of exactly the "docs sites restructure"
+//    risk it already flagged). The content was still found live, verbatim,
+//    at `https://www.mercadopago.com.br/developers/en/reference/online-payments/subscriptions/search-payments/get`
+//    — confirmed via that page's own breadcrumb, fetched directly: "API
+//    Reference - Mercado Pago Developers > Search payments - Payments -
+//    Mercado Pago Developers" (i.e. genuinely the general Payments Search
+//    page, despite the URL's own path segment now filing it under
+//    "subscriptions" — a docs-site categorization artifact, not a different,
+//    subscription-specific endpoint).
+//  - Response shape, confirmed from that same fetch: top-level
+//    `{paging: {total, limit, offset}, results: [...]}`; each `results[]`
+//    entry carries (among many other fields this adapter doesn't need) `id`,
+//    `status`, `status_detail`, `external_reference`, `date_created`,
+//    `date_approved`, `date_last_updated`.
+//  - Ordering: the same page documents `sort`/`criteria` params (sort by
+//    `date_approved`/`date_created`/`date_last_updated`/`id`/
+//    `money_release_date`, direction `asc`/`desc`) as "REQUIRED", but
+//    (quoting the fetch verbatim) "does not explicitly state a default sort
+//    order or indicate what happens if sort and criteria parameters are not
+//    provided." Since this adapter's call omits both (only
+//    `external_reference` is sent — no documented need to force a
+//    sort/criteria pair just to pick one result), no ordering is assumed
+//    from the API's own response order; `searchByReference` below sorts
+//    `results` client-side by `date_approved` (falling back to
+//    `date_created`) before picking, per design doc decision 5.
+//
 //  - **Deliberate scope decision, not in the design doc's original request**:
 //    `back_urls`, `auto_return`, and `notification_url` are ALL omitted from
 //    the `checkout/preferences` request body built below. Reasoning: all
@@ -269,6 +303,23 @@ interface MercadoPagoPaymentResponse {
   external_reference: string;
 }
 
+/** Shape this adapter relies on from `GET /v1/payments/search`'s real
+ * response (verified independently this task — see the class doc comment's
+ * "P3c Task 1" section for the exact URL fetched). Only the fields this
+ * adapter actually reads from each `results[]` entry are declared; the real
+ * payload has dozens more per item (payer, card, transaction_details, ...). */
+interface MercadoPagoSearchResult {
+  id: number | string;
+  status: string;
+  date_created?: string;
+  date_approved?: string | null;
+}
+
+interface MercadoPagoSearchResponse {
+  paging?: { total?: number; limit?: number; offset?: number };
+  results: MercadoPagoSearchResult[];
+}
+
 /** Mercado Pago Checkout Pro payment provider adapter. See the block comment
  * above `API_BASE` for the full list of real-API facts this class relies on
  * and this task's confidence in each (verified / corrected-from-design-doc /
@@ -428,6 +479,57 @@ export class MercadoPagoProvider implements PaymentProvider {
       throw new Error('mercadopago getTransactionStatus: malformed response (missing status)');
     }
     return mapStatus(body.status);
+  }
+
+  /** Calls Mercado Pago's real `GET /v1/payments/search?external_reference=`
+   * endpoint (verified independently this task — see the class doc comment's
+   * "P3c Task 1" section for the exact URL fetched, the response shape, and
+   * why no ordering is assumed from the API's own `results` array order).
+   * Used ONLY as a fallback by the reconciliation job for an order that has
+   * NO `providerRef` at all yet (design doc decision 5) — every other lookup
+   * path still goes through `getTransactionStatus` above, unaffected by this
+   * method existing.
+   *
+   * Multiple payment attempts can share one `external_reference` (a shopper
+   * who abandons Checkout Pro once and retries). Picks the most recent
+   * `approved` attempt if any exists among `results`; else the most recent
+   * attempt of any status. "Most recent" is `date_approved` if present, else
+   * `date_created` — sorted client-side here, never trusting the array's own
+   * order (the docs page fetched states the sort/criteria params as
+   * "REQUIRED" but never documents a default when both are omitted, which is
+   * exactly what this call does — see class doc comment). Returns `null` for
+   * an empty `results` array. Throws on any non-2xx response, same posture
+   * as `getTransactionStatus`/`createCheckoutSession` above — never silently
+   * treated as "no match found". */
+  async searchByReference(
+    reference: string,
+    cfg: TenantProviderConfig,
+    fetchImpl: typeof fetch = fetch,
+  ): Promise<{ providerRef: string; status: NormalizedStatus } | null> {
+    const res = await fetchImpl(
+      `${API_BASE}/v1/payments/search?external_reference=${encodeURIComponent(reference)}`,
+      { headers: { Authorization: `Bearer ${cfg.privateKey}` } },
+    );
+    if (!res.ok) {
+      throw new Error(`mercadopago searchByReference: HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as Partial<MercadoPagoSearchResponse>;
+    const results = Array.isArray(body.results) ? body.results : [];
+    if (results.length === 0) return null;
+
+    const timestampOf = (r: MercadoPagoSearchResult): number => {
+      const raw = r.date_approved ?? r.date_created;
+      const parsed = raw ? Date.parse(raw) : NaN;
+      return Number.isNaN(parsed) ? 0 : parsed;
+    };
+    // Most-recent-first — never assumes the API's own `results` order (see
+    // this method's doc comment on why).
+    const sorted = [...results].sort((a, b) => timestampOf(b) - timestampOf(a));
+
+    const mostRecentApproved = sorted.find((r) => r.status === 'approved');
+    const chosen = mostRecentApproved ?? sorted[0];
+
+    return { providerRef: String(chosen.id), status: mapStatus(chosen.status) };
   }
 
   // `refund` deliberately left unimplemented — same rationale as

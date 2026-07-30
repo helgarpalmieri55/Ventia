@@ -467,6 +467,9 @@ describe('PaymentsService.markPaid', () => {
     expect(order.paymentStatus).toBe('PAID');
     expect(order.stockReservedUntil).toBeNull();
     expect(order.paymentProvider).toBe('wompi');
+    // P3c: providerRef is also stamped onto the Order row itself now, not
+    // just the OrderEvent's JSON data (asserted further below).
+    expect(order.providerRef).toBe('wompi-txn-1');
 
     const events = await prisma.orderEvent.findMany({ where: { orderId, type: 'payment_confirmed' } });
     expect(events).toHaveLength(1);
@@ -536,5 +539,60 @@ describe('PaymentsService.markPaid', () => {
 
     const events = await prisma.orderEvent.count({ where: { orderId, type: 'payment_confirmed' } });
     expect(events).toBe(0);
+  });
+});
+
+describe('PaymentsService.markFailed', () => {
+  // Mirrors markPaid's own seedOrder fixture above (that helper is scoped to
+  // its own describe block, so a narrow local copy here — same shape,
+  // nothing new — is simpler than exporting it just for this one addition).
+  let orderNumberSeq = 10_000;
+
+  async function seedOrder(
+    tenantId: string,
+    status: OrderStatus,
+    paymentStatus: PaymentStatus,
+    opts?: { paymentProvider?: string | null; stockReservedUntil?: Date | null },
+  ): Promise<string> {
+    const order = await prisma.order.create({
+      data: {
+        tenantId,
+        number: orderNumberSeq++,
+        status,
+        paymentStatus,
+        paymentProvider: opts?.paymentProvider ?? 'wompi',
+        stockReservedUntil: opts?.stockReservedUntil ?? new Date(Date.now() + 15 * 60_000),
+        email: 'comprador@example.com',
+        phone: '3000000000',
+        shippingAddress: {},
+        subtotalCents: 10_000,
+        taxCents: 0,
+        totalCents: 10_000,
+      },
+    });
+    return order.id;
+  }
+
+  it('PENDING/PENDING -> paymentStatus FAILED, providerRef persisted on the Order row (not just the OrderEvent)', async () => {
+    const { tenantId } = await signUpWithTenant('payments-svc-markfailed-happy@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'PENDING', 'PENDING');
+
+    await paymentsService.markFailed(tenantId, orderId, 'wompi', 'wompi-txn-failed-1');
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('PENDING'); // markFailed never touches status
+    expect(order.paymentStatus).toBe('FAILED');
+    // P3c: providerRef is stamped onto the Order row itself, not just the
+    // OrderEvent's JSON data (asserted below).
+    expect(order.providerRef).toBe('wompi-txn-failed-1');
+
+    const events = await prisma.orderEvent.findMany({ where: { orderId, type: 'payment_failed' } });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      tenantId,
+      orderId,
+      type: 'payment_failed',
+      data: { provider: 'wompi', providerRef: 'wompi-txn-failed-1' },
+    });
   });
 });
