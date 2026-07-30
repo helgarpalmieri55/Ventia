@@ -595,4 +595,33 @@ describe('PaymentsService.markFailed', () => {
       data: { provider: 'wompi', providerRef: 'wompi-txn-failed-1' },
     });
   });
+
+  // This exact bug (a late FAILED webhook for an earlier attempt clobbering
+  // an already-CONFIRMED/PAID order back to FAILED) is the one markFailed's
+  // own doc comment recounts finding and fixing in an earlier review — that
+  // guard code has been live and unchanged ever since, but had no test of
+  // its own until now.
+  it('on an order already CONFIRMED/PAID (not PENDING/PENDING) is a safe no-op: no OrderEvent, no field changes', async () => {
+    const { tenantId } = await signUpWithTenant('payments-svc-markfailed-already-confirmed@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'CONFIRMED', 'PAID', { stockReservedUntil: null });
+
+    const before = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+
+    await expect(
+      paymentsService.markFailed(tenantId, orderId, 'wompi', 'wompi-txn-failed-2'),
+    ).resolves.toBeUndefined();
+
+    const after = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(after).toEqual(before);
+
+    const events = await prisma.orderEvent.count({ where: { orderId, type: 'payment_failed' } });
+    expect(events).toBe(0);
+  });
+
+  it('on a nonexistent order id is a safe no-op (never throws)', async () => {
+    const { tenantId } = await signUpWithTenant('payments-svc-markfailed-missing@demo.co', 'owner');
+    await expect(
+      paymentsService.markFailed(tenantId, randomUUID(), 'wompi', 'wompi-txn-failed-3'),
+    ).resolves.toBeUndefined();
+  });
 });

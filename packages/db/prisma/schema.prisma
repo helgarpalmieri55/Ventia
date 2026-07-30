@@ -340,11 +340,14 @@ model Order {
   // Best-effort gateway transaction/payment reference for THIS order,
   // written from three sources (P3c design decision 2), none authoritative
   // on its own: (1) markPaid/markFailed, after a real signature-verified
-  // webhook already ran; (2) Wompi's redirect-return `?id=` hint; (3)
-  // ePayco's onResponse hook, if it carries x_ref_payco. Never itself proof
-  // of payment status — only a hint the reconciliation job (P3c) feeds into
-  // each gateway's own authenticated getTransactionStatus/searchByReference
-  // call. Null until any of the three sources fires.
+  // webhook already ran — LIVE as of this migration; (2) Wompi's
+  // redirect-return `?id=` hint (P3c Task 2 — not yet implemented as of
+  // this migration); (3) ePayco's onResponse hook, if it carries
+  // x_ref_payco (P3c Task 3 — not yet implemented as of this migration).
+  // Never itself proof of payment status — only a hint the reconciliation
+  // job (P3c Task 4) feeds into each gateway's own authenticated
+  // getTransactionStatus/searchByReference call. Null until any
+  // IMPLEMENTED source above fires.
   providerRef        String?
   customerId         String?       @db.Uuid
   email              String
