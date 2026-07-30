@@ -327,7 +327,10 @@ function parseConfirmationBody(rawBody: Buffer): Record<string, string> {
     return out;
   }
   const out: Record<string, string> = {};
-  for (const [key, value] of new URLSearchParams(text)) {
+  // `trimmed`, not `text`: URLSearchParams folds any leading whitespace into
+  // the first field's key (e.g. `new URLSearchParams(' a=1')` parses a key of
+  // `' a'`, not `'a'`), silently breaking that field's lookup.
+  for (const [key, value] of new URLSearchParams(trimmed)) {
     out[key] = value;
   }
   return out;
@@ -497,7 +500,7 @@ export class EpaycoProvider implements PaymentProvider {
       if (mapped) return mapped;
     }
     throw new Error(
-      'epayco getTransactionStatus: malformed response (missing x_response and x_cod_respuesta/x_cod_response)',
+      'epayco getTransactionStatus: malformed response (missing x_response, and x_cod_respuesta/x_cod_response is either missing or an unrecognized code)',
     );
   }
 

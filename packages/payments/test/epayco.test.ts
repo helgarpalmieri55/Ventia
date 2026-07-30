@@ -97,12 +97,15 @@ describe('EpaycoProvider.createCheckoutSession', () => {
     expect(url.searchParams.get('sandbox')).toBe('false');
   });
 
-  it('throws on a non-2xx login response', async () => {
+  it('throws on a non-2xx login response, and never attempts the session/create call', async () => {
     const provider = new EpaycoProvider();
     const fetchImpl = vi.fn(async () => new Response('unauthorized', { status: 401 }));
     await expect(
       provider.createCheckoutSession(order, cfg, fetchImpl as unknown as typeof fetch),
     ).rejects.toThrow(/login HTTP 401/);
+    // Explicit, not just inferred from the error message: a failed login must
+    // never let a second call through with a garbage/undefined JWT.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('throws if the login response is missing token', async () => {
@@ -369,5 +372,13 @@ describe('EpaycoProvider.getTransactionStatus', () => {
     await expect(
       provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch),
     ).rejects.toThrow(/malformed response/);
+  });
+
+  it('throws if the response is missing the `data` key entirely (distinct from an empty `data: {}`)', async () => {
+    const provider = new EpaycoProvider();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    await expect(
+      provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch),
+    ).rejects.toThrow(/missing data/);
   });
 });
