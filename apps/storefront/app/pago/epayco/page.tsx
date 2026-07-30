@@ -48,18 +48,21 @@ import { Alert, Button, Card, CardContent, CardHeader, CardTitle, Spinner } from
  * letting each provider's async webhook be the actual source of truth for
  * final payment status.
  *
- * Honesty note for the phase review: this IS a real, official-docs-sourced
- * callback (materially stronger evidence than Task 3 had), and it is what
- * this page relies on as the PRIMARY mechanism. But it has never been
- * exercised against a live ePayco sandbox session (none was available for
- * this task either — see the manual-check notes in this task's report), and
- * the sample above shows `type: "onpage"`, not the `"standard"` mode this
- * adapter actually uses (design doc decision 6) — the docs don't state
- * `setHooks` is mode-specific, but this combination is untested. For exactly
- * that reason, this page ALSO renders a persistent, visible manual
- * "Ya pagué, ver mi pedido" link below the widget placeholder the entire
- * time the widget is open, pointing at the same confirmation URL, so a
- * shopper is never stranded purely on faith that the hook fires correctly.
+ * Honesty note for the phase review, corrected after this task's own review:
+ * the docs page this sample comes from ALSO states, verbatim (in Spanish),
+ * that "estos hooks están disponibles para los tipos de implementación
+ * onpage" — i.e. `setHooks` is explicitly documented as scoped to
+ * `type: "onpage"`, NOT the `"standard"` mode this adapter actually uses
+ * (design doc decision 6 requires `standard` — ePayco's own PCI-DSS-hosted
+ * redirect experience, since card data must never touch this app). An
+ * earlier version of this comment claimed the docs "don't state `setHooks`
+ * is mode-specific" — that was wrong; they do, and against the mode this
+ * page uses. So `setHooks` below is wired defensively (costs nothing if it
+ * never fires), but the PERSISTENT, ALWAYS-VISIBLE manual "Ya pagué, ver mi
+ * pedido" link is the only currently-VERIFIED way a shopper gets back to
+ * their order — not a backstop to a trusted primary mechanism. Treat this
+ * as unresolved until confirmed against a real ePayco sandbox in `standard`
+ * mode specifically (no such account was available for this task).
  */
 
 declare global {
@@ -80,6 +83,10 @@ declare global {
   }
 }
 
+// No Subresource Integrity hash: ePayco controls and can update this script
+// at any time without notice, so a pinned SRI hash would break the widget on
+// their next release rather than protect against tampering — a deliberate
+// omission, not an oversight.
 const EPAYCO_SCRIPT_SRC = 'https://checkout.epayco.co/checkout-v2.js';
 
 type Stage = 'loading-script' | 'opening' | 'open' | 'script-error';
@@ -93,11 +100,15 @@ function ConfirmacionLink({ orderNumber, label }: { orderNumber: string | null; 
   );
 }
 
-/** Wrapped in `Suspense` below: `useSearchParams()` requires it for this app
- * router to be statically prerenderable (this page has no dynamic segment of
- * its own, unlike `/checkout/confirmacion/[orderNumber]`), same requirement
- * Next.js documents for any Client Component reading search params — see
- * https://nextjs.org/docs/messages/missing-suspense-with-csr-bailout. */
+/** Wrapped in `Suspense` below. Next.js documents `useSearchParams()` in a
+ * Client Component as requiring a `Suspense` boundary for static
+ * prerendering (see https://nextjs.org/docs/messages/missing-suspense-with-csr-bailout)
+ * — checked directly for this app: `app/layout.tsx` already forces every
+ * route dynamic (it calls `headers()`/fetches the tenant on every request),
+ * so removing this wrapper doesn't actually break this app's build today.
+ * Kept anyway as cheap, correct-by-Next's-own-rule defensive practice that
+ * would matter the moment the root layout's dynamic-forcing ever changes —
+ * not a claim that today's build would fail without it. */
 function EpaycoBridgeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -174,6 +185,28 @@ function EpaycoBridgeContent() {
     );
   }
 
+  // `session` present but `orderNumber` missing/empty: a malformed or
+  // truncated URL (never produced by this app's own real checkout flow,
+  // which always includes it — see epayco.ts's redirectUrl construction —
+  // but reachable via a hand-crafted/corrupted link). Without this explicit
+  // branch, `ConfirmacionLink` silently renders nothing and the widget
+  // proceeds with no way back at all — a silent dead end a live review pass
+  // caught. Surface it instead of letting the shopper stall on a bare
+  // loading card with no path forward.
+  if (!orderNumber) {
+    return (
+      <main className="mx-auto flex max-w-xl flex-col gap-4 px-4 py-16">
+        <Alert variant="error">
+          No pudimos identificar tu pedido para este pago con ePayco. Si ya pagaste, revisa tu correo de
+          confirmación o contáctanos; si no, vuelve a intentar tu pedido desde el carrito.
+        </Alert>
+        <Button href="/carrito" className="self-start">
+          Volver al carrito
+        </Button>
+      </main>
+    );
+  }
+
   return (
     <main className="mx-auto flex max-w-xl flex-col items-center gap-6 px-4 py-16 text-center">
       <Script src={EPAYCO_SCRIPT_SRC} strategy="afterInteractive" onLoad={handleScriptLoad} onError={handleScriptError} />
@@ -196,7 +229,7 @@ function EpaycoBridgeContent() {
                   ? 'Cargando la pasarela de pago de ePayco…'
                   : stage === 'opening'
                     ? 'Abriendo el checkout de ePayco…'
-                    : 'Completa tu pago en la ventana de ePayco. Cuando termines, te llevaremos de vuelta a tu pedido automáticamente.'}
+                    : 'Completa tu pago en la ventana de ePayco. Cuando termines, usa el botón de abajo para volver a tu pedido.'}
               </p>
             </>
           )}

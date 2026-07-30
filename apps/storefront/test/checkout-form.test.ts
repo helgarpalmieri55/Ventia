@@ -105,6 +105,16 @@ describe("validateCheckoutStep('payment', ...)", () => {
     const errors = validateCheckoutStep('payment', validState({ paymentMethod: 'wompi' }));
     expect(errors.paymentMethod).toBeUndefined();
   });
+
+  it("does not flag 'mercadopago'", () => {
+    const errors = validateCheckoutStep('payment', validState({ paymentMethod: 'mercadopago' }));
+    expect(errors.paymentMethod).toBeUndefined();
+  });
+
+  it("does not flag 'epayco'", () => {
+    const errors = validateCheckoutStep('payment', validState({ paymentMethod: 'epayco' }));
+    expect(errors.paymentMethod).toBeUndefined();
+  });
 });
 
 describe('a fully valid state', () => {

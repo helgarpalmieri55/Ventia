@@ -115,4 +115,36 @@ describe('submitCheckout', () => {
       credentials: 'include',
     });
   });
+
+  it('passes a mercadopago paymentMethod through and round-trips its redirectUrl', async () => {
+    const mpInput = { ...input, paymentMethod: 'mercadopago' as const };
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ orderNumber: 44, totalCents: 100000, redirectUrl: 'https://www.mercadopago.com/checkout/v1/redirect?pref_id=abc' }),
+        { status: 201 },
+      ),
+    );
+    const result = await submitCheckout(mpInput, fetchImpl);
+    expect(result.redirectUrl).toBe('https://www.mercadopago.com/checkout/v1/redirect?pref_id=abc');
+    expect(fetchImpl).toHaveBeenCalledWith('/api/checkout', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mpInput),
+      credentials: 'include',
+    });
+  });
+
+  it('passes an epayco paymentMethod through and round-trips its SAME-ORIGIN /pago/epayco redirectUrl', async () => {
+    const epaycoInput = { ...input, paymentMethod: 'epayco' as const };
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ orderNumber: 45, totalCents: 100000, redirectUrl: '/pago/epayco?session=sess-1&sandbox=true&orderNumber=45' }),
+        { status: 201 },
+      ),
+    );
+    const result = await submitCheckout(epaycoInput, fetchImpl);
+    // Distinct from wompi/mercadopago's external redirects: ePayco's
+    // redirectUrl is this storefront's OWN bridge page, same-origin.
+    expect(result.redirectUrl).toBe('/pago/epayco?session=sess-1&sandbox=true&orderNumber=45');
+  });
 });
