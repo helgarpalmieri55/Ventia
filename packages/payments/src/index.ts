@@ -23,6 +23,19 @@ export interface TenantProviderConfig {
   // isn't forced to populate fields that mean nothing to it.
   integritySecret?: string;
   eventsSecret?: string;
+  // ePayco-specific, added in Task 2 (`mercadopago.ts`) even though ePayco's
+  // own adapter doesn't exist until Task 3 — `TenantProviderConfig` is one
+  // shared interface file, so widening it happens wherever the next field is
+  // discovered to be needed, not gated on the provider that needs it being
+  // implemented yet. This is ePayco's merchant-account identifier
+  // (`P_CUST_ID_CLIENTE`), the second value ePayco's confirmation-hash
+  // formula needs alongside `P_KEY` (which reuses `eventsSecret` — see that
+  // field's doc comment above). Deliberately named `epaycoCustomerId`, not a
+  // generic `customerId`: this has nothing to do with this codebase's own
+  // `Customer` model (a shopper) — it identifies ePayco's *merchant account*,
+  // the same conceptual role `publicKey`/`privateKey` play for the other two
+  // providers. Optional because only ePayco needs it.
+  epaycoCustomerId?: string;
 }
 
 export interface RawRequest {
@@ -67,3 +80,4 @@ export interface PaymentProvider {
 }
 
 export { WompiProvider } from './wompi.js';
+export { MercadoPagoProvider } from './mercadopago.js';
