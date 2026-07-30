@@ -197,6 +197,30 @@ describe('MercadoPagoProvider.verifyAndParseWebhook', () => {
     ).rejects.toThrow(/signature mismatch/);
   });
 
+  it('rejects a v1 signature of the WRONG LENGTH without throwing an unhandled RangeError', async () => {
+    // node:crypto's timingSafeEqual throws (rather than returning false) when
+    // given two buffers of different lengths — a naive `timingSafeEqual(a, b)`
+    // call on a length-mismatched tampered/truncated signature would crash
+    // with an uncaught RangeError instead of cleanly rejecting. This locks in
+    // that the implementation's length guard actually prevents that crash
+    // (verified correct by code inspection during this task's review, but
+    // previously untested).
+    const provider = new MercadoPagoProvider();
+    const req = buildSignedWebhookRequest({
+      dataId: '123456789',
+      ts: '1742505638683',
+      requestId: 'req-abc-123',
+      eventsSecret: cfg.eventsSecret!,
+    });
+    const tampered = req.headers['x-signature'] as string;
+    const [tsPart, v1Part] = tampered.split(',');
+    req.headers['x-signature'] = `${tsPart},${v1Part}ff`; // 2 extra hex chars — wrong length, not just wrong content
+
+    await expect(
+      provider.verifyAndParseWebhook(req, cfg, mockPaymentLookup() as unknown as typeof fetch),
+    ).rejects.toThrow(/signature mismatch/);
+  });
+
   it('rejects when x-request-id is missing and the manifest was (correctly) built assuming it was present', async () => {
     // This request is signed AS IF request-id were present (attacker/relay
     // scenario: signature computed over a manifest that includes
