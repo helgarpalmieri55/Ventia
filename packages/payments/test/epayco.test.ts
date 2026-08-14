@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EpaycoProvider } from '../src/epayco';
 import type { NormalizedStatus, OrderForPayment, RawRequest, TenantProviderConfig } from '../src/index';
 
@@ -82,6 +82,65 @@ describe('EpaycoProvider.createCheckoutSession', () => {
     // number (neither configure()'s widget config nor ePayco's hooks carry
     // it back), so it must ride along in this redirect's query string too.
     expect(url.searchParams.get('orderNumber')).toBe('ORD-0001');
+  });
+
+  // --- P3c Task 2 (requirement 3): REGRESSION GUARD for the
+  // `EPAYCO_STOREFRONT_BASE_URL` -> `PAYMENTS_STOREFRONT_BASE_URL` rename.
+  //
+  // ePayco's redirect is already live/shipped, so this rename is the single
+  // biggest regression risk in that task. These tests pin the produced URL
+  // BYTE-FOR-BYTE (not just "hostname isn't epayco.co"), for the env-var-set
+  // case, the unset-default case, and the now-removed old env var — so a
+  // half-done rename (e.g. shared module added but ePayco still reading the
+  // old var, or the default silently changed) fails loudly here.
+  describe('storefront base URL after the PAYMENTS_STOREFRONT_BASE_URL rename', () => {
+    const ORIGINAL_NEW = process.env.PAYMENTS_STOREFRONT_BASE_URL;
+    const ORIGINAL_OLD = process.env.EPAYCO_STOREFRONT_BASE_URL;
+    const restore = (key: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    };
+    afterEach(() => {
+      restore('PAYMENTS_STOREFRONT_BASE_URL', ORIGINAL_NEW);
+      restore('EPAYCO_STOREFRONT_BASE_URL', ORIGINAL_OLD);
+    });
+
+    async function buildRedirect(): Promise<string> {
+      const provider = new EpaycoProvider();
+      const fetchImpl = vi.fn();
+      fetchImpl.mockImplementationOnce(async () => new Response(JSON.stringify({ token: 'jwt' }), { status: 200 }));
+      fetchImpl.mockImplementationOnce(async () =>
+        new Response(JSON.stringify({ data: { sessionId: 'sess-1' } }), { status: 200 }),
+      );
+      const { redirectUrl } = await provider.createCheckoutSession(order, cfg, fetchImpl as unknown as typeof fetch);
+      return redirectUrl;
+    }
+
+    it('produces the byte-identical redirect URL it produced before the rename, when the new env var is set', async () => {
+      delete process.env.EPAYCO_STOREFRONT_BASE_URL;
+      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
+      expect(await buildRedirect()).toBe(
+        'https://tienda.example.com/pago/epayco?session=sess-1&sandbox=true&orderNumber=ORD-0001',
+      );
+    });
+
+    it('keeps the SAME http://localhost:3000 dev default when no env var is set at all', async () => {
+      delete process.env.EPAYCO_STOREFRONT_BASE_URL;
+      delete process.env.PAYMENTS_STOREFRONT_BASE_URL;
+      expect(await buildRedirect()).toBe(
+        'http://localhost:3000/pago/epayco?session=sess-1&sandbox=true&orderNumber=ORD-0001',
+      );
+    });
+
+    it('no longer reads the OLD EPAYCO_STOREFRONT_BASE_URL name (proves the rename is complete, not additive)', async () => {
+      process.env.EPAYCO_STOREFRONT_BASE_URL = 'https://stale-old-var.example.com';
+      delete process.env.PAYMENTS_STOREFRONT_BASE_URL;
+      const redirectUrl = await buildRedirect();
+      expect(redirectUrl).not.toContain('stale-old-var.example.com');
+      expect(redirectUrl).toBe(
+        'http://localhost:3000/pago/epayco?session=sess-1&sandbox=true&orderNumber=ORD-0001',
+      );
+    });
   });
 
   it('uses the sandbox_init_point-equivalent sandbox flag verbatim (false) when cfg.sandbox is false', async () => {
@@ -330,8 +389,8 @@ describe('EpaycoProvider.getTransactionStatus', () => {
     const fetchImpl = vi.fn(async () =>
       new Response(JSON.stringify({ data: { x_response: 'Aceptada' } }), { status: 200 }),
     );
-    const status = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
-    expect(status).toBe('PAID');
+    const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result.status).toBe('PAID');
     const [url] = fetchImpl.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://secure.epayco.co/validation/v1/reference/ref-1');
   });
@@ -348,8 +407,8 @@ describe('EpaycoProvider.getTransactionStatus', () => {
       const fetchImpl = vi.fn(async () =>
         new Response(JSON.stringify({ data: { x_cod_respuesta: Number(code) } }), { status: 200 }),
       );
-      const status = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
-      expect(status).toBe(expected);
+      const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+      expect(result.status).toBe(expected);
     },
   );
 
@@ -358,8 +417,70 @@ describe('EpaycoProvider.getTransactionStatus', () => {
     const fetchImpl = vi.fn(async () =>
       new Response(JSON.stringify({ data: { x_cod_response: 1 } }), { status: 200 }),
     );
-    const status = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
-    expect(status).toBe('PAID');
+    const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result.status).toBe('PAID');
+  });
+
+  // --- P3c Task 2 (requirement 1): the ORDER-BINDING fields.
+  //
+  // `x_extra1` is THIS codebase's reference slot on ePayco (the same field
+  // `verifyAndParseWebhook` reads, and the same one `createCheckoutSession`
+  // populates as `extras.extra1`). Both it and `x_amount` are typed on
+  // ePayco's OWN official sample repo's response model for this exact
+  // endpoint — see the adapter's module doc comment for the source and the
+  // remaining confidence caveat.
+  it('returns x_extra1 as `reference` and x_amount (pesos) as `amountCents` alongside the status', async () => {
+    const provider = new EpaycoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: { x_response: 'Aceptada', x_extra1: '1042', x_amount: 49900, x_currency_code: 'COP' },
+        }),
+        { status: 200 },
+      ),
+    );
+    const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+    // 49,900 pesos -> 4,990,000 cents. Same major-unit convention (and same
+    // `* 100` conversion) `verifyAndParseWebhook` already applies to the
+    // identically-named `x_amount` field on the confirmation webhook.
+    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000 });
+  });
+
+  it('accepts x_amount delivered as a numeric STRING (ePayco form-encodes the same field on its webhook side)', async () => {
+    const provider = new EpaycoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ data: { x_response: 'Aceptada', x_extra1: '7', x_amount: '49900.00' } }),
+        { status: 200 },
+      ),
+    );
+    const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result).toEqual({ status: 'PAID', reference: '7', amountCents: 4990000 });
+  });
+
+  it('leaves reference/amountCents undefined (rather than throwing or fabricating) when the response omits them', async () => {
+    const provider = new EpaycoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ data: { x_response: 'Aceptada' } }), { status: 200 }),
+    );
+    const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result.status).toBe('PAID');
+    expect(result.reference).toBeUndefined();
+    expect(result.amountCents).toBeUndefined();
+  });
+
+  it('leaves amountCents undefined for a non-numeric x_amount rather than emitting NaN', async () => {
+    const provider = new EpaycoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ data: { x_response: 'Aceptada', x_extra1: '9', x_amount: 'no-es-un-numero' } }),
+        { status: 200 },
+      ),
+    );
+    const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result.reference).toBe('9');
+    expect(result.amountCents).toBeUndefined();
   });
 
   it('throws on a non-2xx response', async () => {

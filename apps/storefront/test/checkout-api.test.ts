@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CheckoutApiError, fetchShippingQuote, submitCheckout } from '../lib/checkout-api';
+import {
+  CheckoutApiError,
+  fetchShippingQuote,
+  sendProviderRefHint,
+  submitCheckout,
+} from '../lib/checkout-api';
 
 // Matching cart-api.test.ts's established precedent for this exact kind of
 // client (mocked-fetchImpl unit tests asserting the right proxy path/
@@ -146,5 +151,39 @@ describe('submitCheckout', () => {
     // Distinct from wompi/mercadopago's external redirects: ePayco's
     // redirectUrl is this storefront's OWN bridge page, same-origin.
     expect(result.redirectUrl).toBe('/pago/epayco?session=sess-1&sandbox=true&orderNumber=45');
+  });
+});
+
+describe('sendProviderRefHint', () => {
+  it('PATCHes the proxy path with the providerRef body and the URL-encoded order number', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    await sendProviderRefHint('1042', '01-1531231271-19365', fetchImpl);
+
+    expect(fetchImpl).toHaveBeenCalledWith('/api/checkout/1042/provider-ref-hint', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ providerRef: '01-1531231271-19365' }),
+      credentials: 'include',
+    });
+  });
+
+  it('encodes an order number containing URL-significant characters', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    await sendProviderRefHint('a/b', 'txn', fetchImpl);
+    expect((fetchImpl.mock.calls[0] as [string])[0]).toBe('/api/checkout/a%2Fb/provider-ref-hint');
+  });
+
+  it('throws a CheckoutApiError on a non-2xx response, same as every other client in this module', async () => {
+    // The CALLER (the Wompi return page) is what makes this non-blocking, by
+    // never awaiting it — this client itself stays honest about failures so
+    // it is still usable/loggable, rather than swallowing errors internally.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ error: 'ORDER_NOT_FOUND' }), { status: 404 }));
+    const err = await sendProviderRefHint('999999', 'txn', fetchImpl).catch((e) => e);
+    expect(err).toBeInstanceOf(CheckoutApiError);
+    expect((err as CheckoutApiError).status).toBe(404);
+    expect((err as CheckoutApiError).code).toBe('ORDER_NOT_FOUND');
   });
 });

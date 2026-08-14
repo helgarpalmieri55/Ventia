@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WompiProvider } from '../src/wompi';
 import type { NormalizedStatus, OrderForPayment, RawRequest, TenantProviderConfig } from '../src/index';
 
@@ -50,6 +50,90 @@ describe('WompiProvider.createCheckoutSession', () => {
     const provider = new WompiProvider();
     const badCfg: TenantProviderConfig = { publicKey: 'pub', privateKey: 'prv', sandbox: true };
     await expect(provider.createCheckoutSession(order, badCfg)).rejects.toThrow(/integritySecret/);
+  });
+
+  // --- P3c Task 2 (requirement 3): the redirect-url return-capture path.
+  describe('redirect-url (P3c return capture)', () => {
+    const ORIGINAL_ENV = process.env.PAYMENTS_STOREFRONT_BASE_URL;
+    afterEach(() => {
+      if (ORIGINAL_ENV === undefined) delete process.env.PAYMENTS_STOREFRONT_BASE_URL;
+      else process.env.PAYMENTS_STOREFRONT_BASE_URL = ORIGINAL_ENV;
+    });
+
+    it('carries the order number in the URL PATH, with NO query string of its own', async () => {
+      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
+      const provider = new WompiProvider();
+      const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
+
+      const redirect = new URL(redirectUrl).searchParams.get('redirect-url');
+      expect(redirect).toBe('https://tienda.example.com/pago/wompi-retorno/ORD-0001');
+      // The whole point of the path-based shape: Wompi appends `?id={txId}`
+      // to whatever it is given, and its docs only ever show that appended
+      // onto a URL with NO existing query string (and never document what it
+      // does when one is already present). A redirect-url that carried its
+      // own `?orderNumber=` could come back as `...?orderNumber=1?id=abc`.
+      expect(redirect).not.toContain('?');
+      expect(redirect).not.toContain('&');
+    });
+
+    it('defaults to the localhost dev base when PAYMENTS_STOREFRONT_BASE_URL is unset', async () => {
+      delete process.env.PAYMENTS_STOREFRONT_BASE_URL;
+      const provider = new WompiProvider();
+      const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
+      expect(new URL(redirectUrl).searchParams.get('redirect-url')).toBe(
+        'http://localhost:3000/pago/wompi-retorno/ORD-0001',
+      );
+    });
+
+    it('percent-encodes an order number containing URL-significant characters into the path segment', async () => {
+      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
+      const provider = new WompiProvider();
+      const { redirectUrl } = await provider.createCheckoutSession(
+        { ...order, orderNumber: 'a/b?c' },
+        cfg,
+      );
+      expect(new URL(redirectUrl).searchParams.get('redirect-url')).toBe(
+        'https://tienda.example.com/pago/wompi-retorno/a%2Fb%3Fc',
+      );
+    });
+
+    it('adding `redirect-url` does not disturb the integrity signature or any other checkout param', async () => {
+      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
+      const provider = new WompiProvider();
+      const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
+      const url = new URL(redirectUrl);
+      // Signature covers reference+amount+currency+secret ONLY — Wompi's real
+      // formula has no redirect-url term, so it must be byte-identical to
+      // what the pre-P3c adapter produced.
+      expect(url.searchParams.get('signature:integrity')).toBe(
+        sha256Hex(`ORD-0001${4990000}COP${cfg.integritySecret}`),
+      );
+      expect(url.searchParams.get('reference')).toBe('ORD-0001');
+      expect(url.searchParams.get('amount-in-cents')).toBe('4990000');
+      expect(url.searchParams.get('currency')).toBe('COP');
+      expect(url.searchParams.get('public-key')).toBe('pub_test_abc123');
+    });
+
+    // THE regression test for requirement 3's whole rationale: simulate what
+    // Wompi actually does to the URL it was handed, then prove BOTH values
+    // survive the round trip and are extractable by the storefront page.
+    it('survives Wompi appending `?id={transactionId}`: both orderNumber and id stay extractable', async () => {
+      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
+      const provider = new WompiProvider();
+      const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
+      const redirect = new URL(redirectUrl).searchParams.get('redirect-url')!;
+
+      // Wompi's documented behavior, reproduced literally: it appends
+      // `?id=<transaction id>` to the redirect-url it was given.
+      const returned = new URL(`${redirect}?id=01-1531231271-19365`);
+
+      expect(returned.pathname.split('/').pop()).toBe('ORD-0001');
+      expect(returned.searchParams.get('id')).toBe('01-1531231271-19365');
+      // And there is exactly ONE query param — no `"1?id=abc"`-style
+      // value-swallowing, which is precisely what a query-param-carried
+      // orderNumber would have produced.
+      expect([...returned.searchParams.keys()]).toEqual(['id']);
+    });
   });
 });
 
@@ -252,9 +336,9 @@ describe('WompiProvider.getTransactionStatus', () => {
       }),
     );
 
-    const status = await provider.getTransactionStatus('txn-abc', cfg, fetchImpl as unknown as typeof fetch);
+    const result = await provider.getTransactionStatus('txn-abc', cfg, fetchImpl as unknown as typeof fetch);
 
-    expect(status).toBe(expected);
+    expect(result.status).toBe(expected);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://sandbox.wompi.co/v1/transactions/txn-abc');
@@ -287,5 +371,67 @@ describe('WompiProvider.getTransactionStatus', () => {
     // Not actually invoked without an injected fetchImpl in this suite —
     // this just documents/locks in that the 3rd param is optional.
     expect(provider.getTransactionStatus.length).toBeLessThanOrEqual(3);
+  });
+
+  // --- P3c Task 2 (requirement 1): the ORDER-BINDING fields.
+  //
+  // Reconciliation looks a transaction up BY ID, from a `providerRef` that
+  // may have arrived on an UNAUTHENTICATED hint endpoint — so a bare status
+  // is not enough to safely settle an order. These assertions lock in that
+  // Wompi's own record of WHICH merchant reference and WHAT amount the
+  // transaction is for comes back alongside the status, so the caller can
+  // verify the transaction actually belongs to the order before trusting it.
+  it('returns Wompi\'s own data.reference and data.amount_in_cents alongside the status', async () => {
+    const provider = new WompiProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          data: {
+            id: 'txn-abc',
+            reference: '1042',
+            status: 'APPROVED',
+            amount_in_cents: 4990000,
+            currency: 'COP',
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    const result = await provider.getTransactionStatus('txn-abc', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000 });
+  });
+
+  it('leaves reference/amountCents undefined (rather than throwing) when the response omits them — only `status` is required', async () => {
+    const provider = new WompiProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ data: { status: 'DECLINED' } }), { status: 200 }),
+    );
+
+    const result = await provider.getTransactionStatus('txn-abc', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result.status).toBe('FAILED');
+    expect(result.reference).toBeUndefined();
+    expect(result.amountCents).toBeUndefined();
+  });
+
+  it('ignores a non-string reference / non-number amount_in_cents rather than coercing garbage into the binding fields', async () => {
+    const provider = new WompiProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ data: { status: 'APPROVED', reference: 1042, amount_in_cents: '4990000' } }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await provider.getTransactionStatus('txn-abc', cfg, fetchImpl as unknown as typeof fetch);
+
+    // A caller comparing `result.reference === String(order.number)` must
+    // never be handed a value this adapter invented by coercion — an absent
+    // binding is a "cannot reconcile", which is safe; a fabricated one is not.
+    expect(result.status).toBe('PAID');
+    expect(result.reference).toBeUndefined();
+    expect(result.amountCents).toBeUndefined();
   });
 });

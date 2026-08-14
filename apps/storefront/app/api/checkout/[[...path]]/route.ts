@@ -35,8 +35,9 @@ async function proxy(req: Request, path: string[] | undefined): Promise<Response
   // `path` is `undefined`/empty for the bare `POST /api/checkout` case (the
   // checkout submit itself) — this must resolve to the API's exact
   // `/v1/storefront/checkout` (no trailing slash), matching `@Post()`'s bare
-  // controller route. `/api/checkout/shipping-quote` is the one non-empty
-  // case (`GET`, `@Get('shipping-quote')`).
+  // controller route. The non-empty cases are `/api/checkout/shipping-quote`
+  // (`GET`), `/api/checkout/confirmacion/:orderNumber` (`GET`) and
+  // `/api/checkout/:orderNumber/provider-ref-hint` (`PATCH`, P3c Task 2).
   const suffix = path && path.length > 0 ? `/${path.join('/')}` : '';
   const upstreamRes = await fetch(`${API_URL}/v1/storefront/checkout${suffix}${url.search}`, {
     method: req.method,
@@ -73,5 +74,14 @@ export async function GET(req: Request, { params }: RouteParams): Promise<Respon
 }
 
 export async function POST(req: Request, { params }: RouteParams): Promise<Response> {
+  return proxy(req, (await params).path);
+}
+
+// Added for P3c Task 2's provider-ref-hint endpoint
+// (`PATCH /api/checkout/:orderNumber/provider-ref-hint`). The cart proxy
+// already exported PATCH; `proxy()` above already handled the method and its
+// body generically (`hasBody` covers POST and PATCH), so this is purely the
+// missing export, not new forwarding logic.
+export async function PATCH(req: Request, { params }: RouteParams): Promise<Response> {
   return proxy(req, (await params).path);
 }

@@ -6,7 +6,9 @@ import type {
   PaymentProvider,
   RawRequest,
   TenantProviderConfig,
+  TransactionStatusResult,
 } from './index.js';
+import { resolveStorefrontBase } from './storefront-base.js';
 
 // --- Facts below are this task's own re-verification against real
 // docs.epayco.com pages (fetched directly during this task) and, where the
@@ -193,6 +195,45 @@ import type {
 //    flagged as NOT verified against an official ePayco source and should be
 //    double-checked against a real sandbox response before this method is
 //    trusted in production.**
+//
+// --- P3c Task 2 re-verification of `getTransactionStatus`'s response schema
+// (the widened `TransactionStatusResult` return needs to know whether this
+// endpoint carries a reference/amount at all, so the previous bullet's
+// lowest-confidence status was re-attacked rather than inherited):
+//  - **A FIRST-PARTY source for this endpoint's response shape was found**,
+//    materially better than the third-party community SDK the bullet above
+//    relies on: ePayco's OWN official sample-code repo,
+//    `github.com/epayco/resources` (the same repo whose PHP confirmation
+//    sample is already cited above), contains an Angular sample —
+//    `epayco-ng6/src/app/services/epayco.service.ts` — whose
+//    `configUrl = 'https://secure.epayco.co/validation/v1/reference/'` +
+//    `http.get<EpaycoTransaction>(configUrl + refPayco)` types EXACTLY this
+//    call, against `epayco-ng6/src/app/models/epayco-transaction.model.ts`.
+//    That model declares, under `data`: `x_response`, `x_respuesta`,
+//    `x_cod_response`, `x_cod_respuesta`, `x_amount`, `x_currency_code`,
+//    `x_transaction_id`, `x_transaction_date`, `x_ref_payco`, `x_signature`,
+//    `x_extra1`, `x_extra2`, `x_extra3`, and ~30 more. The same repo's
+//    `onePage/response/response.html` independently reads
+//    `response.data.x_response`, `response.data.x_cod_response` and
+//    `response.data.x_amount` off a live call to this same URL.
+//  - Three consequences, all upgrades on the bullet above: (1) the STRING
+//    `x_response` preferred path is confirmed real on this endpoint, not
+//    just hoped for; (2) the `x_cod_respuesta` vs `x_cod_response` spelling
+//    inconsistency that the bullet above says "this task cannot resolve" is
+//    resolved — ePayco's own model declares BOTH, so checking both spellings
+//    (which this adapter already did) is correct, not merely defensive; and
+//    (3) `x_extra1` and `x_amount` ARE on this response, which is what lets
+//    `getTransactionStatus` populate `TransactionStatusResult`'s
+//    order-binding fields at all.
+//  - **Still NOT verified against a real sandbox response** (no ePayco
+//    sandbox account was available for this task either), and `x_amount`'s
+//    UNITS on this endpoint specifically are not stated by that model — see
+//    `getTransactionStatus`'s own doc comment for the per-field confidence
+//    levels and the units reasoning. Every one of these fields is read
+//    defensively: absent or wrong-typed leaves the corresponding
+//    `TransactionStatusResult` field `undefined` rather than fabricating a
+//    value, so being wrong here fails safe (an order simply cannot be
+//    auto-reconciled) rather than settling the wrong order.
 const APIFY_BASE = 'https://apify.epayco.co';
 const VALIDATION_BASE = 'https://secure.epayco.co';
 const CHECKOUT_CURRENCY = 'COP';
@@ -205,34 +246,25 @@ const CHECKOUT_COUNTRY = 'CO';
 // `redirectUrl` must point at THIS codebase's own storefront's
 // `/pago/epayco` bridge page (design doc decision 6) — a real, public,
 // per-TENANT browser-reachable base URL, which neither `OrderForPayment` nor
-// `TenantProviderConfig` carries, and which this task's file list does not
-// authorize sourcing correctly (that requires widening `OrderForPayment` and
-// touching `checkout.controller.ts`/`checkout.service.ts`, explicitly out of
-// scope for this task). Rather than silently hardcode any single tenant's
-// real domain (which would produce a WRONG, broken redirect for every other
-// tenant, in production, with no signal that anything's wrong) or throw
-// unconditionally (which would make this adapter unusable end-to-end even
-// for local, single-tenant-dev testing), this reads ONE new, explicitly
-// provisional env var, defaulting to `http://localhost:3000` for a
-// single-tenant dev loop (mirroring `revalidate.ts`'s identical
-// `STOREFRONT_INTERNAL_URL` dev default) — **this default, and indeed this
-// whole mechanism, is WRONG for any real multi-tenant deployment where more
-// than one tenant uses ePayco**: every tenant's shopper would be redirected
-// to the SAME single storefront base regardless of which tenant they
-// actually checked out on. This is a real, load-bearing gap, not a
-// convenience shortcut — flagged loudly here, in the commit body, and in
-// this task's own report: **whoever wires `EpaycoProvider` into
-// `checkout.service.ts` (Task 4/6) MUST replace this with the real
-// per-request tenant domain** (resolved the same way
-// `services/api/src/tenants/domain-resolver.ts`'s `DomainResolver` already
-// resolves an inbound request's host to a tenant, threaded down through
-// `OrderForPayment` or an equivalent widened input), NOT simply leave this
-// env var in place for production.
-const STOREFRONT_BASE_ENV_VAR = 'EPAYCO_STOREFRONT_BASE_URL';
-
-function resolveStorefrontBase(): string {
-  return process.env[STOREFRONT_BASE_ENV_VAR] ?? 'http://localhost:3000';
-}
+// `TenantProviderConfig` carries. **This single-global-URL mechanism is a
+// real, load-bearing, multi-tenant-wrong limitation, not a convenience
+// shortcut**: every tenant's shopper would be redirected to the SAME single
+// storefront base regardless of which tenant they actually checked out on,
+// and `http://localhost:3000` is its dev-loop default. **Whoever wires
+// `EpaycoProvider` up for production MUST replace this with the real
+// per-request tenant domain**, NOT simply leave this env var in place.
+//
+// P3c Task 2 moved this resolution OUT of this file, unchanged in behavior,
+// into `storefront-base.ts` — Wompi's new return-capture redirect
+// (`/pago/wompi-retorno/{orderNumber}`) has the identical need and the
+// identical gap, so the env var is now the provider-neutral
+// `PAYMENTS_STOREFRONT_BASE_URL` (renamed from this file's original
+// `EPAYCO_STOREFRONT_BASE_URL`) shared by both adapters. Read that module's
+// doc comment — it carries the full, unabridged version of this warning.
+// The rename is the ONLY change: this adapter's produced `redirectUrl` is
+// byte-identical to before, pinned by a dedicated regression block in
+// `test/epayco.test.ts`. (The `resolveStorefrontBase` import itself lives at
+// the top of this file with the other imports.)
 
 function sha256Hex(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
@@ -286,6 +318,23 @@ const NUMERIC_RESPONSE_CODE_MAP: Record<string, NormalizedStatus> = {
   '3': 'PENDING', // Pendiente
   '4': 'FAILED', // Fallida
 };
+
+/** Converts ePayco's MAJOR-unit (pesos) amount field to cents, tolerating
+ * both the number and numeric-string forms this field is seen in (JSON on
+ * the validation endpoint, form-encoded on the confirmation webhook).
+ * Returns `undefined` — never `NaN` — for anything unparseable, so a caller
+ * comparing `amountCents === order.totalCents` is never handed a garbage
+ * value that could accidentally compare equal or mask a real mismatch. */
+function parseMajorUnitsToCents(raw: unknown): number | undefined {
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) ? Math.round(raw * 100) : undefined;
+  }
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? Math.round(parsed * 100) : undefined;
+  }
+  return undefined;
+}
 
 function requireEventsSecret(cfg: TenantProviderConfig): string {
   if (!cfg.eventsSecret) {
@@ -471,18 +520,47 @@ export class EpaycoProvider implements PaymentProvider {
     };
   }
 
-  /** Calls ePayco's transaction-reference lookup endpoint. **Lowest-confidence
-   * method in this adapter** — see the module doc comment's dedicated
-   * section: the endpoint URL itself is corroborated by an official
-   * docs.epayco.com page, but the exact response schema below is sourced
-   * from a THIRD-PARTY community SDK, not an ePayco-authored one, and is
-   * NOT verified against a real sandbox response. Flagged prominently for
-   * reviewer double-check before this is trusted in production. */
+  /** Calls ePayco's transaction-reference lookup endpoint. Historically the
+   * **lowest-confidence method in this adapter** — see the module doc
+   * comment's dedicated section, and its "P3c Task 2 re-verification"
+   * addendum, which materially RAISED (but did not fully resolve) confidence
+   * in this response schema by finding a FIRST-PARTY source for it.
+   *
+   * ## Order-binding fields (`reference`/`amountCents`), P3c Task 2
+   *
+   * `TransactionStatusResult` (packages/payments/src/index.ts) asks each
+   * adapter to report the gateway's OWN record of which merchant reference
+   * and what amount a transaction is for, so a by-id reconciliation caller
+   * can bind the status to a specific order before trusting it. What this
+   * adapter can populate, and at what confidence:
+   *
+   *  - `reference` <- `data.x_extra1` — **medium-high confidence.** This is
+   *    THIS codebase's reference slot on ePayco end to end: sent as
+   *    `extras.extra1` by `createCheckoutSession` above, read back as
+   *    `x_extra1` by `verifyAndParseWebhook` above (that spelling verified
+   *    verbatim against docs.epayco.com/docs/url-de-confirmacion). Its
+   *    presence ON THIS ENDPOINT'S RESPONSE specifically is typed in
+   *    ePayco's OWN official sample repo (see the module comment's P3c
+   *    addendum for the exact file), not merely assumed by symmetry.
+   *  - `amountCents` <- `data.x_amount * 100` — **medium confidence.**
+   *    `x_amount` is typed on that same first-party model, but its UNITS are
+   *    not stated there. It is treated as MAJOR units (pesos) because the
+   *    identically-named `x_amount` on ePayco's confirmation webhook is
+   *    verified major-unit (this adapter's own `verifyAndParseWebhook`
+   *    applies the same `* 100`), and because ePayco's session-create
+   *    `amount` is likewise verified pesos. Consistent-by-source, not
+   *    independently unit-verified — flagged for reviewer.
+   *
+   * Both are populated ONLY when actually present and of a usable type;
+   * anything missing/garbage leaves the field `undefined` rather than
+   * fabricating a binding value. That is the fail-safe direction: a caller
+   * MUST treat a missing `reference` as "cannot reconcile", never as
+   * "binding check passed" (see `TransactionStatusResult`'s doc comment). */
   async getTransactionStatus(
     providerRef: string,
     _cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
-  ): Promise<NormalizedStatus> {
+  ): Promise<TransactionStatusResult> {
     const res = await fetchImpl(`${VALIDATION_BASE}/validation/v1/reference/${encodeURIComponent(providerRef)}`, {
       headers: { 'Content-Type': 'application/json' },
     });
@@ -494,23 +572,38 @@ export class EpaycoProvider implements PaymentProvider {
         x_response?: unknown;
         x_cod_respuesta?: unknown;
         x_cod_response?: unknown;
+        x_extra1?: unknown;
+        x_amount?: unknown;
       };
     };
     const data = body.data;
     if (!data) {
       throw new Error('epayco getTransactionStatus: malformed response (missing data)');
     }
+
+    // `x_extra1` is the order reference — a plain string when present. Never
+    // `String(...)`-coerced from some other type: an invented binding value
+    // is strictly worse than no binding value at all.
+    const reference = typeof data.x_extra1 === 'string' && data.x_extra1.length > 0 ? data.x_extra1 : undefined;
+    // MAJOR units (pesos) -> cents, same conversion verifyAndParseWebhook
+    // applies to the same field name. Accepts a numeric string too, since
+    // ePayco delivers this field form-encoded (i.e. always as a string) on
+    // its webhook side and this endpoint's own first-party sample model
+    // types it as a number — tolerate both rather than guess which one a
+    // real response uses. NaN never escapes as an amount.
+    const amountCents = parseMajorUnitsToCents(data.x_amount);
+
     // Preferred, highest-confidence path: a string x_response field, using
     // the same officially-verified vocabulary as the webhook.
     if (typeof data.x_response === 'string') {
-      return mapStatus(data.x_response);
+      return { status: mapStatus(data.x_response), reference, amountCents };
     }
     // Lower-confidence fallback: a numeric code, under either spelling seen
     // across sources (see module doc comment).
     const numericCode = data.x_cod_respuesta ?? data.x_cod_response;
     if (numericCode !== undefined && numericCode !== null) {
       const mapped = NUMERIC_RESPONSE_CODE_MAP[String(numericCode)];
-      if (mapped) return mapped;
+      if (mapped) return { status: mapped, reference, amountCents };
     }
     throw new Error(
       'epayco getTransactionStatus: malformed response (missing x_response, and x_cod_respuesta/x_cod_response is either missing or an unrecognized code)',

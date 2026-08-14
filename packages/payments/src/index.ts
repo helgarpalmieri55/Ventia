@@ -71,11 +71,64 @@ export interface NormalizedPaymentEvent {
   amountCents: number;
 }
 
+/** The result of a BY-ID transaction-status lookup (`getTransactionStatus`).
+ *
+ * ## Why this is not just a bare `NormalizedStatus` (P3c Task 2)
+ *
+ * The webhook path (`verifyAndParseWebhook` -> `NormalizedPaymentEvent`) is
+ * safe by construction: the gateway's signature cryptographically binds
+ * reference + amount + status together in ONE verified payload, and
+ * `services/api/src/payments/webhooks.controller.ts` looks the order up BY
+ * that verified `reference`. There is no way to point a verified webhook at
+ * an order it isn't about.
+ *
+ * The by-id path has no such binding on its own. P3c's reconciliation worker
+ * calls `getTransactionStatus(order.providerRef, cfg)`, and `providerRef` can
+ * arrive from the deliberately-UNAUTHENTICATED provider-ref-hint endpoint
+ * (`PATCH v1/storefront/checkout/:orderNumber/provider-ref-hint`). So a
+ * shopper holding ONE real, genuinely-PAID transaction id — their own past
+ * purchase — could PATCH it onto a DIFFERENT, still-`PENDING` order. Asking
+ * the gateway "is transaction X paid?" would then get a perfectly truthful
+ * "yes" about a payment that has nothing to do with that order: free-order
+ * fraud, no guessing required.
+ *
+ * `reference` and `amountCents` close that hole. They are the GATEWAY's own
+ * record of which merchant reference the transaction is for and how much it
+ * was — read out of the gateway's own authenticated response, never supplied
+ * by the caller — so a caller can verify the transaction actually belongs to
+ * the order (`result.reference === String(order.number)`, and where the
+ * amount is available, `result.amountCents === order.totalCents`) BEFORE
+ * acting on `status`.
+ *
+ * Both are OPTIONAL because availability genuinely differs per provider and
+ * per response (see each adapter's own doc comment for exactly which fields
+ * it populates and at what confidence). An adapter must leave them
+ * `undefined` rather than fabricate, coerce, or guess a value — and callers
+ * must treat a missing/unverifiable `reference` as "cannot reconcile this
+ * order automatically" (log it, leave the order alone), never as "binding
+ * check passed".
+ */
+export interface TransactionStatusResult {
+  status: NormalizedStatus;
+  /** The gateway's OWN record of the merchant reference this transaction is
+   * for — the same value `NormalizedPaymentEvent.reference` carries on the
+   * webhook path, i.e. the PLAIN STRING form of `Order.number`
+   * (`String(order.number)`, e.g. `"42"`), never the `VNT-`-prefixed display
+   * string. `undefined` when this provider's status-lookup response doesn't
+   * carry it (or doesn't carry it in the expected type). */
+  reference?: string;
+  /** The gateway's OWN record of the transaction amount, in CENTS —
+   * normalized here even for providers whose APIs speak major units (pesos),
+   * matching this codebase's cents-as-source-of-truth convention.
+   * `undefined` when unavailable or non-numeric. */
+  amountCents?: number;
+}
+
 export interface PaymentProvider {
   readonly id: PaymentProviderId;
   createCheckoutSession(order: OrderForPayment, cfg: TenantProviderConfig): Promise<{ redirectUrl: string }>;
   verifyAndParseWebhook(req: RawRequest, cfg: TenantProviderConfig): Promise<NormalizedPaymentEvent>;
-  getTransactionStatus(providerRef: string, cfg: TenantProviderConfig): Promise<NormalizedStatus>;
+  getTransactionStatus(providerRef: string, cfg: TenantProviderConfig): Promise<TransactionStatusResult>;
   refund?(providerRef: string, amountCents: number, cfg: TenantProviderConfig): Promise<void>;
   // P3c, optional (like `refund?` above) — only `MercadoPagoProvider`
   // implements this (its real `/v1/payments/search?external_reference=`

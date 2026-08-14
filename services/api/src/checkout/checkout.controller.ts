@@ -1,4 +1,16 @@
-import { Body, Controller, Get, HttpException, Inject, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpException,
+  Inject,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { Response } from 'express';
 import { Prisma, tenantDb } from '@ventia/db';
 import { checkoutAddressSchema, DEPARTAMENTOS, type CheckoutAddressInput } from '@ventia/core';
@@ -101,6 +113,29 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
     shippingMethodId: b.shippingMethodId as string,
     paymentMethod: b.paymentMethod as 'cod' | PaymentProviderId,
   };
+}
+
+/** Hand-rolled shape validation for the provider-ref-hint body, same
+ * rationale (and same `VALIDATION_FAILED` + `details` response shape) as
+ * `parseCheckoutBody` above: this package avoids a direct `zod` dependency
+ * (see catalog/parse.ts's `ParsableSchema` doc comment), and unlike
+ * `checkoutAddressSchema` there is no pre-built @ventia/core schema for this
+ * one-field body to borrow.
+ *
+ * Trimmed before storing: a browser round trip can easily append whitespace
+ * to a query param, and a `providerRef` with a stray space would be fed
+ * verbatim into a gateway URL path later and simply 404 there. A body whose
+ * `providerRef` is missing, not a string, empty, or whitespace-only is a 400
+ * rather than a silently-ignored no-op, so a broken caller is visible. */
+function parseProviderRefHintBody(body: unknown): { providerRef: string } {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (typeof b.providerRef !== 'string' || b.providerRef.trim().length === 0) {
+    throw new HttpException(
+      { error: 'VALIDATION_FAILED', details: { providerRef: 'providerRef es requerido' } },
+      400,
+    );
+  }
+  return { providerRef: b.providerRef.trim() };
 }
 
 @Controller('v1/storefront/checkout')
@@ -222,6 +257,90 @@ export class CheckoutController {
       shippingCiudad,
       shippingDepartamento,
     };
+  }
+
+  /** Records a gateway transaction id onto `Order.providerRef` as a
+   * RECONCILIATION HINT (P3c, design doc decision 2's second/third bullets).
+   * Called by the storefront's post-payment bridge pages — Wompi's
+   * `/pago/wompi-retorno/:orderNumber` return page and (later) ePayco's
+   * `/pago/epayco` widget hook — one narrow endpoint, two callers.
+   *
+   * ## Why this is UNAUTHENTICATED on purpose, and why that is safe
+   *
+   * No `CartCookieGuard` (only the class-level `PublicTenantGuard`): by the
+   * time the shopper's browser comes back from the gateway, checkout has
+   * already cleared `ventia_cart` and there is no session of any kind — the
+   * caller is an anonymous browser holding only an order number. So anyone
+   * who can guess an order number can PATCH any string onto that order's
+   * `providerRef`.
+   *
+   * **That is safe ONLY because the value stored here is never trusted on
+   * its own.** It is exclusively an input to a LATER, AUTHENTICATED call to
+   * the gateway's own status API, and the reconciliation worker (P3c Task 4)
+   * MUST verify that call's response binds back to THIS order — i.e.
+   * `result.reference === String(order.number)` (and, where the provider
+   * reliably reports it, `result.amountCents === order.totalCents`) — BEFORE
+   * ever calling `markPaid`/`markFailed`. See `TransactionStatusResult` in
+   * packages/payments/src/index.ts, which exists specifically to carry that
+   * binding, and its doc comment for the concrete attack it closes.
+   *
+   * **Do not "optimize away" that binding check.** Without it, a shopper
+   * holding ONE real, genuinely-PAID transaction id (their own past
+   * purchase) could PATCH it onto a DIFFERENT, still-`PENDING` order; the
+   * worker would ask the gateway "is transaction X paid?", get a truthful
+   * "yes", and settle the WRONG order. Free-order fraud, no guessing
+   * required. The already-shipped webhook path
+   * (`payments/webhooks.controller.ts`) doesn't have this problem because a
+   * gateway signature cryptographically binds reference+amount+status
+   * together and the order is looked up BY that verified reference; this
+   * by-id path needs the equivalent binding done explicitly.
+   *
+   * Correspondingly, this endpoint writes `Order.providerRef` and NOTHING
+   * else — never `paymentStatus`/`status`. It cannot move an order's state
+   * one inch on its own, which is what keeps its blast radius at "an
+   * attacker can make an order un-reconcilable" (a denial of convenience
+   * that falls through to the existing stock-reservation expiry worker)
+   * rather than "an attacker can mark an order paid".
+   *
+   * The write is unconditional — an existing, different `providerRef` is
+   * overwritten rather than protected (design doc decision 2): a later,
+   * more-authoritative source (e.g. a real webhook that already ran) should
+   * win, and since every source is re-verified against the gateway anyway,
+   * guarding on "only if null" would buy nothing and would let a stale value
+   * pin an order into permanent unreconcilability. */
+  @Patch(':orderNumber/provider-ref-hint')
+  async providerRefHint(
+    @StorefrontTenantId() tenantId: string,
+    @Param('orderNumber') orderNumberParam: string,
+    @Body() body: unknown,
+  ): Promise<{ ok: true }> {
+    const { providerRef } = parseProviderRefHintBody(body);
+
+    // Same NaN guard, and the same fold-into-404, as `confirmation` above —
+    // see that method's comment for why this branch is load-bearing rather
+    // than defensive: Prisma's query engine REJECTS a literal `NaN`
+    // where-value with a PrismaClientValidationError instead of matching
+    // zero rows, which would otherwise surface as an uncaught 500.
+    const orderNumber = parseInt(orderNumberParam, 10);
+    if (!Number.isInteger(orderNumber)) {
+      throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
+    }
+
+    // `updateMany` rather than findFirst-then-update: one round trip, and
+    // its `count` is exactly the "did this order exist for this tenant"
+    // answer the 404 needs. The tenant-scoped client AND-scopes this
+    // `where` with `tenantId` on top of RLS (see packages/db's
+    // tenant-client.ts), so an order number belonging to another tenant
+    // matches nothing here and 404s rather than being written.
+    const { count } = await tenantDb(tenantId).order.updateMany({
+      where: { tenantId, number: orderNumber },
+      data: { providerRef },
+    });
+    if (count === 0) {
+      throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
+    }
+
+    return { ok: true };
   }
 }
 

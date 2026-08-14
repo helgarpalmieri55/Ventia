@@ -6,7 +6,9 @@ import type {
   PaymentProvider,
   RawRequest,
   TenantProviderConfig,
+  TransactionStatusResult,
 } from './index.js';
+import { resolveStorefrontBase } from './storefront-base.js';
 
 // --- Facts below are cited in the Task 2 report as verified-against-real-docs
 // vs. inferred. Summary (see full citations in the commit body / task
@@ -36,6 +38,43 @@ const SANDBOX_API_BASE = 'https://sandbox.wompi.co/v1';
  * ever wired through this same adapter, this constant needs to become a real
  * parameter. */
 const CHECKOUT_CURRENCY = 'COP';
+
+/** Builds the `redirect-url` Wompi sends the shopper's browser back to after
+ * checkout (P3c Task 2, design decision 2's second bullet).
+ *
+ * ## Why the order number is in the PATH and NOT a query param
+ *
+ * Wompi appends `?id={transactionId}` to whatever `redirect-url` it is given
+ * (verified on docs.wompi.co "Widget & Checkout Web", Step 4: given
+ * `https://mystore.com.co/payments/result`, the shopper returns to
+ * `https://mystore.com.co/payments/result?id=01-1531231271-19365`). Every
+ * example Wompi documents appends onto a URL with NO existing query string,
+ * and nothing in the docs says whether it checks for an existing `?` and
+ * switches to `&`. So a `redirect-url` of `.../wompi-retorno?orderNumber=123`
+ * could plausibly come back as `.../wompi-retorno?orderNumber=123?id=abc` —
+ * which parses as ONE param whose value is the string `"123?id=abc"`,
+ * silently breaking BOTH values at once and taking the whole return-capture
+ * mechanism with it.
+ *
+ * Putting the order number in a path SEGMENT removes the ambiguity entirely
+ * instead of betting on undocumented behavior: whatever Wompi appends, the
+ * path is already terminated, so `id` is the only query param that can ever
+ * exist here and both values stay independently extractable. The storefront
+ * route that receives this is
+ * `apps/storefront/app/pago/wompi-retorno/[orderNumber]/page.tsx`; the
+ * `test/wompi.test.ts` block that simulates Wompi's own append is the
+ * regression test for exactly this reasoning.
+ *
+ * Per Wompi's own explicit warning on that same docs page ("Do not use the
+ * redirection as a validation method of your transactions, only for
+ * informative purposes for your users"), the transaction id that comes back
+ * this way is NEVER proof of payment. It is only a HINT telling reconciliation
+ * WHICH transaction to look up through Wompi's own authenticated API — whose
+ * response's `reference`/`amount_in_cents` must then be matched against the
+ * order (see `getTransactionStatus` below and `TransactionStatusResult`). */
+function buildRedirectUrl(orderNumber: string): string {
+  return `${resolveStorefrontBase()}/pago/wompi-retorno/${encodeURIComponent(orderNumber)}`;
+}
 
 function sha256Hex(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
@@ -128,10 +167,20 @@ function requireSecret(cfg: TenantProviderConfig, field: 'integritySecret' | 'ev
  *    say the properties array can vary per event/over time.
  *  - `GET /transactions/:id` needs `Authorization: Bearer <publicKey>` (the
  *    *public* key, not the private key) and returns `{ data: { status, ... } }`
- *    — verified for the auth scheme; the exact response envelope shape came
- *    from a search-engine-summarized doc excerpt rather than a page this
- *    task fetched and read directly, so it's lower-confidence — flagged for
- *    reviewer double-check against a real sandbox response before shipping.
+ *    — verified for the auth scheme; the exact response envelope shape
+ *    originally came from a search-engine-summarized doc excerpt rather than
+ *    a directly-read page, so it was flagged lower-confidence here.
+ *    **RESOLVED in P3c Task 2**: the raw
+ *    `docs.wompi.co/en/docs/colombia/transacciones/` page was fetched and
+ *    read directly this task, and its verbatim "Check transaction status"
+ *    response example confirms the `{ data: { id, reference, status,
+ *    amount_in_cents, currency, payment_method_type, status_message } }`
+ *    envelope — see `getTransactionStatus`'s own doc comment for the quoted
+ *    example and what it means for the order-binding fields.
+ *  - `redirect-url` is a real, OPTIONAL Web Checkout param and Wompi appends
+ *    `?id={transactionId}` to it on return — verified this task by reading
+ *    `docs.wompi.co/en/docs/colombia/widget-checkout-web/` Step 4 + its
+ *    optional-parameters list directly. See `buildRedirectUrl` below.
  */
 export class WompiProvider implements PaymentProvider {
   readonly id = 'wompi' as const;
@@ -159,6 +208,13 @@ export class WompiProvider implements PaymentProvider {
       'amount-in-cents': String(amountInCents),
       reference,
       'signature:integrity': signature,
+      // P3c Task 2: optional per Wompi's docs, and deliberately added AFTER
+      // the signature is computed above — Wompi's real integrity formula is
+      // SHA256(reference + amountInCents + currency + integritySecret) and
+      // has no redirect-url term, so this addition cannot and does not
+      // change any previously-produced signature. See buildRedirectUrl's doc
+      // comment for why the order number rides in the path, not a query param.
+      'redirect-url': buildRedirectUrl(reference),
     });
 
     return { redirectUrl: `${CHECKOUT_URL}?${params.toString()}` };
@@ -290,24 +346,64 @@ export class WompiProvider implements PaymentProvider {
   /** Calls Wompi's real transaction-status endpoint, `GET
    * /transactions/:id`, authenticated with the tenant's *public* key as a
    * Bearer token (verified: this lookup is intentionally public-readable by
-   * design in Wompi's API, it does not need the private key). */
+   * design in Wompi's API, it does not need the private key).
+   *
+   * ## Order-binding fields (`reference`/`amountCents`), P3c Task 2
+   *
+   * **HIGH confidence, verified this task by fetching the raw
+   * docs.wompi.co page rather than a search-engine summary** — which also
+   * settles the class doc comment's own long-standing caveat that this
+   * endpoint's response envelope had only ever been read second-hand.
+   * `docs.wompi.co/en/docs/colombia/transacciones/` ("Check transaction
+   * status") documents this exact call and shows its verbatim response
+   * example:
+   *
+   * ```json
+   * { "data": { "id": "1292-1602113476-10985", "reference": "ORDER-2024-001",
+   *   "status": "APPROVED", "amount_in_cents": 50000, "currency": "COP",
+   *   "payment_method_type": "CARD", "status_message": "Transaction approved" } }
+   * ```
+   *
+   * So `data.reference` and `data.amount_in_cents` sit on the SAME object as
+   * `data.status` — corroborated independently by this adapter's own
+   * `verifyAndParseWebhook`, which already reads `transaction.reference` and
+   * `transaction.amount_in_cents` off Wompi's transaction object on the
+   * webhook side. `reference` is the exact string `createCheckoutSession`
+   * sent as `reference: order.orderNumber`, and `amount_in_cents` is already
+   * in CENTS (Wompi's native unit — no conversion, unlike Mercado Pago's and
+   * ePayco's peso-denominated amounts).
+   *
+   * Both are read defensively and left `undefined` if absent or wrong-typed,
+   * never coerced: `status` is the only field this method requires. That
+   * matters for `PaymentsService.testConnection`, whose whole job is to make
+   * a deliberately-bogus lookup and report only whether the call itself
+   * worked. */
   async getTransactionStatus(
     providerRef: string,
     cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
-  ): Promise<NormalizedStatus> {
+  ): Promise<TransactionStatusResult> {
     const res = await fetchImpl(`${this.apiBase(cfg)}/transactions/${encodeURIComponent(providerRef)}`, {
       headers: { Authorization: `Bearer ${cfg.publicKey}` },
     });
     if (!res.ok) {
       throw new Error(`wompi getTransactionStatus: HTTP ${res.status}`);
     }
-    const body = (await res.json()) as { data?: { status?: unknown } };
+    const body = (await res.json()) as {
+      data?: { status?: unknown; reference?: unknown; amount_in_cents?: unknown };
+    };
     const status = body.data?.status;
     if (typeof status !== 'string') {
       throw new Error('wompi getTransactionStatus: malformed response (missing data.status)');
     }
-    return mapStatus(status);
+    const rawReference = body.data?.reference;
+    const rawAmount = body.data?.amount_in_cents;
+    return {
+      status: mapStatus(status),
+      reference: typeof rawReference === 'string' && rawReference.length > 0 ? rawReference : undefined,
+      // Already cents (Wompi's own unit) — passed through, not scaled.
+      amountCents: typeof rawAmount === 'number' && Number.isFinite(rawAmount) ? rawAmount : undefined,
+    };
   }
 
   // `refund` deliberately left unimplemented: P3a's design doc explicitly

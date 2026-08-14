@@ -359,10 +359,75 @@ describe('MercadoPagoProvider.getTransactionStatus', () => {
         }),
       );
 
-      const status = await provider.getTransactionStatus('42', cfg, fetchImpl as unknown as typeof fetch);
-      expect(status).toBe(expected);
+      const result = await provider.getTransactionStatus('42', cfg, fetchImpl as unknown as typeof fetch);
+      expect(result.status).toBe(expected);
     },
   );
+
+  // --- P3c Task 2 (requirement 1): the ORDER-BINDING fields. Both
+  // `external_reference` and `transaction_amount` are declared on the
+  // official Mercado Pago Node SDK's own compiled `PaymentResponse` type for
+  // this exact resource — see the adapter's module doc comment.
+  it("returns MP's own external_reference and transaction_amount (pesos -> cents) alongside the status", async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: 42,
+          status: 'approved',
+          external_reference: '1042',
+          transaction_amount: 49900,
+          currency_id: 'COP',
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await provider.getTransactionStatus('42', cfg, fetchImpl as unknown as typeof fetch);
+
+    // MAJOR units in (49,900 pesos), cents out (4,990,000) — the same
+    // direction `verifyAndParseWebhook` already converts, and the inverse of
+    // `createCheckoutSession`'s `unit_price: totalCents / 100`. Getting this
+    // backwards would make every amount check 10,000x off.
+    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000 });
+  });
+
+  it('rounds a fractional transaction_amount to whole cents rather than emitting a float', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ id: 42, status: 'approved', external_reference: '7', transaction_amount: 75.56 }),
+        { status: 200 },
+      ),
+    );
+    const result = await provider.getTransactionStatus('42', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result.amountCents).toBe(7556);
+    expect(Number.isInteger(result.amountCents)).toBe(true);
+  });
+
+  it('leaves reference/amountCents undefined (rather than throwing) when the payment carries neither — only `status` is required', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 42, status: 'rejected' }), { status: 200 }),
+    );
+    const result = await provider.getTransactionStatus('42', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result.status).toBe('FAILED');
+    expect(result.reference).toBeUndefined();
+    expect(result.amountCents).toBeUndefined();
+  });
+
+  it('ignores a non-string external_reference / non-number transaction_amount rather than coercing them', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ id: 42, status: 'approved', external_reference: 1042, transaction_amount: '49900' }),
+        { status: 200 },
+      ),
+    );
+    const result = await provider.getTransactionStatus('42', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result.reference).toBeUndefined();
+    expect(result.amountCents).toBeUndefined();
+  });
 
   it('uses Bearer privateKey (not publicKey) against the real payment-lookup URL', async () => {
     const provider = new MercadoPagoProvider();

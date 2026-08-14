@@ -6,6 +6,7 @@ import type {
   PaymentProvider,
   RawRequest,
   TenantProviderConfig,
+  TransactionStatusResult,
 } from './index.js';
 
 // --- Facts below are cited in the Task 2 report as verified-against-real-docs
@@ -462,23 +463,67 @@ export class MercadoPagoProvider implements PaymentProvider {
    * Token) as a Bearer token — unlike Wompi, where the equivalent lookup
    * intentionally uses the public key. Shares `mapStatus` with
    * `verifyAndParseWebhook` (same shape as `wompi.ts`'s single `mapStatus`,
-   * per the plan). */
+   * per the plan).
+   *
+   * ## Order-binding fields (`reference`/`amountCents`), P3c Task 2
+   *
+   * **HIGH confidence.** Both come off the SAME payment resource this call
+   * already reads, and both were re-verified this task by re-fetching the
+   * official Mercado Pago Node SDK's own compiled response type,
+   * `unpkg.com/mercadopago/dist/clients/payment/commonTypes.d.ts` (the same
+   * source the class doc comment above already cites, since MP's interactive
+   * API-reference page still 404s on every locale variant). Its
+   * `PaymentResponse` declares, verbatim:
+   *  - `external_reference?: string` — "Integrator-supplied external
+   *    reference for reconciliation", i.e. exactly the value
+   *    `createCheckoutSession` sends as `external_reference:
+   *    order.orderNumber`, and exactly what `verifyAndParseWebhook` already
+   *    reads as this event's `reference`.
+   *  - `transaction_amount?: number` — "Gross amount of the transaction in
+   *    the specified currency".
+   *
+   * **UNITS — get this backwards and every amount check is 10,000x off.**
+   * `transaction_amount` is a MAJOR-unit (pesos) decimal, the same
+   * convention as `unit_price` on a preference (see the class doc comment's
+   * verified note: real MP examples show fractional peso values like `75.56`
+   * as `unit_price`, nonsensical as cents). This codebase's own unit is
+   * CENTS. So the conversion here MULTIPLIES by 100 — the inverse of
+   * `createCheckoutSession`'s `unit_price: order.totalCents / 100`, and
+   * identical to what `verifyAndParseWebhook` already does with this very
+   * field (`Math.round(payment.transaction_amount * 100)`).
+   *
+   * Both fields are optional on MP's own type, so both are read defensively
+   * and left `undefined` when absent or wrong-typed rather than coerced.
+   * Only `status` is required — which is also what keeps
+   * `PaymentsService.testConnection`'s deliberately-bogus lookup working. */
   async getTransactionStatus(
     providerRef: string,
     cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
-  ): Promise<NormalizedStatus> {
+  ): Promise<TransactionStatusResult> {
     const res = await fetchImpl(`${API_BASE}/v1/payments/${encodeURIComponent(providerRef)}`, {
       headers: { Authorization: `Bearer ${cfg.privateKey}` },
     });
     if (!res.ok) {
       throw new Error(`mercadopago getTransactionStatus: HTTP ${res.status}`);
     }
-    const body = (await res.json()) as { status?: unknown };
+    const body = (await res.json()) as {
+      status?: unknown;
+      external_reference?: unknown;
+      transaction_amount?: unknown;
+    };
     if (typeof body.status !== 'string') {
       throw new Error('mercadopago getTransactionStatus: malformed response (missing status)');
     }
-    return mapStatus(body.status);
+    const rawReference = body.external_reference;
+    const rawAmount = body.transaction_amount;
+    return {
+      status: mapStatus(body.status),
+      reference: typeof rawReference === 'string' && rawReference.length > 0 ? rawReference : undefined,
+      // Pesos in, cents out — see this method's doc comment on units.
+      amountCents:
+        typeof rawAmount === 'number' && Number.isFinite(rawAmount) ? Math.round(rawAmount * 100) : undefined,
+    };
   }
 
   /** Calls Mercado Pago's real `GET /v1/payments/search?external_reference=`

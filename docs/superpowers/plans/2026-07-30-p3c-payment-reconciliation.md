@@ -63,60 +63,127 @@ Order.providerRef column and Mercado Pago's searchByReference`.
 
 ---
 
-### Task 2: Shared provider-ref-hint endpoint + Wompi return-capture
+### Task 2: Order-bound `getTransactionStatus` + shared provider-ref-hint endpoint + Wompi return-capture
 
 **Files:**
+- Modify: `packages/payments/src/index.ts` — **widen `getTransactionStatus` so a
+  status can be BOUND to a specific order.** It currently returns a BARE
+  `NormalizedStatus` (no reference, no amount), which is unsafe for Task 4's
+  reconciliation worker: since `Order.providerRef` is settable via the deliberately
+  unauthenticated hint endpoint below, a shopper holding ONE real, genuinely-PAID
+  transaction id (their own past purchase) could `PATCH` it onto a DIFFERENT
+  `PENDING` order; the worker would ask the gateway "is transaction X paid?", get a
+  truthful "yes", and settle the WRONG order — free-order fraud, no guessing
+  required. The shipped webhook path doesn't have this problem because a gateway
+  signature cryptographically binds reference+amount+status together and the order is
+  looked up BY that verified reference (`payments/webhooks.controller.ts`); the by-id
+  path needs the equivalent binding made explicit:
+  ```ts
+  export interface TransactionStatusResult {
+    status: NormalizedStatus;
+    reference?: string;      // the gateway's OWN record of which merchant reference this transaction is for
+    amountCents?: number;    // the gateway's OWN record of the amount
+  }
+  getTransactionStatus(providerRef: string, cfg: TenantProviderConfig): Promise<TransactionStatusResult>;
+  ```
+  For each adapter, determine whether its EXISTING status-lookup response actually
+  carries reference/amount, verify against real docs rather than assuming, populate
+  only what's genuinely available, and document per-provider — in code comments —
+  exactly which fields are populated and at what confidence. Never invent a value: a
+  missing binding must stay `undefined` (which Task 4 treats as "cannot reconcile"),
+  because a fabricated one is strictly worse than none.
+  `services/api/src/payments/payments.service.ts`'s `testConnection` (the only
+  existing caller — it discards the return value entirely) must keep working
+  unchanged; confirm that by running its tests, don't assume it.
 - Modify: `services/api/src/checkout/checkout.controller.ts` (or a small new
   controller in the same module — implementer's call, matching this file's existing
   route-naming conventions): a new endpoint, e.g.
   `PATCH /v1/storefront/checkout/:orderNumber/provider-ref-hint`, guarded by the
-  existing `PublicTenantGuard` only (this is a public, unauthenticated hint — see
-  design doc decision 4's trust-level note). Body: `{providerRef: string}`. Looks up
-  the order by `(tenantId, number)`, writes `Order.providerRef` ONLY — never touches
-  `paymentStatus`/`status`. A nonexistent order number → `404 NOT_FOUND` (same
-  convention as every other storefront lookup-by-number endpoint in this file); an
-  order that already has a DIFFERENT non-null `providerRef` → overwrite is fine (a
-  later, more-authoritative source — e.g. a real webhook that already ran — should
-  win; write unconditionally, don't guard on "only if null", since this hint is
-  advisory either way and the reconciliation job re-verifies via the gateway's own
-  API regardless of where the value came from).
+  existing `PublicTenantGuard` only, NOT `CartCookieGuard` (this is a public,
+  unauthenticated hint — see design doc decision 4's trust-level note). Body:
+  `{providerRef: string}`, hand-rolled validation matching this file's existing
+  `parseCheckoutBody` style (no zod in this package — see `catalog/parse.ts`'s doc
+  comment for why), `400 VALIDATION_FAILED` on missing/empty/non-string. Looks up
+  the order by `(tenantId, number)` using the SAME `parseInt` + `Number.isInteger`
+  NaN-guard the existing `confirmacion/:orderNumber` route uses (that guard exists
+  because Prisma's query engine THROWS on a literal `NaN` where-value rather than
+  matching zero rows); malformed or nonexistent → the same `404 ORDER_NOT_FOUND`
+  that route returns. Writes `Order.providerRef` ONLY — never touches
+  `paymentStatus`/`status` — and overwrites unconditionally (a later,
+  more-authoritative source — e.g. a real webhook that already ran — should win;
+  don't guard on "only if null", since this hint is advisory either way and the
+  reconciliation job re-verifies via the gateway's own API regardless of where the
+  value came from). Returns `{ok: true}`. **Write a comment at the endpoint saying
+  that being unauthenticated is safe ONLY because of the binding above** — the value
+  is never trusted on its own, only fed into a later authenticated gateway call whose
+  response must then match the order's own reference — so nobody later "optimizes
+  away" the binding check.
 - Modify: `packages/payments/src/wompi.ts` — `createCheckoutSession` adds
-  `redirect-url` to its built `params` (design decision 2, second bullet), pointing at
-  a new storefront route (see below) with the order number carried as a query param —
-  mirror `epayco.ts`'s existing `resolveStorefrontBase()` pattern EXACTLY (same
-  `STOREFRONT_BASE_ENV_VAR`-style env var — check whether to reuse ePayco's literal
-  `EPAYCO_STOREFRONT_BASE_URL` or add a provider-neutral one; given this same
-  per-tenant-domain gap affects Wompi identically to how it already affects ePayco
-  [see that file's own doc comment on why it's a known, disclosed, cross-provider
-  limitation, not something to silently fix differently per adapter], a single shared
-  `PAYMENTS_STOREFRONT_BASE_URL` env var used by BOTH adapters is cleaner than two
-  near-identical provider-specific ones — rename ePayco's if you do this, and update
-  its own doc comment to say so).
-- Create: `apps/storefront/app/pago/wompi-retorno/page.tsx` (or similar path —
-  implementer's call) — mirrors `apps/storefront/app/pago/epayco/page.tsx`'s
-  `useSearchParams()` + `Suspense` shape (read that file in full first): reads `?id=`
-  (Wompi's transaction id) and `?orderNumber=`, `PATCH`es the new endpoint from above
-  with `{providerRef: id}` (fire-and-forget is fine — this is a best-effort hint, a
-  failed PATCH here must never block the shopper from reaching their confirmation
-  page), then redirects to `/checkout/confirmacion/:orderNumber` exactly like the
-  ePayco bridge page's `goToConfirmation` does. No `id`/`orderNumber` present (a
-  malformed/direct visit) → same graceful-degradation posture as the ePayco bridge's
-  own missing-param branches (a clear message + a link back to the cart, not a crash).
-- Test: `services/api/test/checkout.test.ts` (or a new file) — the new hint endpoint:
-  writes `providerRef`, never touches `paymentStatus`, 404s for a nonexistent order
-  number, overwrites an existing value. `apps/storefront/test/` — a new test file for
-  the Wompi return page mirroring however the ePayco bridge page's own tests (if any
-  exist — check) are structured, or a `lib/`-level test for whatever pure-function
-  logic you extract from the page (matching this app's established
-  pure-helper-over-component-test convention — see P2b Task 7's precedent).
+  `redirect-url` to its built `params` (design decision 2, second bullet):
+  `${resolveStorefrontBase()}/pago/wompi-retorno/${order.orderNumber}`, with the order
+  number in the **PATH** and **NO query string**. This supersedes an earlier draft of
+  this plan that put the order number in a query param. Reason: Wompi appends
+  `?id={transactionId}` to whatever `redirect-url` it is given, its docs only ever
+  show that appended onto a URL with NO existing query string, and nothing documents
+  whether it checks for an existing `?`. So a `redirect-url` of
+  `.../wompi-retorno?orderNumber=123` could come back as
+  `.../wompi-retorno?orderNumber=123?id=abc`, which parses as ONE param whose value
+  is `"123?id=abc"` — silently breaking the whole mechanism. The path shape removes
+  the ambiguity entirely rather than betting on undocumented behavior.
+- Modify: extract the storefront-base resolution into a shared
+  `packages/payments/src/storefront-base.ts` reading a provider-neutral
+  `PAYMENTS_STOREFRONT_BASE_URL`, imported by BOTH adapters — `epayco.ts` currently
+  owns a private `STOREFRONT_BASE_ENV_VAR`/`resolveStorefrontBase()` pair reading
+  `EPAYCO_STOREFRONT_BASE_URL`, and this same per-tenant-domain gap affects Wompi
+  identically. **ePayco's redirect is already live/shipped, so this rename is the
+  single biggest regression risk in this task**: keep that doc comment's "this
+  single-global-URL mechanism is a real, load-bearing, multi-tenant-wrong limitation,
+  not a convenience shortcut" warning fully intact (just update the env var name it
+  cites), and write tests proving ePayco's own redirect URL construction is
+  byte-identical after the rename. Update `.env.example`, and grep the whole repo
+  (docs, README, plan docs) for any other `EPAYCO_STOREFRONT_BASE_URL` reference.
+- Create: `apps/storefront/app/pago/wompi-retorno/[orderNumber]/page.tsx` (a dynamic
+  route segment) — mirrors `apps/storefront/app/pago/epayco/page.tsx`'s `'use client'`
+  + `useSearchParams()` + `Suspense` shape and its graceful-degradation branches (read
+  that file in full first). Reads `orderNumber` from the route params (see
+  `app/productos/[slug]/page.tsx` for this Next.js version's `params: Promise<{...}>`
+  convention) and `id` from the query string (now the only query param). Extract the
+  pure decision logic into `apps/storefront/lib/wompi-retorno.ts` and unit-test THAT
+  rather than the component — this app has no React Testing Library, and the
+  pure-helper-over-component-test convention is established here (P2b Task 7's
+  precedent). Behavior: both `orderNumber` and `id` present → fire the hint `PATCH`
+  **without awaiting it** and navigate to `/checkout/confirmacion/:orderNumber`
+  **immediately** (a slow or hanging hint endpoint must never delay the shopper's
+  redirect — do NOT sequence the navigation after the PATCH settles, not even via
+  `.finally()`; the PATCH is a truly independent side effect with its own `.catch()`);
+  `orderNumber` present but no `id` → navigate, skip the PATCH entirely (don't send an
+  empty `providerRef` that would just 400); no `orderNumber` → a clear error message +
+  a link back to `/carrito`, same as the ePayco bridge's own missing-param branch.
+  You'll likely also need a client-side helper in `apps/storefront/lib/checkout-api.ts`
+  and a `PATCH` handler on the storefront's checkout proxy route
+  (`app/api/checkout/[[...path]]/route.ts` — check whether it exports one; the cart
+  proxy is the reference implementation for forwarding method/body/cookies).
+- Test: `packages/payments/test/` — all 3 adapters' `getTransactionStatus` returning
+  the new shape (mocked fetch, per-provider field availability, including that a
+  missing/wrong-typed field stays `undefined` rather than being coerced); ePayco's
+  redirect URL byte-identical after the env rename (regression); Wompi's `redirect-url`
+  now path-based; and a test proving that simulating Wompi's `?id=` append onto the new
+  path-based URL yields BOTH values extractable (the regression test for this task's
+  whole rationale). `services/api/test/` — `testConnection` still works; the hint
+  endpoint (writes only `providerRef`, leaves `paymentStatus`/`status` untouched, 404
+  on nonexistent AND on malformed order number, 400 on empty body, overwrites an
+  existing value, no cart cookie needed, cross-tenant isolation).
+  `apps/storefront/test/` — the extracted pure logic + the client helper.
 
-**Steps:** RED → implement → `pnpm --filter @ventia/api typecheck && lint`,
-`pnpm --filter @ventia/storefront typecheck && lint && build` → manual check: drive a
-`wompi` checkout with a well-formed fake `redirect-url` round trip (simulate the
-browser return by hitting the new endpoint directly with curl, since a real Wompi
-sandbox redirect can't be produced without a live account) and confirm
-`Order.providerRef` ends up populated → commit `feat: capture Wompi's redirect-return
-transaction id as a reconciliation hint`.
+**Steps:** RED → implement → `pnpm --filter @ventia/payments test && build && typecheck`,
+`pnpm --filter @ventia/api test && typecheck && lint`,
+`pnpm --filter @ventia/storefront test && typecheck && lint && build` → full monorepo
+gate → manual check against the real dev stack: seed an order via Prisma, curl the new
+endpoint (simulating the browser return, since a real Wompi sandbox redirect can't be
+produced without a live account), confirm via psql that `providerRef` is set and
+`paymentStatus`/`status` are untouched, and exercise the 404/400 paths → commit
+`feat: add provider-ref-hint endpoint and Wompi return-capture with order-bound status
+checks`.
 
 ---
 
@@ -176,8 +243,51 @@ ref_payco` — whichever is honest).
   - A thrown error from step 1/2 (network/gateway failure): log, skip this order this
     run (design decision 6) — never treat a failed reconciliation ATTEMPT as a FAILED
     payment.
-  - Resolved `PAID` → `paymentsService.markPaid(tenantId, orderId, provider,
-    providerRef)`. Resolved `FAILED`/`EXPIRED` → `paymentsService.markFailed(...)`.
+
+  - ### ⚠️ MANDATORY: verify the transaction is BOUND to this order before settling it
+
+    **Before EVER calling `markPaid`/`markFailed`, the worker MUST check that the
+    gateway's own response is about THIS order:**
+
+    ```ts
+    if (result.reference !== String(order.number)) { /* cannot reconcile — log, leave alone */ }
+    ```
+
+    plus, where `amountCents` is reliably available for that provider,
+    `result.amountCents === order.totalCents`.
+
+    A mismatch, **or a missing/unverifiable `reference`** (`undefined` — which is
+    exactly what every adapter emits rather than fabricating a value it couldn't read
+    from the gateway), means **"cannot reconcile this order automatically"**: log it
+    and leave the order **completely alone** — the same bucket as the already-planned
+    "no API path exists" case in step 3. **Never settle it either way** — not
+    `markPaid`, not `markFailed`. Such an order simply falls through to the existing,
+    unmodified 15-minute stock-reservation expiry worker, exactly as an order with no
+    `providerRef` at all already does.
+
+    **Why this is non-negotiable, and must not be "optimized away" by a later
+    reviewer:** `Order.providerRef` is settable via the deliberately-unauthenticated
+    provider-ref-hint endpoint (Task 2). Without this check, a shopper holding ONE
+    real, genuinely-PAID transaction id — their own past purchase — could `PATCH` it
+    onto a DIFFERENT, still-`PENDING` order; this worker would ask the gateway "is
+    transaction X paid?", get a perfectly truthful **"yes"**, and call `markPaid` on
+    the WRONG order. Free-order fraud, no guessing required. The already-shipped
+    webhook path is immune because a gateway signature cryptographically binds
+    reference+amount+status together and the order is looked up BY that verified
+    reference (`payments/webhooks.controller.ts`); `TransactionStatusResult`
+    (`packages/payments/src/index.ts`, Task 2) exists ONLY to give this by-id path the
+    equivalent binding, and it is worthless if this worker doesn't check it.
+
+    Note the comparison is against `String(order.number)` — the PLAIN string form of
+    the `Order.number` Int column (e.g. `"42"`), never the `VNT-`-prefixed display
+    string, matching `NormalizedPaymentEvent.reference`'s existing documented
+    contract. `searchByReference` (step 2) is already bound by construction — it
+    QUERIES by our own reference — but the result it hands back still flows into the
+    same settle path, so keep the check uniform rather than special-casing it.
+
+  - Resolved `PAID` (**and bound**) → `paymentsService.markPaid(tenantId, orderId,
+    provider, providerRef)`. Resolved `FAILED`/`EXPIRED` (**and bound**) →
+    `paymentsService.markFailed(...)`.
     Resolved `PENDING` (gateway itself still says pending) → no action this run, try
     again next run (will eventually fall through to the existing 15-minute
     stock-expiry worker if the shopper never completes payment — this job never
@@ -205,7 +315,16 @@ ref_payco` — whichever is honest).
   with `paymentProvider: 'mercadopago'` and no `providerRef` → `searchByReference` is
   called and, given a scripted `APPROVED` result, resolves to `PAID`; (e) same shape
   but `paymentProvider: 'wompi'` and no `providerRef` → left completely alone, no
-  crash, no API call attempted; (f) a scripted `getTransactionStatus` that throws →
+  crash, no API call attempted; **(e2) the order-binding safety claim (Task 2's
+  `TransactionStatusResult`)**: a scripted `getTransactionStatus` returning
+  `{status: 'PAID', reference: <SOME OTHER ORDER'S number>}` → the order is left
+  COMPLETELY untouched (`PENDING`/`PENDING`, `stockReservedUntil` intact) and
+  `markPaid` is never called — i.e. reproduce the actual attack (a real, genuinely-PAID
+  transaction id planted on the wrong order through the unauthenticated hint endpoint)
+  and prove it settles nothing; same for `reference: undefined` (an adapter that
+  couldn't read one) → likewise untouched; and, for a provider where `amountCents` is
+  available, a MATCHING `reference` but a MISMATCHED `amountCents` → likewise
+  untouched; (f) a scripted `getTransactionStatus` that throws →
   order left at `PENDING`, no exception escapes the worker's sweep (one bad order
   must never abort processing the rest of the batch — iterate with a try/catch PER
   ORDER, not one try/catch around the whole loop); (g) **the core safety claim from
