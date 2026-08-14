@@ -145,6 +145,11 @@ function buildSignedWebhookPayload(opts: {
   timestamp: number;
   eventsSecret: string;
   properties?: string[];
+  /** `data.transaction.currency`. Defaults to `'COP'` (what a real Colombian
+   * merchant's event carries); pass `null` to omit the field entirely. Note
+   * this value is NOT part of the checksum — Wompi's `signature.properties`
+   * never lists it — which is exactly the point of the currency tests below. */
+  currency?: string | null;
 }) {
   const properties = opts.properties ?? [
     'transaction.id',
@@ -152,13 +157,14 @@ function buildSignedWebhookPayload(opts: {
     'transaction.amount_in_cents',
     'transaction.reference',
   ];
+  const currency = opts.currency === undefined ? 'COP' : opts.currency;
   const data = {
     transaction: {
       id: opts.transactionId,
       status: opts.status,
       amount_in_cents: opts.amountInCents,
       reference: opts.reference,
-      currency: 'COP',
+      ...(currency === null ? {} : { currency }),
     },
   };
   const valuesByPath: Record<string, unknown> = {
@@ -209,6 +215,10 @@ describe('WompiProvider.verifyAndParseWebhook', () => {
       reference: 'ORD-0001',
       status: 'PAID',
       amountCents: 4990000,
+      // Added alongside `amountCents` when the currency term reached the
+      // webhook path — the helper's payload has always carried
+      // `data.transaction.currency: 'COP'`, it was simply never read.
+      currency: 'COP',
     });
   });
 
@@ -344,6 +354,44 @@ describe('WompiProvider.verifyAndParseWebhook', () => {
     });
     const result = await provider.verifyAndParseWebhook(toRawRequest(payload), cfg);
     expect(result.status).toBe(expected);
+  });
+
+  // --- The CURRENCY term on the webhook path. `NormalizedPaymentEvent` had no
+  // currency field at all, so the controller's amount check compared a bare
+  // number: a 250,00-USD transaction satisfied a 250.000-COP order's total
+  // exactly as well as the real thing.
+  it("reports data.transaction.currency so the controller can require COP", async () => {
+    const provider = new WompiProvider();
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-usd',
+      status: 'APPROVED',
+      amountInCents: 25_000,
+      reference: '1042',
+      timestamp: 1700000002,
+      eventsSecret: cfg.eventsSecret!,
+      currency: 'USD',
+    });
+
+    const result = await provider.verifyAndParseWebhook(toRawRequest(payload), cfg);
+
+    expect(result.currency).toBe('USD');
+  });
+
+  it('leaves currency undefined rather than defaulting to COP when the payload omits it', async () => {
+    const provider = new WompiProvider();
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-no-currency',
+      status: 'APPROVED',
+      amountInCents: 25_000,
+      reference: '1042',
+      timestamp: 1700000003,
+      eventsSecret: cfg.eventsSecret!,
+      currency: null,
+    });
+
+    const result = await provider.verifyAndParseWebhook(toRawRequest(payload), cfg);
+
+    expect(result.currency).toBeUndefined();
   });
 });
 

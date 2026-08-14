@@ -131,9 +131,26 @@ const MAX_INT4 = 2_147_483_647;
  * the callers' `ORDER_NOT_FOUND` 404 (rather than a distinct 400) since from
  * the shopper's perspective a malformed order-number URL and a genuinely
  * nonexistent order are the same outcome: "this URL doesn't point at a real
- * order". */
+ * order".
+ *
+ * The test is `/^\d+$/`, NOT `parseInt`. `parseInt` stops at the first
+ * non-digit and returns the prefix it managed to read, so
+ * `/checkout/confirmacion/42abc` answered `200` with order 42's data, and
+ * `' 42'`/`'+42'`/`'42.0'`/`'42e0'` all resolved to that same order too. That
+ * is precisely the coercion class the webhook route deliberately rejects (see
+ * `webhooks.controller.ts`'s reference guard, wave-1 fix 6: `Number()` folding
+ * several spellings onto one order while the idempotency key saw them as
+ * different events). The consequence here is far milder — both routes are
+ * scoped to the resolved tenant, and the confirmation route is read-only and
+ * returns the very order the shopper could have asked for by its plain number
+ * — but the two guards having different notions of "is this an order number"
+ * is a trap for the next reader, and strictness costs nothing: every real
+ * caller (the storefront's own links, and Wompi's `redirect-url` round trip)
+ * only ever produces plain digits. The `MAX_INT4` bound below is unchanged and
+ * still load-bearing for its own reason (see that constant's comment). */
 function parseOrderNumberParam(raw: string): number | null {
-  const orderNumber = parseInt(raw, 10);
+  if (!/^\d+$/.test(raw)) return null;
+  const orderNumber = Number(raw);
   if (!Number.isInteger(orderNumber) || orderNumber < 0 || orderNumber > MAX_INT4) return null;
   return orderNumber;
 }

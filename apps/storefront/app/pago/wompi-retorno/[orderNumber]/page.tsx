@@ -36,18 +36,35 @@ import { decideWompiRetorno } from '../../../../lib/wompi-retorno';
  *
  * It never treats the returned id as proof of anything. Wompi's own docs are
  * explicit: "Do not use the redirection as a validation method of your
- * transactions, only for informative purposes for your users." Payment
- * status is settled ONLY by the signed webhook, or by the reconciliation job
- * re-looking-this-up through Wompi's authenticated API and checking that the
- * transaction's own reference/amount match the order.
+ * transactions, only for informative purposes for your users."
+ *
+ * ## What the hint is actually worth FOR WOMPI today — read before relying on it
+ *
+ * For Wompi, **nothing settles off this hint at all.** P3 wave-2 added a
+ * provenance gate: `Order.providerRefSource` records whether a ref came from a
+ * signature-verified webhook (`'verified'`) or from this deliberately
+ * unauthenticated endpoint (`'hint'`), and
+ * `services/api/src/payments/reconciliation.worker.ts` refuses a by-id lookup
+ * from a hint-sourced ref for any provider whose transaction lookup is not
+ * merchant-account-scoped. Wompi is one of those providers (its lookup
+ * authenticates with the browser-side PUBLIC key; see that file's
+ * `ACCOUNT_SCOPED_LOOKUP_PROVIDERS` for the evidence). So a Wompi order's
+ * payment status is settled ONLY by the signed webhook. This comment used to
+ * say the hint fed "the reconciliation job re-looking-this-up through Wompi's
+ * authenticated API" — true when it was written, false since that gate landed.
+ *
+ * The hint is still sent, and is still worth sending: it lands on the order
+ * (with its `'hint'` provenance) as a support/audit breadcrumb tying a shopper's
+ * order to a real Wompi transaction id, and it is the mechanism a future
+ * merchant-identifier binding — or a Wompi lookup proven to be account-scoped —
+ * would immediately make settle-capable, with no change to this page.
  *
  * **The hint PATCH is fired WITHOUT being awaited, and navigation happens
  * immediately.** Not `await`ed, and deliberately not chained off `.finally()`
  * either: a slow or hanging hint endpoint must never delay the shopper's
- * redirect. Losing a hint costs at most one order's automatic reconciliation
- * (it falls through to the existing stock-reservation expiry worker, exactly
- * as an order with no hint at all already does); stalling here costs every
- * shopper their post-payment experience.
+ * redirect. Losing a hint therefore costs no settlement at all for Wompi today
+ * (only the breadcrumb above); stalling here costs every shopper their
+ * post-payment experience.
  *
  * Mirrors `app/pago/epayco/page.tsx`'s shape (`'use client'` +
  * `useSearchParams()` + a `Suspense` boundary + graceful-degradation

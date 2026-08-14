@@ -2,7 +2,7 @@ import { Controller, HttpCode, HttpException, Inject, Param, Post, Req } from '@
 import type { Request } from 'express';
 import { Prisma, platformDb, tenantDb } from '@ventia/db';
 import type { NormalizedPaymentEvent, PaymentProviderId, RawRequest } from '@ventia/payments';
-import { PROVIDERS } from './provider-registry';
+import { ORDER_CURRENCY, PROVIDERS } from './provider-registry';
 import { PaymentsService } from './payments.service';
 
 /**
@@ -55,7 +55,22 @@ import { PaymentsService } from './payments.service';
  *     delivery legitimately verifies at both endpoints. Under the old global
  *     key, whichever tenant was hit second — INCLUDING the payment's real
  *     owner — had its delivery permanently swallowed.
- *  3. **`processedAt` is checked, not just written (fix 5).** A conflict
+ *  3. **The currency check (wave 3).** The amount check above compares a bare
+ *     number, so a payment of the same number of minor units in another
+ *     currency satisfied it exactly as well as the real one — reproduced live
+ *     with a *signed* ePayco `x_currency_code: 'USD'` and a Wompi
+ *     `data.currency: 'USD'`. `event.currency` must equal `ORDER_CURRENCY`
+ *     before any settle, and a MISSING currency is a rejection, matching what
+ *     `reconciliation.worker.ts`'s `checkOrderBinding` had already required on
+ *     the other settle path since wave 2. The two paths now enforce one rule.
+ *  4. **The `result` string tells the truth (wave 3).** `markPaid`/`markFailed`
+ *     report whether they actually transitioned the order, and this handler
+ *     records what happened rather than what it attempted. A valid `PAID`
+ *     webhook landing on a `CANCELLED`/`EXPIRED` order used to be recorded as
+ *     `'confirmed'` while nothing at all changed — a shopper charged, an order
+ *     gone, and the one operator-facing audit string saying it went fine. It is
+ *     now `'paid_order_not_settleable'` plus the loudest log line in this file.
+ *  5. **`processedAt` is checked, not just written (fix 5).** A conflict
  *     short-circuits ONLY when the existing row was actually processed;
  *     otherwise this handler processes it, because the row is written before
  *     the settle and a settle that throws would otherwise leave a genuinely
@@ -398,9 +413,99 @@ export class WebhooksController {
       return { ok: true };
     }
 
+    // ---- wave 3: the amount is only money once you know its CURRENCY.
+    //
+    // Wave 2 added a currency term to `TransactionStatusResult`/
+    // `ReferenceSearchResult` — the RECONCILIATION path — and its commit
+    // message said the currency "now rides on" the settle paths. It did not
+    // ride on THIS one: `NormalizedPaymentEvent` had no currency field and the
+    // check above compares a bare number, so a payment of the same NUMBER of
+    // minor units in another currency satisfied it exactly as well as the real
+    // one. Reproduced live on two providers: an ePayco confirmation with a
+    // *signed* `x_currency_code: 'USD'` settled a COP order, as did a Wompi
+    // event with `data.currency: 'USD'`.
+    //
+    // Practical exploitability is LOW — all three gateways are COP-only for a
+    // Colombian merchant, so an attacker cannot readily produce a USD
+    // transaction on the tenant's own account — but the two settle paths
+    // disagreeing about what "the amount matches" means is exactly the sort of
+    // gap that becomes real the moment one gateway adds multi-currency support.
+    //
+    // MISSING is a rejection, not a pass, matching `checkOrderBinding`'s rule
+    // for the same term: an adapter emits `undefined` only when it genuinely
+    // could not read a currency, and treating that as COP would be inventing
+    // the very fact under test. It gets its own `result` string because the two
+    // mean different things to an operator — `currency_mismatch` is (at worst)
+    // an attack or a genuinely foreign payment, `currency_unknown` means a
+    // gateway's payload shape changed under us and is a bug to chase.
+    //
+    // Per-adapter strength of this term is documented on
+    // `NormalizedPaymentEvent.currency`: signed for ePayco, authenticated for
+    // Mercado Pago, present-but-UNSIGNED for Wompi (its `signature.properties`
+    // never covers `transaction.currency`). For Wompi this is therefore a
+    // consistency check on honest traffic, not a forgery barrier — the amount
+    // check above remains the load-bearing defence there.
+    //
+    // Response choice is `amount_mismatch`'s, for `amount_mismatch`'s reasons:
+    // 200 + a durable, distinct `result` + a loud log, because no retry could
+    // ever change the outcome and a 4xx only invites retry storms.
+    if (event.currency !== ORDER_CURRENCY) {
+      const result = event.currency === undefined ? 'currency_unknown' : 'currency_mismatch';
+      console.error('[webhooks] verified event currency is not the order currency — refusing to settle', {
+        provider: providerId,
+        tenantId,
+        eventId: event.eventId,
+        reference: event.reference,
+        orderId: order.id,
+        eventCurrency: event.currency,
+        orderCurrency: ORDER_CURRENCY,
+        amountCents: event.amountCents,
+        status: event.status,
+        result,
+      });
+      await markProcessed(result);
+      return { ok: true };
+    }
+
     if (event.status === 'PAID') {
-      await this.paymentsService.markPaid(tenantId, order.id, providerId, event.providerRef);
-      await markProcessed('confirmed');
+      // ---- wave 3: report what actually happened, not what was attempted.
+      //
+      // `markPaid` no-ops outside its `status === 'PENDING'` precondition, and
+      // this branch used to record `'confirmed'` regardless. So a genuine,
+      // fully-verified, amount-matching PAID webhook landing on an order the
+      // 15-minute expiry worker had already CANCELLED/EXPIRED answered 200,
+      // durably recorded `confirmed`, changed nothing and wrote zero
+      // `OrderEvent`s. The shopper has been charged and has no order, and the
+      // one operator-facing string in the system said it was confirmed —
+      // defeating the entire purpose of this column, and hiding precisely the
+      // failure the declined-then-retry work exists to make visible.
+      const settled = await this.paymentsService.markPaid(
+        tenantId,
+        order.id,
+        providerId,
+        event.providerRef,
+      );
+      if (!settled) {
+        // Deliberately the loudest log in this file. This is not an anomaly to
+        // count — it is money taken from a shopper who has nothing to show for
+        // it, and it needs a human. Greppable two ways: this message, and
+        // `SELECT * FROM "WebhookEvent" WHERE result = 'paid_order_not_settleable'`.
+        console.error(
+          '[webhooks] PAID EVENT COULD NOT BE APPLIED — the shopper was charged but the order is no longer settleable; needs manual review',
+          {
+            provider: providerId,
+            tenantId,
+            eventId: event.eventId,
+            reference: event.reference,
+            orderId: order.id,
+            orderStatus: order.status,
+            orderPaymentStatus: order.paymentStatus,
+            amountCents: event.amountCents,
+            providerRef: event.providerRef,
+          },
+        );
+      }
+      await markProcessed(settled ? 'confirmed' : 'paid_order_not_settleable');
     } else if (event.status === 'FAILED') {
       // Design decision (spec + design doc decision 3's neighboring intent):
       // a failed payment ATTEMPT does not cancel the order or touch stock —
@@ -414,8 +519,29 @@ export class WebhooksController {
       // the same order (a shopper retry) was processed after a later
       // attempt's PAID webhook already confirmed it — markFailed's
       // precondition makes that a safe no-op instead.
-      await this.paymentsService.markFailed(tenantId, order.id, providerId, event.providerRef);
-      await markProcessed('failed');
+      const applied = await this.paymentsService.markFailed(
+        tenantId,
+        order.id,
+        providerId,
+        event.providerRef,
+      );
+      if (!applied) {
+        // The benign half of the same honesty fix: a late FAILED event for an
+        // earlier attempt on an order a later attempt already settled (or on a
+        // cancelled one) costs nobody money — `markFailed`'s precondition
+        // refusing it is the CORRECT outcome, and deliberately not widened.
+        // Only the record changes: `'failed'` claimed a transition that never
+        // happened. Logged at a normal level, not the alarm above.
+        console.error('[webhooks] FAILED event applied nothing — the order was no longer in a failable state', {
+          provider: providerId,
+          tenantId,
+          eventId: event.eventId,
+          orderId: order.id,
+          orderStatus: order.status,
+          orderPaymentStatus: order.paymentStatus,
+        });
+      }
+      await markProcessed(applied ? 'failed' : 'failed_not_applied');
     } else {
       // PENDING / EXPIRED: the other two NormalizedStatus values. Wompi's
       // own real transaction vocabulary never actually produces EXPIRED

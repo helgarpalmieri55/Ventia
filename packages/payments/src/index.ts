@@ -69,6 +69,49 @@ export interface NormalizedPaymentEvent {
   reference: string;
   status: NormalizedStatus;
   amountCents: number;
+  /** The gateway's own record of the CURRENCY `amountCents` is denominated in,
+   * as the ISO-4217 alphabetic code the gateway reports it (e.g. `"COP"`).
+   *
+   * ## Why the webhook path needs this too
+   *
+   * P3 wave-2 added a currency term to `TransactionStatusResult` /
+   * `ReferenceSearchResult` — the RECONCILIATION path — and stopped there,
+   * while its commit message claimed the currency "now rides on" the settle
+   * paths generally. It did not ride on this one: `webhooks.controller.ts`
+   * compared `amountCents === order.totalCents` and nothing else, so a
+   * transaction for the same NUMBER of units in another currency satisfied the
+   * check exactly as well as the real one. Reproduced live on two of the three
+   * providers (an ePayco confirmation with a *signed* `x_currency_code: 'USD'`,
+   * and a Wompi event with `data.currency: 'USD'`, each settling a COP order).
+   * The two settle paths now enforce the same rule.
+   *
+   * ## Per-adapter reality — how strong this value actually is
+   *
+   *  - **`epayco` — SIGNED.** `x_currency_code` is the sixth term of ePayco's
+   *    own confirmation-hash formula, so it is bound by the same signature the
+   *    amount is. The adapter reports the signed value and additionally
+   *    requires the (unauthenticated) lookup's own currency not to contradict
+   *    it, exactly as it already does for the amount.
+   *  - **`mercadopago` — AUTHENTICATED.** `currency_id` is read off the same
+   *    `GET /v1/payments/:id` resource `transaction_amount` comes from, fetched
+   *    with the tenant's private access token. As trustworthy as the amount.
+   *  - **`wompi` — PRESENT BUT UNSIGNED.** `data.transaction.currency` is in
+   *    the payload, but Wompi's `signature.properties` never lists it, so —
+   *    unlike the amount, the status and the reference, which this adapter
+   *    requires to be signature-covered — it is forgeable by anyone who can
+   *    craft a payload with a valid checksum for the OTHER fields (see
+   *    `wompi.ts`'s undelimited-concatenation note). For Wompi this is
+   *    therefore a consistency check on honest traffic, NOT a forgery barrier;
+   *    the amount check remains the load-bearing defence there. Documented
+   *    rather than papered over.
+   *
+   * `undefined` when the payload/lookup genuinely doesn't carry it (or doesn't
+   * carry it as a string) — never fabricated, never defaulted to `'COP'`, same
+   * rule as `TransactionStatusResult.currency`. And, as there, callers must
+   * treat `undefined` as "cannot verify", i.e. a REJECTION, not a pass:
+   * `webhooks.controller.ts` records it as its own `currency_unknown` outcome
+   * and settles nothing. */
+  currency?: string;
 }
 
 /** The result of a BY-ID transaction-status lookup (`getTransactionStatus`).

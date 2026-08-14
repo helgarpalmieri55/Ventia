@@ -114,6 +114,11 @@ function buildSignedWebhookPayload(opts: {
   timestamp: number;
   eventsSecret: string;
   properties?: string[];
+  /** `data.transaction.currency`; defaults to `'COP'`, `null` omits the field.
+   * Deliberately NOT part of the checksum — Wompi's `signature.properties`
+   * never lists it, so an attacker can set it freely on an otherwise valid
+   * payload. See the currency describe block below. */
+  currency?: string | null;
 }) {
   const properties = opts.properties ?? [
     'transaction.id',
@@ -121,13 +126,14 @@ function buildSignedWebhookPayload(opts: {
     'transaction.amount_in_cents',
     'transaction.reference',
   ];
+  const currency = opts.currency === undefined ? 'COP' : opts.currency;
   const data = {
     transaction: {
       id: opts.transactionId,
       status: opts.status,
       amount_in_cents: opts.amountInCents,
       reference: opts.reference,
-      currency: 'COP',
+      ...(currency === null ? {} : { currency }),
     },
   };
   const valuesByPath: Record<string, unknown> = {
@@ -272,16 +278,27 @@ async function seedOrderWithProduct(
  * be settled. */
 async function seedOrderWithNumberAndTotal(
   tenantId: string,
-  opts: { number: number; totalCents: number },
+  opts: {
+    number: number;
+    totalCents: number;
+    /** Overridable so the "the order was no longer settleable" tests can seed
+     * the states `markPaid`/`markFailed` refuse to transition from
+     * (CANCELLED/EXPIRED, CONFIRMED/PAID) — every other caller wants the
+     * PENDING/PENDING default. */
+    status?: string;
+    paymentStatus?: string;
+    stockReservedUntil?: Date | null;
+  },
 ): Promise<{ orderId: string }> {
   const order = await prisma.order.create({
     data: {
       tenantId,
       number: opts.number,
-      status: 'PENDING',
-      paymentStatus: 'PENDING',
+      status: opts.status ?? 'PENDING',
+      paymentStatus: opts.paymentStatus ?? 'PENDING',
       paymentProvider: 'wompi',
-      stockReservedUntil: new Date(Date.now() + 15 * 60_000),
+      stockReservedUntil:
+        opts.stockReservedUntil === undefined ? new Date(Date.now() + 15 * 60_000) : opts.stockReservedUntil,
       email: 'comprador@example.com',
       phone: '3000000000',
       shippingAddress: {},
@@ -946,6 +963,289 @@ describe('webhook settlement is bound to the order amount (fix 1)', () => {
   });
 });
 
+describe('webhook settlement is bound to the order CURRENCY (wave 3)', () => {
+  // P3 wave 2 added a currency term to the RECONCILIATION path only, while
+  // claiming the currency "now rides on" the settle paths generally. It did
+  // not ride on this one: `NormalizedPaymentEvent` had no currency field and
+  // this controller compared `amountCents` alone, so a payment of the same
+  // NUMBER of units in another currency satisfied the check exactly as well as
+  // the real one. Both observations below were reproduced live before the fix.
+
+  it('ePayco: a confirmation whose SIGNED x_currency_code is USD settles nothing on a COP order', async () => {
+    // Live observation 1. `x_currency_code` is one of the four fields ePayco's
+    // own hash covers, so this is not even a forgery — a genuine, fully-signed
+    // USD confirmation for the same NUMBER of units settled a COP order.
+    const { tenantId } = await signUpWithTenant('webhooks-epayco-usd@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'epayco', FAKE_EPAYCO_CREDS);
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, { number: 6101, totalCents: 25_000 });
+
+    // 250,00 USD — the same 25.000 minor units the order's total is, and
+    // roughly 4.000x the money. The lookup corroborates reference and amount
+    // and reports no currency of its own, so the adapter passes it through.
+    stubGatewayFetch(() => ({ data: { x_response: 'Aceptada', x_extra1: '6101', x_amount: 250 } }));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await postEpaycoWebhook(tenantId, {
+      xRefPayco: 'ref-epayco-usd-1',
+      xTransactionId: 'txn-epayco-usd-1',
+      xAmount: '250.00',
+      xCurrencyCode: 'USD',
+      xResponse: 'Aceptada',
+      xExtra1: '6101',
+      epaycoCustomerId: FAKE_EPAYCO_CREDS.epaycoCustomerId,
+      eventsSecret: FAKE_EPAYCO_CREDS.eventsSecret,
+    });
+
+    expect(res.status).toBe(200);
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('PENDING');
+    expect(order.paymentStatus).toBe('PENDING');
+
+    const events = await prisma.webhookEvent.findMany({ where: { provider: 'epayco', tenantId } });
+    expect(events).toHaveLength(1);
+    expect(events[0].result).toBe('currency_mismatch');
+    expect(events[0].processedAt).not.toBeNull();
+  });
+
+  it('Wompi: an event whose data.transaction.currency is USD settles nothing on a COP order', async () => {
+    // Live observation 2. Worse than ePayco's case in one respect: Wompi's
+    // `signature.properties` never covers `transaction.currency`, so this
+    // value is FORGEABLE on an otherwise perfectly valid event — the helper
+    // above builds exactly that (a valid checksum over the four signed paths,
+    // with the currency rewritten). The check still catches it, and the
+    // controller's amount check remains the load-bearing defence for Wompi.
+    const { tenantId } = await signUpWithTenant('webhooks-wompi-usd@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, { number: 6102, totalCents: 25_000 });
+
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-wompi-usd',
+      status: 'APPROVED',
+      amountInCents: 25_000,
+      reference: '6102',
+      timestamp: 1_700_100_200,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+      currency: 'USD',
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await postWebhook(tenantId, payload);
+
+    expect(res.status).toBe(200);
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('PENDING');
+    expect(order.paymentStatus).toBe('PENDING');
+
+    const events = await prisma.webhookEvent.findMany({
+      where: { provider: 'wompi', eventId: 'txn-wompi-usd:1700100200' },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0].result).toBe('currency_mismatch');
+  });
+
+  it('an event carrying NO currency at all settles nothing either (unverifiable is not a pass)', async () => {
+    // Same rule the reconciliation path already enforces: a missing currency
+    // is a rejection, not a partial pass, because a bare amount is not a
+    // quantity of money. Recorded under its own `result` so an operator can
+    // tell "wrong currency" from "this gateway stopped sending one" — the
+    // second would be a shape regression worth chasing, not an attack.
+    const { tenantId } = await signUpWithTenant('webhooks-no-currency@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, { number: 6103, totalCents: 25_000 });
+
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-wompi-no-currency',
+      status: 'APPROVED',
+      amountInCents: 25_000,
+      reference: '6103',
+      timestamp: 1_700_100_250,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+      currency: null,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await postWebhook(tenantId, payload);
+
+    expect(res.status).toBe(200);
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.paymentStatus).toBe('PENDING');
+    const events = await prisma.webhookEvent.findMany({
+      where: { provider: 'wompi', eventId: 'txn-wompi-no-currency:1700100250' },
+    });
+    expect(events[0].result).toBe('currency_unknown');
+  });
+
+  it('the currency check is unconditional: a FAILED event in another currency does not flip the order to FAILED either', async () => {
+    const { tenantId } = await signUpWithTenant('webhooks-usd-failed@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, { number: 6104, totalCents: 25_000 });
+
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-wompi-usd-declined',
+      status: 'DECLINED',
+      amountInCents: 25_000,
+      reference: '6104',
+      timestamp: 1_700_100_300,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+      currency: 'USD',
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect((await postWebhook(tenantId, payload)).status).toBe(200);
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.paymentStatus).toBe('PENDING');
+    const events = await prisma.webhookEvent.findMany({
+      where: { provider: 'wompi', eventId: 'txn-wompi-usd-declined:1700100300' },
+    });
+    expect(events[0].result).toBe('currency_mismatch');
+  });
+
+  it('a COP event with a matching amount still settles normally (the check does not over-reject)', async () => {
+    const { tenantId } = await signUpWithTenant('webhooks-cop-settles@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    const { orderId, orderNumber } = await seedOrderWithProduct(tenantId); // totalCents 30_000
+
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-wompi-cop-ok',
+      status: 'APPROVED',
+      amountInCents: 30_000,
+      reference: String(orderNumber),
+      timestamp: 1_700_100_350,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+    });
+
+    expect((await postWebhook(tenantId, payload)).status).toBe(200);
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('CONFIRMED');
+    expect(order.paymentStatus).toBe('PAID');
+  });
+});
+
+describe('a valid payment landing on an order that can no longer be settled (wave 3)', () => {
+  // The audit trail used to LIE about this, which is the whole point of the
+  // `result` column: `markPaid` silently no-ops outside its PENDING
+  // precondition, so a genuine PAID webhook for a CANCELLED/EXPIRED order
+  // returned 200 and durably recorded `result: 'confirmed'` while the order
+  // was untouched and ZERO OrderEvents were written. The shopper is charged,
+  // the order is gone, and the one operator-facing string says it went fine.
+  it('a genuine PAID webhook on a CANCELLED/EXPIRED order records that it settled NOTHING', async () => {
+    const { tenantId } = await signUpWithTenant('webhooks-paid-on-cancelled@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    // Exactly what the 15-minute stock-reservation expiry worker leaves behind.
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, {
+      number: 7001,
+      totalCents: 30_000,
+      status: 'CANCELLED',
+      paymentStatus: 'EXPIRED',
+      stockReservedUntil: null,
+    });
+
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-paid-too-late',
+      status: 'APPROVED',
+      amountInCents: 30_000,
+      reference: '7001',
+      timestamp: 1_700_200_100,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+    });
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await postWebhook(tenantId, payload);
+
+    // Still 200 — the delivery WAS received and durably recorded, and no
+    // retry could change the outcome (same reasoning as every other
+    // recorded-but-not-actionable branch).
+    expect(res.status).toBe(200);
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('CANCELLED');
+    expect(order.paymentStatus).toBe('EXPIRED');
+
+    const events = await prisma.webhookEvent.findMany({
+      where: { provider: 'wompi', eventId: 'txn-paid-too-late:1700200100' },
+    });
+    expect(events).toHaveLength(1);
+    // The core of the fix: NOT 'confirmed'.
+    expect(events[0].result).toBe('paid_order_not_settleable');
+    expect(events[0].processedAt).not.toBeNull();
+    // And it is loud: a human has to be able to find these, because it means
+    // a shopper paid and has nothing.
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('a late FAILED webhook on an order that is already CONFIRMED/PAID is recorded as applying nothing', async () => {
+    const { tenantId } = await signUpWithTenant('webhooks-failed-on-paid@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, {
+      number: 7002,
+      totalCents: 30_000,
+      status: 'CONFIRMED',
+      paymentStatus: 'PAID',
+      stockReservedUntil: null,
+    });
+
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-failed-too-late',
+      status: 'DECLINED',
+      amountInCents: 30_000,
+      reference: '7002',
+      timestamp: 1_700_200_200,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect((await postWebhook(tenantId, payload)).status).toBe(200);
+
+    // markFailed's precondition is deliberately NOT widened (a later FAILED
+    // must never un-settle a PAID order) — the only thing that changes is
+    // that the record no longer claims the order was flipped to FAILED.
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.paymentStatus).toBe('PAID');
+    const events = await prisma.webhookEvent.findMany({
+      where: { provider: 'wompi', eventId: 'txn-failed-too-late:1700200200' },
+    });
+    expect(events[0].result).toBe('failed_not_applied');
+  });
+
+  it('the ordinary PAID and FAILED paths still record confirmed/failed (the new strings are for the no-op case only)', async () => {
+    const { tenantId } = await signUpWithTenant('webhooks-normal-results@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, { number: 7003, totalCents: 30_000 });
+
+    const declined = buildSignedWebhookPayload({
+      transactionId: 'txn-attempt-1',
+      status: 'DECLINED',
+      amountInCents: 30_000,
+      reference: '7003',
+      timestamp: 1_700_200_300,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+    });
+    expect((await postWebhook(tenantId, declined)).status).toBe(200);
+    expect(
+      (await prisma.webhookEvent.findFirstOrThrow({ where: { eventId: 'txn-attempt-1:1700200300' } })).result,
+    ).toBe('failed');
+
+    // The shopper retries and the retry goes through (wave-2 FIX 1's flow).
+    const approved = buildSignedWebhookPayload({
+      transactionId: 'txn-attempt-2',
+      status: 'APPROVED',
+      amountInCents: 30_000,
+      reference: '7003',
+      timestamp: 1_700_200_400,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+    });
+    expect((await postWebhook(tenantId, approved)).status).toBe(200);
+    expect(
+      (await prisma.webhookEvent.findFirstOrThrow({ where: { eventId: 'txn-attempt-2:1700200400' } })).result,
+    ).toBe('confirmed');
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('CONFIRMED');
+    expect(order.paymentStatus).toBe('PAID');
+  });
+});
+
 describe("Wompi's undelimited checksum concatenation cannot be re-split into another order (fix 2)", () => {
   it('the exact reported aliasing pair — (50000000, 1042) vs (5000000010, 42) — shares one valid checksum, and the amount check stops it', async () => {
     const { tenantId } = await signUpWithTenant('webhooks-checksum-aliasing@demo.co', 'owner');
@@ -1009,6 +1309,11 @@ describe('Mercado Pago fires one notification per status change (fix 3)', () => 
       status: 'pending',
       transaction_amount: 300, // pesos -> 30.000 cents, matches the order
       external_reference: String(orderNumber),
+      // A real MP payment resource always reports the currency its
+      // `transaction_amount` is denominated in; these stubs predate the
+      // webhook path reading one, and the controller now (correctly) refuses
+      // to settle an event whose currency it cannot verify.
+      currency_id: 'COP',
     }));
     const first = await postMercadoPagoWebhook(tenantId, {
       paymentId: '555000111',
@@ -1031,6 +1336,7 @@ describe('Mercado Pago fires one notification per status change (fix 3)', () => 
       status: 'approved',
       transaction_amount: 300,
       external_reference: String(orderNumber),
+      currency_id: 'COP',
     }));
     const second = await postMercadoPagoWebhook(tenantId, {
       paymentId: '555000111',
@@ -1059,6 +1365,7 @@ describe('Mercado Pago fires one notification per status change (fix 3)', () => 
       status: 'approved',
       transaction_amount: 300,
       external_reference: String(orderNumber),
+      currency_id: 'COP',
     }));
 
     // Same notification, twice — with the per-delivery values (x-request-id,

@@ -289,6 +289,9 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
       reference: 'ORD-0001',
       status: 'PAID',
       amountCents: 4990000,
+      // The SIGNED `x_currency_code`, added when the currency term reached the
+      // webhook path — see the "CURRENCY term" describe block below.
+      currency: 'COP',
     });
   });
 
@@ -593,6 +596,80 @@ describe('EpaycoProvider.verifyAndParseWebhook — unsigned-field re-verificatio
     await expect(
       provider.verifyAndParseWebhook(req, cfg, neverCalledFetch() as unknown as typeof fetch),
     ).rejects.toThrow(/x_amount/);
+  });
+});
+
+describe('EpaycoProvider.verifyAndParseWebhook — the CURRENCY term', () => {
+  // ePayco is the only one of the three whose webhook currency is
+  // CRYPTOGRAPHICALLY SIGNED: `x_currency_code` is the sixth term of ePayco's
+  // own confirmation-hash formula. So the reported value is the signed one,
+  // not the (unauthenticated) lookup's — and, exactly like the amount, the
+  // lookup's own figure must not CONTRADICT it where it reports one.
+  it('reports the SIGNED x_currency_code', async () => {
+    const provider = new EpaycoProvider();
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-usd',
+      xTransactionId: 'txn-usd',
+      xAmount: '250.00',
+      xCurrencyCode: 'USD',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+
+    const result = await provider.verifyAndParseWebhook(
+      req,
+      cfg,
+      mockReferenceLookup({ x_amount: 250 }) as unknown as typeof fetch,
+    );
+
+    expect(result.currency).toBe('USD');
+    expect(result.amountCents).toBe(25_000);
+  });
+
+  it("rejects when the lookup's currency contradicts the SIGNED x_currency_code", async () => {
+    const provider = new EpaycoProvider();
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-1',
+      xTransactionId: 'txn-1',
+      xAmount: '100.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+
+    await expect(
+      provider.verifyAndParseWebhook(
+        req,
+        cfg,
+        mockReferenceLookup({ x_amount: 100, x_currency_code: 'USD' }) as unknown as typeof fetch,
+      ),
+    ).rejects.toThrow(/currency/);
+  });
+
+  it("accepts when the lookup's currency AGREES with the signed one", async () => {
+    const provider = new EpaycoProvider();
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-1',
+      xTransactionId: 'txn-1',
+      xAmount: '100.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+
+    const result = await provider.verifyAndParseWebhook(
+      req,
+      cfg,
+      mockReferenceLookup({ x_amount: 100, x_currency_code: 'COP' }) as unknown as typeof fetch,
+    );
+
+    expect(result.currency).toBe('COP');
   });
 });
 

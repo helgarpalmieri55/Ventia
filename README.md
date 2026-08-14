@@ -247,13 +247,22 @@ All three share the same provider-registry/webhook-controller/stock-reservation 
   A binding check is **not** an account check: `Order.providerRefSource` records whether a ref came
   from a verified webhook or from the unauthenticated hint endpoint, and a hint-sourced ref is only
   ever looked up by id for providers whose lookup is merchant-account-scoped (Mercado Pago's private
-  access token). Wompi's lookup authenticates with the *public* key and was observed answering with
-  no credential at all, and ePayco's takes none — so for those two a hinted ref settles nothing. That check is what makes the deliberately
-  unauthenticated hint endpoint safe, and must not be "optimized away": without it, a shopper who
-  plants a real, genuinely-paid transaction id from their own past purchase onto someone else's
-  `PENDING` order would get a truthful "yes, paid" from the gateway and a free order. The job
+  access token). Wompi's lookup authenticates with the *public* key and answers requests carrying no
+  credential at all, and ePayco's takes none — so for those two a hinted ref settles nothing. **That
+  provenance gate — not the binding check — is what makes the deliberately unauthenticated hint
+  endpoint safe**, and neither may be "optimized away": without them, a shopper who plants a real,
+  genuinely-paid transaction id from their own past purchase onto someone else's `PENDING` order
+  would get a truthful "yes, paid" from the gateway and a free order. The job
   only ever calls the existing `markPaid`/`markFailed`; it never expires, cancels or restocks
-  anything itself.
+  anything itself, and its `reconciled N order(s)` log counts real transitions rather than settle
+  attempts.
+  Both settle paths enforce the same rule: the **webhook** path also refuses to settle unless the
+  event's currency is `COP` (`result: 'currency_mismatch'`, or `'currency_unknown'` when the adapter
+  could not read one), and a valid payment landing on an order that can no longer be settled — e.g.
+  a `PAID` webhook arriving after the expiry worker cancelled the order — is recorded as
+  `result: 'paid_order_not_settleable'` with a loud log, never as `'confirmed'`. Those orders mean a
+  shopper paid and has nothing, so they need a human:
+  `SELECT * FROM "WebhookEvent" WHERE result = 'paid_order_not_settleable'`.
 
 ### Onboarding, staff & launch
 
@@ -369,14 +378,17 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
   from Wompi's redirect return via the new, deliberately unauthenticated `PATCH
   /v1/storefront/checkout/:orderNumber/provider-ref-hint`) or, for Mercado Pago only, by our own
   order number via `searchByReference`. An **order-binding check** — the reference *and*, where
-  available, the amount, read out of the gateway's own response, must match the order's
-  `number`/`totalCents` — gates every settle, in both directions; that check is exactly what
-  makes the unauthenticated hint endpoint safe, since a planted-but-genuinely-paid transaction id
-  gets a truthful "yes" from the gateway and still settles nothing. The job never expires,
-  cancels or restocks anything itself. DoD: for all three gateways independently, a checkout
+  available, the amount and its currency, read out of the gateway's own response, must match the
+  order's `number`/`totalCents` — gates every settle, in both directions. A binding check is *not*
+  an account check, so what actually makes the unauthenticated hint endpoint safe is the
+  **provenance gate** on top of it: a hint-sourced ref is never looked up by id for a provider whose
+  lookup isn't merchant-account-scoped, because a planted-but-genuinely-paid transaction id gets a
+  truthful "yes" from the gateway and every term of the binding check can be chosen by the payer.
+  The job never expires, cancels or restocks anything itself. DoD: for all three gateways independently, a checkout
   reserves stock, a real validly-signed webhook confirms payment and decrements stock exactly
   once, and replaying the identical webhook is a verified no-op; and a `PENDING` order whose
-  webhook never arrived is instead settled by the reconciliation sweep — the webhook chains
+  webhook never arrived is instead settled by the reconciliation sweep (for Mercado Pago; see the
+  disclosed limitation below for why Wompi and ePayco no longer are) — the webhook chains
   proven end to end over real HTTP against a real Postgres (P3a/P3b), and reconciliation proven
   against the same real Postgres with the hint endpoint hit over real HTTP and the gateway's
   status/search response faked (no sandbox account, see below), including the binding guard's
@@ -397,6 +409,19 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
       worker. Reconciliation therefore helps ePayco only in the narrow "one webhook arrived, a
       later one was lost" case, **not** the "no webhook ever arrived" case it primarily exists
       for.
+    - **Post-provenance-gate, the same is now true of Wompi: a Wompi or ePayco order whose webhook
+      never arrives has no recovery path at all.** Neither provider implements
+      `searchByReference` (no lookup-by-our-own-reference endpoint exists for either), and since
+      the wave-2 provenance gate a hint-sourced `providerRef` is refused for both — so Wompi's
+      redirect-return capture (`/pago/wompi-retorno/:orderNumber?id=`), which was the one thing
+      that gave a webhook-less Wompi order a ref to reconcile from, no longer settles anything on
+      its own. Such an order falls through to the 15-minute stock-reservation expiry worker and is
+      cancelled and restocked, exactly like an ePayco one. Mercado Pago is the only provider whose
+      orders genuinely self-heal without a webhook (its `searchByReference` runs off our own order
+      number against MP's private-token-authenticated API). The Wompi hint is still stored as a
+      support/audit breadcrumb, and a merchant-identifier binding — or evidence that Wompi's lookup
+      really is account-scoped — would make it settle-capable again by adding `'wompi'` to
+      `ACCOUNT_SCOPED_LOOKUP_PROVIDERS`, one line in `reconciliation.worker.ts`.
     - **Related, still open:** `PAYMENTS_STOREFRONT_BASE_URL` is a single *global* URL, so the
       redirect URLs handed to Wompi and ePayco are wrong for any deployment with 2+ tenants on
       those gateways; and ePayco shoppers in `standard` mode have no automatic return path at all

@@ -460,7 +460,9 @@ describe('PaymentsService.markPaid', () => {
     const { tenantId } = await signUpWithTenant('payments-svc-markpaid-happy@demo.co', 'owner');
     const orderId = await seedOrder(tenantId, 'PENDING', 'PENDING');
 
-    await paymentsService.markPaid(tenantId, orderId, 'wompi', 'wompi-txn-1');
+    // `true` = "this call really transitioned the order" (wave 3); the webhook
+    // controller and the reconciliation worker both branch on it now.
+    await expect(paymentsService.markPaid(tenantId, orderId, 'wompi', 'wompi-txn-1')).resolves.toBe(true);
 
     const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
     expect(order.status).toBe('CONFIRMED');
@@ -492,9 +494,15 @@ describe('PaymentsService.markPaid', () => {
 
     // Second call — simulating a webhook retry after the first delivery
     // already succeeded. Must not throw, and must not add a second event.
+    // Resolves `false` — "I transitioned nothing" — rather than the `undefined`
+    // this used to assert: wave 3 made both settle paths REPORT whether they
+    // actually transitioned, because their two callers were recording a
+    // settlement (`result: 'confirmed'`, `reconciled N order(s)`) for calls
+    // that silently no-opped. The behaviour under test is unchanged; the
+    // assertion is now the stronger form of the same claim.
     await expect(
       paymentsService.markPaid(tenantId, orderId, 'wompi', 'wompi-txn-2'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
 
     const afterSecond = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
     expect(afterSecond.status).toBe('CONFIRMED');
@@ -510,7 +518,7 @@ describe('PaymentsService.markPaid', () => {
 
     const before = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
 
-    await expect(paymentsService.markPaid(tenantId, orderId, 'wompi', 'wompi-txn-3')).resolves.toBeUndefined();
+    await expect(paymentsService.markPaid(tenantId, orderId, 'wompi', 'wompi-txn-3')).resolves.toBe(false);
 
     const after = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
     expect(after).toEqual(before);
@@ -523,7 +531,7 @@ describe('PaymentsService.markPaid', () => {
     const { tenantId } = await signUpWithTenant('payments-svc-markpaid-missing@demo.co', 'owner');
     await expect(
       paymentsService.markPaid(tenantId, randomUUID(), 'wompi', 'wompi-txn-4'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
   });
 
   it('does not touch a same-tenant order belonging to another tenant (cross-tenant no-op)', async () => {
@@ -577,7 +585,9 @@ describe('PaymentsService.markFailed', () => {
     const { tenantId } = await signUpWithTenant('payments-svc-markfailed-happy@demo.co', 'owner');
     const orderId = await seedOrder(tenantId, 'PENDING', 'PENDING');
 
-    await paymentsService.markFailed(tenantId, orderId, 'wompi', 'wompi-txn-failed-1');
+    await expect(paymentsService.markFailed(tenantId, orderId, 'wompi', 'wompi-txn-failed-1')).resolves.toBe(
+      true,
+    );
 
     const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
     expect(order.status).toBe('PENDING'); // markFailed never touches status
@@ -609,7 +619,7 @@ describe('PaymentsService.markFailed', () => {
 
     await expect(
       paymentsService.markFailed(tenantId, orderId, 'wompi', 'wompi-txn-failed-2'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
 
     const after = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
     expect(after).toEqual(before);
@@ -622,7 +632,7 @@ describe('PaymentsService.markFailed', () => {
     const { tenantId } = await signUpWithTenant('payments-svc-markfailed-missing@demo.co', 'owner');
     await expect(
       paymentsService.markFailed(tenantId, randomUUID(), 'wompi', 'wompi-txn-failed-3'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
   });
 });
 

@@ -1100,6 +1100,88 @@ describe('reconcilePendingPayments — FIX 1: a DECLINED-then-retried order stay
   });
 });
 
+describe('reconcilePendingPayments — the returned count is TRANSITIONS, not settle-path calls (wave 3)', () => {
+  // `settledCount` incremented whenever `reconcileOneOrder` had CALLED a settle
+  // path, but both settle paths no-op outside their own preconditions — so the
+  // operator-facing `[reconciliation-worker] reconciled N order(s)` line could
+  // name orders nothing whatsoever happened to. Same root cause as the webhook
+  // controller's `result: 'confirmed'` lie, one layer up.
+  it('an already-FAILED order the gateway still calls FAILED is NOT counted (markFailed no-ops)', async () => {
+    const { tenantId } = await signUpWithTenant('recon-count-noop-failed@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_count_still_declined',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+      // A candidate (wave-2 FIX 1 put FAILED back in the candidate set) whose
+      // gateway answer is still FAILED — so `markFailed` is genuinely called
+      // and genuinely does nothing, since it requires PENDING/PENDING exactly.
+      paymentStatus: 'FAILED',
+    });
+
+    const settled = await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async () => status('FAILED', { reference: String(number), amountCents: 25_000 }),
+      }),
+    );
+
+    expect(settled).toBe(0);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.paymentStatus).toBe('FAILED');
+    expect(await prisma.orderEvent.count({ where: { orderId } })).toBe(0);
+  });
+
+  it('a settle that really transitions the order IS counted (the count still counts)', async () => {
+    const { tenantId } = await signUpWithTenant('recon-count-real@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_count_real',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+    });
+
+    const settled = await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async () => status('PAID', { reference: String(number), amountCents: 25_000 }),
+      }),
+    );
+
+    expect(settled).toBe(1);
+    expect((await prisma.order.findUnique({ where: { id: orderId } }))?.paymentStatus).toBe('PAID');
+  });
+
+  it('a markPaid that no-ops under a race is not counted either', async () => {
+    // The narrow window the candidate query cannot close: the order qualified
+    // when it was read, and something else (a webhook delivery, an admin
+    // action) settled or cancelled it before this sweep reached the settle.
+    // `markPaid` correctly no-ops; the count must not claim otherwise.
+    const { tenantId } = await signUpWithTenant('recon-count-race@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_count_race',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+    });
+
+    const markPaidSpy = vi.spyOn(paymentsService, 'markPaid').mockImplementation(async () => false);
+
+    const settled = await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async () => status('PAID', { reference: String(number), amountCents: 25_000 }),
+      }),
+    );
+
+    expect(callsForOrder(markPaidSpy, orderId)).toHaveLength(1);
+    expect(settled).toBe(0);
+  });
+});
+
 describe('reconcilePendingPayments — FIX 2: an order whose status already moved on is never a candidate', () => {
   // The zombie the `status: 'PENDING'` filter kills. A merchant pressing
   // "Confirmar pedido" on an online-payment order left it CONFIRMED/PENDING

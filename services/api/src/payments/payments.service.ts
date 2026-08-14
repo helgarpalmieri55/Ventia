@@ -228,9 +228,32 @@ export class PaymentsService {
    * for the identical reason: a webhook retry racing an admin action (or
    * another webhook delivery) on the same order must serialize, not corrupt
    * state.
+   *
+   * ## Return value (P3 wave-3): did this actually transition the order?
+   *
+   * `true` when the order moved to CONFIRMED/PAID here, `false` when the
+   * precondition above did not hold and this call was a no-op. Callers used to
+   * have NO way to tell those apart, and both of them got it wrong in a way
+   * that mattered:
+   *
+   *  - `webhooks.controller.ts` recorded `result: 'confirmed'` unconditionally.
+   *    A genuine PAID webhook arriving after the 15-minute expiry worker had
+   *    cancelled the order therefore returned 200, wrote `'confirmed'`, changed
+   *    nothing, and emitted zero `OrderEvent`s — the shopper was charged, the
+   *    order was gone, and the single operator-facing audit string called it
+   *    confirmed. That is precisely the money-losing case the `result` column
+   *    exists to surface.
+   *  - `reconciliation.worker.ts` counted "a settle path was CALLED" as an
+   *    order settled, so its `reconciled N order(s)` log could name orders
+   *    nothing happened to.
+   *
+   * Both now branch on this boolean. It is deliberately a plain boolean rather
+   * than a thrown error: a no-op is still the CORRECT outcome for a replay or a
+   * race (that is what the precondition is for) — only the *reporting* of it
+   * was wrong.
    */
-  async markPaid(tenantId: string, orderId: string, provider: string, providerRef: string): Promise<void> {
-    await platformDb.$transaction(async (tx) => {
+  async markPaid(tenantId: string, orderId: string, provider: string, providerRef: string): Promise<boolean> {
+    return platformDb.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`;
@@ -243,8 +266,10 @@ export class PaymentsService {
       ) {
         // Not found, or not in a state this transition may run from:
         // idempotent no-op, not an error (a webhook retry after this already
-        // ran once, or a race with some other actor, must not fail).
-        return;
+        // ran once, or a race with some other actor, must not fail). Reported
+        // as `false` so the caller can say so instead of claiming a settlement
+        // that never happened — see this method's "Return value" section.
+        return false;
       }
 
       await tx.order.update({
@@ -288,6 +313,8 @@ export class PaymentsService {
           data: { provider, providerRef } as Prisma.InputJsonValue,
         },
       });
+
+      return true;
     });
   }
 
@@ -344,6 +371,16 @@ export class PaymentsService {
    * to treat a reversal differently from a decline (a real un-confirm/restock
    * flow) is a separate, unbuilt piece of work; this only makes sure the
    * information needed for it isn't thrown away in the meantime.
+   *
+   * ## Return value (P3 wave-3)
+   *
+   * `true` when `paymentStatus` actually moved to `FAILED` here, `false` when
+   * the precondition didn't hold and this was a no-op — same contract, and same
+   * reason, as `markPaid`'s (see that method's "Return value" section). The
+   * stakes are lower on this side (a FAILED event that lands on an
+   * already-settled order costs nobody money), but the two callers report on
+   * both paths, and an audit string that says "the order was flipped to FAILED"
+   * when nothing was flipped is wrong in either direction.
    */
   async markFailed(
     tenantId: string,
@@ -351,15 +388,15 @@ export class PaymentsService {
     provider: string,
     providerRef: string,
     gatewayStatus?: NormalizedStatus,
-  ): Promise<void> {
-    await platformDb.$transaction(async (tx) => {
+  ): Promise<boolean> {
+    return platformDb.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`;
 
       const order = await tx.order.findFirst({ where: { id: orderId, tenantId } });
       if (!order || order.status !== 'PENDING' || order.paymentStatus !== 'PENDING') {
-        return;
+        return false;
       }
 
       await tx.order.update({
@@ -395,6 +432,8 @@ export class PaymentsService {
           } as Prisma.InputJsonValue,
         },
       });
+
+      return true;
     });
   }
 }

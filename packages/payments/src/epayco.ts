@@ -576,6 +576,21 @@ export class EpaycoProvider implements PaymentProvider {
         `epayco webhook: gateway amount ${looked.amountCents} does not match the signed x_amount ${signedAmountCents}`,
       );
     }
+    // Same treatment as the amount immediately above, and for the same reason:
+    // an amount is not a quantity of money until you know what it is
+    // denominated in, so the two must agree wherever both are available. ePayco
+    // is the one provider of the three whose webhook currency is
+    // CRYPTOGRAPHICALLY SIGNED — `x_currency_code` is the sixth term of the
+    // confirmation-hash formula verified above — so the SIGNED value is what
+    // this method reports; the lookup (unauthenticated, see this method's doc
+    // comment) only gets to contradict it, never to replace it. Absent on the
+    // lookup response: no contradiction, no rejection — the signed value
+    // stands on its own signature.
+    if (looked.currency !== undefined && looked.currency !== xCurrencyCode) {
+      throw new Error(
+        `epayco webhook: gateway currency ${JSON.stringify(looked.currency)} does not match the signed x_currency_code ${JSON.stringify(xCurrencyCode)}`,
+      );
+    }
 
     // NOTE on `xResponse`: it is required to be PRESENT (a confirmation
     // without it is malformed), but its value is deliberately NOT used and
@@ -609,6 +624,9 @@ export class EpaycoProvider implements PaymentProvider {
       // The SIGNED amount: cryptographically bound, and cross-checked against
       // the gateway's own figure above where one is available.
       amountCents: signedAmountCents,
+      // The SIGNED currency, on the same footing as the amount (both are terms
+      // of ePayco's own confirmation hash) and cross-checked the same way.
+      currency: xCurrencyCode,
     };
   }
 

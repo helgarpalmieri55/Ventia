@@ -130,6 +130,11 @@ function mockPaymentLookup(overrides: Partial<Record<string, unknown>> = {}) {
     status: 'approved',
     transaction_amount: 49900,
     external_reference: 'ORD-0001',
+    // A real MP payment resource always carries this alongside
+    // `transaction_amount` (it is the currency that amount is denominated in);
+    // the default fixture carries it too so the happy paths exercise the same
+    // shape the live API returns. Overridable per-test.
+    currency_id: 'COP',
     ...overrides,
   };
   return vi.fn(async () => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
@@ -158,6 +163,9 @@ describe('MercadoPagoProvider.verifyAndParseWebhook', () => {
       reference: 'ORD-0001',
       status: 'PAID',
       amountCents: 4990000,
+      // Read off the SAME authenticated payment resource `amountCents` comes
+      // from — see the currency describe block below.
+      currency: 'COP',
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
@@ -430,6 +438,45 @@ describe('MercadoPagoProvider.verifyAndParseWebhook — eventId composition (fix
     );
 
     expect(retry.eventId).toBe(first.eventId);
+  });
+});
+
+describe('MercadoPagoProvider.verifyAndParseWebhook — the CURRENCY term', () => {
+  // The webhook path had no currency at all, so the controller's amount check
+  // compared a bare number. MP is the strongest of the three here: the value
+  // comes off the same AUTHENTICATED `GET /v1/payments/:id` resource
+  // `transaction_amount` does, so it is as trustworthy as the amount itself.
+  it("reports the payment resource's own currency_id", async () => {
+    const provider = new MercadoPagoProvider();
+    const result = await provider.verifyAndParseWebhook(
+      buildSignedWebhookRequest({ dataId: '123456789', ts: '1742505638683', eventsSecret: cfg.eventsSecret! }),
+      cfg,
+      mockPaymentLookup({ currency_id: 'USD' }) as unknown as typeof fetch,
+    );
+
+    expect(result.currency).toBe('USD');
+  });
+
+  it('leaves currency undefined rather than defaulting to COP when the lookup omits it', async () => {
+    const provider = new MercadoPagoProvider();
+    const result = await provider.verifyAndParseWebhook(
+      buildSignedWebhookRequest({ dataId: '123456789', ts: '1742505638683', eventsSecret: cfg.eventsSecret! }),
+      cfg,
+      mockPaymentLookup({ currency_id: undefined }) as unknown as typeof fetch,
+    );
+
+    expect(result.currency).toBeUndefined();
+  });
+
+  it('ignores a non-string currency_id rather than coercing it', async () => {
+    const provider = new MercadoPagoProvider();
+    const result = await provider.verifyAndParseWebhook(
+      buildSignedWebhookRequest({ dataId: '123456789', ts: '1742505638683', eventsSecret: cfg.eventsSecret! }),
+      cfg,
+      mockPaymentLookup({ currency_id: 170 }) as unknown as typeof fetch,
+    );
+
+    expect(result.currency).toBeUndefined();
   });
 });
 

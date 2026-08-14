@@ -45,6 +45,24 @@ export const PROVIDERS: Partial<Record<PaymentProviderId, PaymentProvider>> = {
 export const PAYMENT_PROVIDER_NOT_CONFIGURED = 'PAYMENT_PROVIDER_NOT_CONFIGURED';
 
 /**
+ * The ISO-4217 code every order in this system is priced in, and therefore the
+ * one a gateway's own reported currency must match before its amount may be
+ * compared to `Order.totalCents`. `Order` has no currency column — `totalCents`
+ * is COP by construction (checkout, the catalog's `priceCents`, and all three
+ * adapters' outbound `CHECKOUT_CURRENCY` are all COP) — so this is a constant,
+ * not a per-order lookup.
+ *
+ * Lives here, next to `PAYMENT_PROVIDER_NOT_CONFIGURED` and for the identical
+ * reason, because BOTH settle paths now enforce it and they must not drift:
+ * `reconciliation.worker.ts`'s `checkOrderBinding` (P3 wave-2) and
+ * `webhooks.controller.ts`'s own currency check (wave 3, added after the two
+ * paths were found enforcing different rules). This module is the one both
+ * already import and it pulls in no BullMQ/Nest-runtime machinery either
+ * direction.
+ */
+export const ORDER_CURRENCY = 'COP';
+
+/**
  * Looks up a configured provider implementation, throwing a 400
  * `PAYMENT_PROVIDER_NOT_CONFIGURED` HttpException for any `PaymentProviderId`
  * that doesn't have one — a 400, not a 404/500, because the *id* itself is

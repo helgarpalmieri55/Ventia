@@ -303,6 +303,14 @@ interface MercadoPagoPaymentResponse {
   status: string;
   transaction_amount: number;
   external_reference: string;
+  /** ISO-4217 code (`"COP"`) for `transaction_amount`, on the same payment
+   * resource. Declared optional and read defensively (like every other field
+   * this adapter takes off a live response) even though a real payment always
+   * carries it — `verifyAndParseWebhook` reports it as
+   * `NormalizedPaymentEvent.currency` rather than requiring it, so a response
+   * shape that ever drops it degrades to "unverifiable" at the controller
+   * instead of throwing here. */
+  currency_id?: string;
 }
 
 /** Shape this adapter relies on from `GET /v1/payments/search`'s real
@@ -481,6 +489,17 @@ export class MercadoPagoProvider implements PaymentProvider {
       // consistent with this codebase's cents-as-source-of-truth
       // convention for every other amount field.
       amountCents: Math.round(payment.transaction_amount * 100),
+      // The currency that amount is denominated in, off the SAME authenticated
+      // payment resource — so it is exactly as trustworthy as the amount, and
+      // the strongest of the three adapters' currency values (Wompi's is
+      // unsigned; ePayco's is signed but its corroborating lookup is
+      // unauthenticated). `undefined` when absent or not a string, never
+      // defaulted to `CHECKOUT_CURRENCY` — a fabricated value would be
+      // indistinguishable from a verified one at the controller.
+      currency:
+        typeof payment.currency_id === 'string' && payment.currency_id.length > 0
+          ? payment.currency_id
+          : undefined,
     };
   }
 

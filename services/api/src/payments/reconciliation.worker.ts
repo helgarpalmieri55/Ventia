@@ -9,7 +9,7 @@ import type {
   TransactionStatusResult,
 } from '@ventia/payments';
 import { PaymentsService } from './payments.service';
-import { getProvider } from './provider-registry';
+import { ORDER_CURRENCY, getProvider } from './provider-registry';
 
 /** How long an online-payment order must have existed before reconciliation
  * will look at it (design decision 4). DELIBERATELY shorter than the existing
@@ -108,12 +108,11 @@ interface CandidateOrder {
   providerRefSource: string | null;
 }
 
-/** The ISO-4217 code every order in this system is priced in. `Order` has no
- * currency column — `totalCents` is COP by construction (checkout, the
- * catalog's `priceCents`, and all three adapters' outbound
- * `CHECKOUT_CURRENCY` are all COP) — so this is the constant the gateway's
- * own reported currency must match, not a per-order lookup. */
-const ORDER_CURRENCY = 'COP';
+// `ORDER_CURRENCY` (the ISO-4217 code every order here is priced in) used to be
+// declared locally in this file. It moved to `provider-registry.ts` when the
+// WEBHOOK settle path started enforcing the same rule (wave 3): the two paths
+// were found disagreeing about what "the amount matches" means, and two copies
+// of the constant is exactly how they would drift again.
 
 /**
  * The providers whose transaction-status lookup is bound to the CALLING
@@ -136,16 +135,47 @@ const ORDER_CURRENCY = 'COP';
  *   webhook fix as "ACCOUNT-SCOPING FOR EPAYCO REMAINS UNSOLVED".
  *
  * - **`wompi` — assumed NOT account-scoped. OUT.** Its lookup sends
- *   `Authorization: Bearer <cfg.publicKey>`, which Wompi's own docs describe
- *   as the browser-safe, client-side-usable credential. Probed directly
- *   during this change (`GET {sandbox,production}.wompi.co/v1/transactions/{id}`):
- *   **with no Authorization header at all, and with an obviously bogus
- *   `pub_test_` bearer, the API answered `404 NOT_FOUND_ERROR` in every
- *   case — never `401`/`403`.** An endpoint that does not reject a missing
- *   credential is not authorizing on it. This is strong but NOT conclusive
- *   evidence: no Wompi sandbox account was available, so the decisive test —
- *   reading a real transaction belonging to a DIFFERENT merchant — could not
- *   be run. The conservative reading is the one taken here.
+ *   `Authorization: Bearer <cfg.publicKey>`.
+ *
+ *   ⚠️ CORRECTION (wave 3). Wave 2's version of this comment said the endpoint
+ *   "answered `404 NOT_FOUND` — never `401`/`403`". **That sentence was
+ *   false**, and anyone re-running the probe will see a `401` and reasonably
+ *   conclude this whole paragraph is unreliable. It is not — the real probe
+ *   matrix supports the same conclusion MORE strongly. `GET
+ *   {sandbox,production}.wompi.co/v1/transactions/{id}`:
+ *
+ *   | environment          | Authorization header  | result                     |
+ *   |----------------------|-----------------------|----------------------------|
+ *   | sandbox & production | *(none at all)*       | `404 NOT_FOUND_ERROR`      |
+ *   | sandbox              | `Bearer pub_test_BOGUS` | `404`                    |
+ *   | production           | `Bearer pub_prod_BOGUS` | `404`                    |
+ *   | production           | `Bearer pub_test_BOGUS` | **`401 INVALID_ACCESS_TOKEN`** |
+ *   | sandbox              | `Bearer pub_prod_BOGUS` | **`401`**                |
+ *   | either               | `Bearer garbage`        | **`401`**                |
+ *
+ *   The `401`s are an ENVIRONMENT/KEY-PREFIX check, not an authorization
+ *   decision — Wompi's own reason string is *"La llave proporcionada no
+ *   corresponde a este ambiente"* ("the key provided does not correspond to
+ *   this environment"). Within the correct environment, a bogus key and NO
+ *   HEADER AT ALL both answer `404`, identically. An endpoint that serves a
+ *   request carrying no credential whatsoever cannot be scoping its answer to
+ *   the caller's merchant account.
+ *
+ *   Two independent corroborations, neither of which depends on the probe:
+ *     1. Wompi's docs describe the public key as the BROWSER-SIDE credential,
+ *        explicitly contrasted with the private key, which "must be used from
+ *        your backend". A credential meant to ship inside a web page is not a
+ *        credential an API scopes confidential data by.
+ *     2. Wompi operates a PUBLIC, UNAUTHENTICATED transaction finder at
+ *        `wompi.com/es/co/transacciones`: any shopper looks a transaction up
+ *        with email + date + amount, no login. Wompi plainly does not treat
+ *        transaction visibility as merchant-confidential.
+ *
+ *   Still NOT conclusive, for the one reason it never was: the decisive test —
+ *   reading a REAL transaction belonging to a DIFFERENT merchant — needs a
+ *   Wompi sandbox account, which nobody working on this has had. Everything
+ *   above is about how the endpoint treats an id that resolves to nothing. So
+ *   the conservative reading stands, on better evidence than before.
  *
  * ## What being OUT costs, and why it is still right
  *
@@ -174,6 +204,11 @@ const ORDER_CURRENCY = 'COP';
  * an account, so nothing here reads it — a binding check against a field
  * that turns out to be absent silently degrades to no check at all, which is
  * worse than the honest refusal below.
+ *
+ * And if someone DOES establish, with a real sandbox account, that Wompi's
+ * by-id lookup only answers for the calling merchant's own transactions, the
+ * change is one line: add `'wompi'` to the Set below. Nothing else in this
+ * file, or in the hint endpoint, needs to move.
  */
 const ACCOUNT_SCOPED_LOOKUP_PROVIDERS: ReadonlySet<PaymentProviderId> = new Set<PaymentProviderId>([
   'mercadopago',
@@ -306,8 +341,13 @@ function checkOrderBinding(result: TransactionStatusResult, order: CandidateOrde
  * action, the expiry sweep and this sweep all serialize against each other on
  * the same order.
  *
- * Returns the number of orders actually settled (`markPaid`/`markFailed`
- * called), for logging.
+ * Returns the number of orders this sweep actually TRANSITIONED, for logging.
+ * P3 wave-3: this used to count every order a settle path was CALLED for, which
+ * is not the same thing — both settle paths no-op outside their preconditions
+ * (an already-FAILED order the gateway still reports FAILED is a candidate on
+ * every single 2-minute pass and transitions nothing), so
+ * `[reconciliation-worker] reconciled N order(s)` could report orders nothing
+ * happened to.
  */
 export async function reconcilePendingPayments(
   paymentsService: SettleService,
@@ -402,9 +442,11 @@ export async function reconcilePendingPayments(
 }
 
 /** Resolves and (if resolvable AND bound) settles ONE order. Returns `true`
- * only if `markPaid`/`markFailed` was actually called. Every "can't resolve"
- * path returns `false` after logging, leaving the order untouched for the next
- * run — or, ultimately, for the existing 15-minute expiry worker. */
+ * only if a settle path actually TRANSITIONED the order — not merely that one
+ * was called (P3 wave-3; see the settle branches at the bottom of this
+ * function). Every "can't resolve" path returns `false` after logging, leaving
+ * the order untouched for the next run — or, ultimately, for the existing
+ * 15-minute expiry worker. */
 async function reconcileOneOrder(
   order: CandidateOrder,
   paymentsService: SettleService,
@@ -554,8 +596,14 @@ async function reconcileOneOrder(
   }
 
   if (result.status === 'PAID') {
-    await paymentsService.markPaid(order.tenantId, order.id, providerId, providerRef);
-    return true;
+    // The RETURNED BOOLEAN, not the fact that the call happened (P3 wave-3).
+    // `markPaid`/`markFailed` no-op outside their own preconditions, so an
+    // order that was a candidate when the query ran but had already been
+    // settled/cancelled by a racing webhook or admin action produced no
+    // transition at all — and this function reported `true` for it anyway,
+    // which is what made the sweep's `reconciled N order(s)` log capable of
+    // naming orders nothing happened to.
+    return paymentsService.markPaid(order.tenantId, order.id, providerId, providerRef);
   }
 
   if (result.status === 'FAILED' || result.status === 'EXPIRED') {
@@ -569,8 +617,14 @@ async function reconcileOneOrder(
     // to `EXPIRED`, so without this a reversed payment would be
     // indistinguishable from a declined card afterwards. It changes nothing
     // about the transition itself — see `markFailed`'s own doc comment.
-    await paymentsService.markFailed(order.tenantId, order.id, providerId, providerRef, result.status);
-    return true;
+    // Same "count the transition, not the call" rule as the PAID branch above.
+    // This side has a routine, entirely expected no-op case: an order already
+    // in PENDING/FAILED whose gateway answer is still FAILED is a candidate
+    // (wave-2 FIX 1 put FAILED back in the candidate set so a lost retry
+    // webhook can still be recovered), gets asked every sweep, and correctly
+    // transitions nothing — it must not be counted as a reconciliation on
+    // every single 2-minute pass.
+    return paymentsService.markFailed(order.tenantId, order.id, providerId, providerRef, result.status);
   }
 
   // Still genuinely PENDING per the gateway itself: no action this run, try

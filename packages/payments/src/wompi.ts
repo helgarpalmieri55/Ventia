@@ -356,6 +356,28 @@ export class WompiProvider implements PaymentProvider {
     if (typeof reference !== 'string') {
       throw new Error('wompi webhook: missing data.transaction.reference');
     }
+    // `data.transaction.currency` — the currency `amount_in_cents` above is
+    // denominated in, sitting right beside it in Wompi's real payload (the
+    // documented `transaction.updated` example carries `"currency": "COP"`),
+    // and the same field this adapter's own by-id lookup already reads.
+    //
+    // NOT added to `requiredSignedPaths` above, deliberately: Wompi decides
+    // what `signature.properties` contains and its documented list does not
+    // include `transaction.currency`, so requiring it would reject every
+    // genuine event. The consequence is stated plainly on
+    // `NormalizedPaymentEvent.currency`: for Wompi this value is UNSIGNED and
+    // therefore forgeable, so the controller's currency check is a
+    // consistency check on honest traffic here rather than a forgery barrier
+    // — the amount check is what actually stops a re-split/re-pointed event.
+    // It is still worth reading: an honest USD transaction (which this
+    // Colombia-only integration should never produce, but nothing in the
+    // protocol prevents) is caught, and the check costs nothing.
+    //
+    // Not a string / absent -> `undefined`, never a fabricated `'COP'`: a
+    // default would be indistinguishable from a verified value at the caller,
+    // which is the one thing the whole currency term exists to prevent.
+    const rawCurrency = transaction.currency;
+    const currency = typeof rawCurrency === 'string' && rawCurrency.length > 0 ? rawCurrency : undefined;
 
     return {
       provider: 'wompi',
@@ -373,6 +395,7 @@ export class WompiProvider implements PaymentProvider {
       reference,
       status: mapStatus(transaction.status),
       amountCents: amountInCents,
+      currency,
     };
   }
 
