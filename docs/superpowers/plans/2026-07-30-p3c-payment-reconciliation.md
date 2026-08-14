@@ -187,34 +187,65 @@ checks`.
 
 ---
 
-### Task 3: ePayco return-capture wiring
+### Task 3: ePayco return-capture wiring — **DONE: resolved NEGATIVE, no code written**
 
-**Files:**
-- Modify: `apps/storefront/app/pago/epayco/page.tsx` — first, verify (against a real
-  sandbox response if at all obtainable, else the community SDK
-  `github.com/DiegoxK/epayco-checkout-sdk`'s documented `onResponse` payload shape,
-  clearly flagging which source you used, matching this file's own existing
-  honesty-note convention) whether the `onResponse` hook's `response` argument
-  actually contains `x_ref_payco`. If yes: extend `onResponse` to also `PATCH` the
-  SAME shared endpoint from Task 2 with `{providerRef: response.x_ref_payco}` before
-  calling `goToConfirmation()` (fire-and-forget, same non-blocking posture as Task
-  2's Wompi page). If the payload does NOT reliably contain it (or can't be verified
-  either way), do not fabricate a working integration — leave this task's report
-  explicit that ePayco's redirect-hint source is unavailable/unverified, matching
-  design doc decision 2's explicit acknowledgment that this source might not pan out
-  for ePayco specifically; the design doesn't depend on it (Mercado Pago's
-  `searchByReference` and the existing webhook path both remain unaffected either
-  way).
-- Test: extend whatever test coverage exists for this page/its extracted logic
-  (matching Task 2's approach) with the new hook-firing assertion, IF the payload
-  shape was confirmed; otherwise, no new test is expected here — don't test against
-  a shape you couldn't verify is real.
+**Outcome:** the verification step below returned a clear NO, so this task's
+"document non-viability" branch was taken. **No ePayco hint capture exists, and none
+can be built from the checkout widget's hooks.** Documentation only.
 
-**Steps:** RED (if applicable) → implement or explicitly document non-viability →
-`pnpm --filter @ventia/storefront typecheck && lint && build` → commit `feat: capture
-ePayco's onResponse ref_payco as a reconciliation hint` (or, if the payload can't be
-verified, `docs: record that ePayco's onResponse hook doesn't reliably expose
-ref_payco` — whichever is honest).
+The verification used a better source than either option this task originally
+suggested (no sandbox account was available, and the third-party community SDK was
+not needed): **the actual shipped `https://checkout.epayco.co/checkout-v2.js`** — the
+very script the bridge page loads — downloaded and read directly (421,029 bytes,
+minified but with control flow and string literals intact). Findings, all HIGH
+confidence unless stated:
+
+1. `type: "standard"` — the mode this app uses, mandated by design decision 6 — is a
+   full-page redirect: `handleStandardFlow(e){this.redirectToCheckout(e)}` →
+   `redirectToCheckout(e){...;window.location.href=e}`, targeting
+   `https://new-checkout.epayco.co/checkout-standard/{sessionId}`. The bridge page is
+   unloaded, so no hook registered on it can ever fire. This corroborates
+   docs.epayco.com's own verbatim "estos hooks están disponibles para los tipos de
+   implementación `onpage`".
+2. On the `sessionId` path this app uses (`configure({sessionId,...}).open()` →
+   `renderWithSessionId`), `onResponse` is never invoked on any branch at all.
+3. The one place `onResponse` IS invoked (`handleTransactionSuccess`, reachable only
+   from the legacy inline-`createTransaction` flow this app doesn't use) passes the
+   transaction-CREATE response — the same object given to `onCreated` — fired
+   immediately after render, BEFORE payment. It cannot carry a payment reference.
+   This contradicts the docs' prose; the shipped code wins.
+4. `ref_payco`/`x_ref_payco`: **0 occurrences** in the entire script (mechanical).
+5. ePayco's own first-party sample repo `github.com/epayco/resources` contains **zero**
+   `setHooks`/`onResponse` usages — no first-party payload example exists.
+
+**Files changed (docs/comments only, no behavior change):**
+- `apps/storefront/app/pago/epayco/page.tsx` — module doc comment gains a "RESOLVED
+  (P3c Task 3)" section with the above findings and per-claim confidence, replacing
+  the previous "treat this as unresolved until confirmed against a real sandbox"
+  hedge; plus an at-the-call-site comment on `setHooks` recording that it is verified
+  non-firing in `standard` mode, kept only as zero-cost defensive wiring, and must not
+  have a hint call "restored" into it by analogy with the Wompi page.
+- Design doc decision 2 (third bullet), decision 3 (ePayco's disclosed no-fallback
+  limitation + the response-page FUTURE AVENUE assessment), the guiding-principle
+  paragraph, and architecture §5 — all updated from open question to resolved answer.
+
+**Consequences for the rest of the phase (Task 4 and Task 5 should assume these):**
+- The provider-ref-hint endpoint from Task 2 has exactly ONE caller (the Wompi return
+  page), not two.
+- ePayco's only `providerRef` source is `markPaid`/`markFailed` stamping it from a
+  real signature-verified webhook. **An ePayco order whose webhook never arrives never
+  gets a `providerRef` and is never reconcilable** — it always falls through to the
+  15-minute stock-reservation expiry worker. Task 5's README/DoD summary must disclose
+  this plainly; it is the phase's biggest coverage gap.
+- Task 4 needs no ePayco-specific change: its step-3 "wompi/epayco with no providerRef
+  → skip entirely" branch already handles this correctly.
+
+**No tests were added** — per this task's own instruction not to test against a shape
+that couldn't be verified real. Nothing testable changed: the gate was still run in
+full to prove zero regressions.
+
+**Commit:** `docs: record that ePayco's checkout hooks don't expose a usable
+transaction reference`.
 
 ---
 

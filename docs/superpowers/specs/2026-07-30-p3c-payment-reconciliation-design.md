@@ -60,8 +60,9 @@ exactly the case reconciliation exists to handle).
 
 **Guiding principle this converges on, and it's already this project's own stated
 policy** (`docs/SPEC.md` line 84: *"Payment status truth: webhooks are the source of
-truth, never the client redirect."*): a redirect-return id (Wompi's `?id=`, or
-whatever ePayco's `onResponse` hook payload turns out to contain) is usable **only as a
+truth, never the client redirect."*): a redirect-return id (Wompi's `?id=`; ePayco's
+`onResponse` hook payload was investigated and resolved to carry nothing usable — see
+decision 2's third bullet) is usable **only as a
 hint telling us WHAT to look up**, via each gateway's own authenticated,
 server-verified API — never as proof of payment by itself. This is not a new rule
 invented for this phase; it's the existing spec principle applied to a new capture
@@ -97,14 +98,46 @@ point.
      Wompi's own explicit warning (see research above), this value is NEVER trusted
      as proof of anything — it only gives the reconciliation job something to feed
      into the ALREADY-authenticated `getTransactionStatus` call.
-   - **ePayco: the bridge page's existing `onResponse`/`onClosed` `setHooks` callback**
-     (already wired in P3b's Task 6, currently only used to trigger navigation) — if
-     the callback payload includes `x_ref_payco` (needs confirming against a real
-     payload at implementation time; the module's own doc comment already flags this
-     whole hook as unverified against a real sandbox in `standard` mode), forward it
-     the same way, same "hint only" posture. If the payload turns out not to include
-     it, this source is simply unavailable for ePayco and the design still holds —
-     ePayco falls back to case 3 below.
+   - **ePayco: RESOLVED AS UNAVAILABLE — this capture source does not exist.** The
+     original plan here was to forward `x_ref_payco` out of the bridge page's existing
+     `setHooks({onResponse})` callback (wired in P3b's Task 6, used only to trigger
+     navigation), conditional on the payload actually carrying it. **Task 3 resolved
+     that condition as NO, on both counts, and implemented nothing.** Evidence — the
+     actual shipped `https://checkout.epayco.co/checkout-v2.js` (421,029 bytes,
+     downloaded and read during Task 3; minified but with control flow and string
+     literals intact), which outranks the docs as a source:
+     - **The hooks cannot fire in `type: "standard"`, the mode this app uses**
+       (design decision 6 mandates `standard`). Verbatim from the script:
+       `handleStandardFlow(e){this.redirectToCheckout(e)}` and
+       `redirectToCheckout(e){...;window.location.href=e}` — `open()` is a full-page
+       navigation to `https://new-checkout.epayco.co/checkout-standard/{sessionId}`,
+       which unloads the bridge page and every closure registered on it. This
+       independently corroborates docs.epayco.com/docs/checkout-implementacion's own
+       verbatim statement that "estos hooks están disponibles para los tipos de
+       implementación `onpage`" — the restriction is structural, not arbitrary.
+       *Confidence: HIGH.*
+     - **On the `sessionId` path this app uses, `onResponse` is never invoked at
+       all**: `renderWithSessionId(...)`'s full body contains no `this.onResponse(...)`
+       call on any branch. *Confidence: HIGH.*
+     - **Where `onResponse` IS invoked (the legacy inline-`createTransaction` flow,
+       not used here), its argument is the transaction-CREATE response object — the
+       same object passed to `onCreated` — fired immediately after render and BEFORE
+       the shopper pays.** It structurally cannot carry a payment reference. Note this
+       contradicts the docs' own prose ("se dispara cuando el pago ha sido
+       procesado... recibe... el resultado de la transacción"); the shipped code is
+       the authority. *Confidence: HIGH.*
+     - **`ref_payco`/`x_ref_payco` appear 0 times in the entire 421 KB script.**
+       *Confidence: HIGH (mechanical).* The only payload the script does not itself
+       author is `component` mode's iframe `postMessage` passthrough
+       (`e.data.response`) — shape UNKNOWN/unverifiable without a sandbox, and
+       irrelevant, since this app uses `standard`, not `component`.
+     - **ePayco publishes no first-party sample of these hooks**: a code search of
+       ePayco's own official sample repo `github.com/epayco/resources` for
+       `setHooks`/`onResponse` returns zero hits.
+
+     **The design still holds, exactly as this bullet originally anticipated it might
+     have to** — ePayco simply falls back to case 3 below. See the "disclosed
+     limitation" note under decision 3, and the FUTURE AVENUE assessment after it.
 
 3. **No reference-search fallback for Wompi/ePayco — by design, not an oversight.**
    For an order where NONE of the three capture points above ever produced a
@@ -116,6 +149,53 @@ point.
    worker or its 15-minute timeout) — a real, disclosed limitation, not silently
    glossed over. Mercado Pago orders in this same "no providerRef at all" state DO get
    one more chance via `searchByReference` (decision 5).
+
+   **ePayco is strictly worse off than Wompi here, and this is the phase's single
+   biggest disclosed limitation.** After decision 2's third bullet resolved negative,
+   ePayco has only ONE `providerRef` source at all — `markPaid`/`markFailed` stamping
+   it from a real, signature-verified confirmation webhook. **ePayco has no
+   redirect-return fallback whatsoever**, where Wompi has one (`redirect-url` +
+   `?id=`) and Mercado Pago has both a webhook and `searchByReference`. Concretely:
+   if an ePayco order's confirmation webhook never arrives, that order will NEVER
+   acquire a `providerRef`, so reconciliation can never look it up, and it will always
+   fall through to the 15-minute stock-reservation expiry worker. For ePayco,
+   reconciliation therefore only ever helps in the narrower "a webhook arrived once
+   (e.g. a `FAILED` attempt) and a later one was lost" case — not the "no webhook ever
+   arrived" case reconciliation primarily exists for. This is a real gap in coverage
+   for one of three providers, and it should be stated plainly wherever this phase's
+   coverage is summarized (README, spec DoD), not left implicit.
+
+   **FUTURE AVENUE (assessed by Task 3, deliberately NOT implemented): ePayco's
+   response-page redirect.** ePayco's session-create request accepts a `response`
+   field (the shopper's post-payment browser return URL), which
+   `packages/payments/src/epayco.ts` deliberately omits today — read that module's doc
+   comment for the full reasoning. Task 3 assessed whether it would carry the
+   reference the hooks don't, and the answer looks like **yes**:
+   - ePayco's OWN first-party sample repo `github.com/epayco/resources` reads the
+     reference off the response page's QUERY STRING in two independent samples:
+     `onePage/response/response.html` does `var ref_payco = getQueryParam('ref_payco');`
+     then `var urlapp = "https://secure.epayco.co/validation/v1/reference/" + ref_payco;`,
+     and `epayco-ng6/src/app/components/response/response.component.ts` does
+     `this.refPayco = params['ref_payco'] || params['x_ref_payco'];` then
+     `this.epaycoService.getTransactionResponse(this.refPayco)`. Both feed EXACTLY the
+     endpoint `EpaycoProvider.getTransactionStatus` already calls. *Confidence: HIGH
+     that a `ref_payco` (or `x_ref_payco`) query param is appended to the merchant's
+     configured response URL.*
+   - *Confidence: MEDIUM-HIGH, not certain,* that setting the session-create
+     `response` field specifically (rather than the account-wide dashboard "URL
+     Respuesta y Confirmación" panel) is what those samples' URLs were configured by —
+     neither sample states which mechanism registered the URL it is running on.
+   - **Blocker, and the reason this stays unimplemented:** it needs a real, public,
+     PER-TENANT storefront URL. `PAYMENTS_STOREFRONT_BASE_URL` only approximates one
+     (a single global base for every tenant — see `packages/payments/src/storefront-base.ts`'s
+     own load-bearing-limitation warning). Wiring `response` to a wrong-tenant domain
+     would send shoppers to another merchant's storefront, which is worse than having
+     no return page. Doing this properly requires threading the per-request tenant
+     domain (`services/api/src/tenants/domain-resolver.ts`) into
+     `createCheckoutSession` — out of scope for P3c.
+   - Worth noting it would fix a UX gap too, not just reconciliation: in `standard`
+     mode the shopper finishes payment on `new-checkout.epayco.co` and currently has
+     no automatic way back to the storefront at all.
 
 4. **Reconciliation threshold is SHORTER than the existing 15-minute stock-reservation
    TTL, not the spec's literal 30 minutes — a deliberate, documented deviation.**
@@ -214,13 +294,17 @@ decision 4's query; for each, resolve a status per decisions 2/3/5/6 above and c
   same trust level as any other client-supplied value this app already treats as a
   hint, not a fact).
 
-### 5. ePayco return-capture (decision 2, third bullet): extend the EXISTING
-`setHooks` wiring in `apps/storefront/app/pago/epayco/page.tsx` — if `onResponse`'s
-payload contains `x_ref_payco` (verify against a real sandbox response or the
-community SDK's documented payload shape at implementation time, flagging confidence
-explicitly either way, matching this module's own existing honesty-note convention),
-call the SAME provider-ref-hint endpoint from decision 4 (both gateways' bridge
-pages hit the identical narrow endpoint — one endpoint, two callers).
+### 5. ePayco return-capture: **NOT BUILT — resolved as impossible, see decision 2's
+third bullet.** The plan was to extend the existing `setHooks` wiring in
+`apps/storefront/app/pago/epayco/page.tsx` to forward `x_ref_payco` to the same
+provider-ref-hint endpoint as Wompi. Task 3's research against the actual shipped
+`checkout-v2.js` established that (a) the hooks cannot fire at all in the `standard`
+mode this app uses (`open()` is a `window.location.href` full-page redirect), (b)
+`onResponse` is never invoked on the `sessionId` code path regardless, and (c) its
+payload is the pre-payment transaction-CREATE object and carries no transaction
+reference on any path. **No code was written.** The hint endpoint from §4 therefore
+has exactly ONE caller (the Wompi return page), not two. `apps/storefront/app/pago/epayco/page.tsx`'s
+module doc comment carries the full finding with per-claim confidence levels.
 
 ## Out of scope for P3c (explicitly deferred)
 
