@@ -112,6 +112,14 @@ async function seedProduct(tenantId: string, stock: number) {
 interface SeedOrderOpts {
   provider: string | null;
   providerRef?: string | null;
+  /** Provenance of `providerRef` (`Order.providerRefSource`). Defaults to
+   * `'verified'` whenever a `providerRef` is given, because that is what every
+   * pre-existing fixture in this file means by it: a ref stamped by
+   * markPaid/markFailed after a real signature-verified webhook. Tests that
+   * want the UNTRUSTED case (a value planted through the unauthenticated hint
+   * endpoint) pass `'hint'` — or `null` for a pre-migration row of unknown
+   * provenance, which is treated identically. */
+  providerRefSource?: string | null;
   totalCents?: number;
   /** How long ago the order was created, in minutes — REAL timestamps, never a
    * faked clock, so the 5-minute reconciliation floor is exercised for real. */
@@ -138,6 +146,8 @@ async function seedOnlineOrder(
       paymentStatus: opts.paymentStatus ?? 'PENDING',
       paymentProvider: opts.provider,
       providerRef: opts.providerRef ?? null,
+      providerRefSource:
+        opts.providerRefSource !== undefined ? opts.providerRefSource : opts.providerRef ? 'verified' : null,
       stockReservedUntil:
         opts.reservedForMinutes === null ? null : new Date(now + opts.reservedForMinutes * 60_000),
       createdAt: new Date(now - opts.ageMinutes * 60_000),
@@ -195,8 +205,13 @@ function fakeProvider(
   } as PaymentProvider;
 }
 
+/** A scripted gateway answer. `currency` defaults to `'COP'` because that is
+ * what a REAL response from any of the three adapters carries alongside an
+ * amount (`data.currency` / `currency_id` / `x_currency_code`) — a fixture
+ * that omitted it would be testing a malformed response, not a normal one.
+ * The currency-binding tests below override it explicitly. */
 function status(s: NormalizedStatus, extra: Partial<TransactionStatusResult> = {}): TransactionStatusResult {
-  return { status: s, ...extra };
+  return { status: s, currency: 'COP', ...extra };
 }
 
 /** Only the calls that concern ONE specific order — the sweep is cross-tenant,
@@ -367,6 +382,7 @@ describe('reconcilePendingPayments — (d) mercadopago with no providerRef falls
       status: 'PAID' as const,
       reference: String(number),
       amountCents: 25_000,
+      currency: 'COP',
     }));
     const getTransactionStatus = vi.fn(async () => status('PENDING'));
 
@@ -659,6 +675,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
           status: 'PAID' as const,
           reference: `${number}2`,
           amountCents: 25_000,
+          currency: 'COP',
         }),
       }),
     );
@@ -728,6 +745,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
           status: 'PAID' as const,
           reference: String(number),
           amountCents: 100_000,
+          currency: 'COP',
         }),
       }),
     );
@@ -758,6 +776,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
           status: 'PAID' as const,
           reference: String(number),
           amountCents: 25_000,
+          currency: 'COP',
         }),
       }),
     );
@@ -936,6 +955,11 @@ describe('reconcilePendingPayments — (h) the candidate query is bounded and de
         paymentStatus: 'PENDING' as const,
         paymentProvider: 'wompi',
         providerRef: `wompi_txn_bounded_${i}`,
+        // Same default `seedOnlineOrder` applies (P3 wave-2 FIX 3): these
+        // fixtures stand for refs a real signature-verified webhook stamped.
+        // Without it the worker would refuse the by-id lookup on provenance
+        // grounds and this test would measure nothing.
+        providerRefSource: 'verified',
         stockReservedUntil: new Date(now + 9 * 60_000),
         createdAt: new Date(now - 6 * 60_000 - i * 1_000),
         email: 'comprador@example.com',
@@ -999,5 +1023,422 @@ describe('reconcilePendingPayments — COD and already-settled orders are out of
     expect((await prisma.order.findUnique({ where: { id: noReservation.orderId } }))?.paymentStatus).toBe(
       'PENDING',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3 wave-2 regression tests. Each block below fails against the pre-fix code.
+// ---------------------------------------------------------------------------
+
+describe('reconcilePendingPayments — FIX 1: a DECLINED-then-retried order stays recoverable', () => {
+  // The live repro this closes, end to end:
+  //
+  //   PENDING/PENDING → attempt 1 declined → PENDING/FAILED
+  //                   → attempt 2 APPROVED → PENDING/FAILED   ← webhook lost
+  //                   → reconciliation      → settled = 0     ← THIS test
+  //                   → 15-min expiry       → CANCELLED/EXPIRED, stock restocked
+  //
+  // The shopper WAS charged. Before the fix the candidate query filtered
+  // `paymentStatus: 'PENDING'`, so a declined attempt removed the order from
+  // reconciliation permanently and nothing was left to recover a lost retry
+  // webhook.
+  it('a PENDING/FAILED order is still a candidate and recovers to CONFIRMED/PAID', async () => {
+    const { tenantId } = await signUpWithTenant('recon-failed-retry@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      // Attempt 1's ref, stamped by its (genuine) FAILED webhook.
+      providerRef: 'wompi_txn_attempt_1_declined',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+      paymentStatus: 'FAILED',
+    });
+
+    const getTransactionStatus = vi.fn(async () =>
+      // Attempt 2 went through; Wompi says so when asked.
+      status('PAID', { reference: String(number), amountCents: 25_000 }),
+    );
+
+    const settled = await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', { getTransactionStatus }),
+    );
+
+    expect(getTransactionStatus).toHaveBeenCalled();
+    expect(settled).toBeGreaterThan(0);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PAID');
+    expect(after?.stockReservedUntil).toBeNull();
+    expect(await prisma.orderEvent.count({ where: { orderId, type: 'payment_confirmed' } })).toBe(1);
+  });
+
+  it('a FAILED order the gateway still calls FAILED is left exactly as it was (no churn, no second event)', async () => {
+    const { tenantId } = await signUpWithTenant('recon-failed-stays-failed@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_still_declined',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+      paymentStatus: 'FAILED',
+    });
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async () => status('FAILED', { reference: String(number), amountCents: 25_000 }),
+      }),
+    );
+
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('PENDING');
+    expect(after?.paymentStatus).toBe('FAILED');
+    // markFailed still requires PENDING/PENDING, so re-settling an
+    // already-FAILED order is a no-op and writes no duplicate event.
+    expect(await prisma.orderEvent.count({ where: { orderId, type: 'payment_failed' } })).toBe(0);
+  });
+});
+
+describe('reconcilePendingPayments — FIX 2: an order whose status already moved on is never a candidate', () => {
+  // The zombie the `status: 'PENDING'` filter kills. A merchant pressing
+  // "Confirmar pedido" on an online-payment order left it CONFIRMED/PENDING
+  // with `stockReservedUntil` still set — which matched the old candidate
+  // query FOREVER (one gateway call + one settle attempt every 2 minutes for
+  // the life of the order), while `expireReservations()` could never release
+  // it because that sweep filters `status: 'PENDING'`.
+  it('a CONFIRMED/PENDING order with a live reservation is skipped: no gateway call at all', async () => {
+    const { tenantId } = await signUpWithTenant('recon-zombie@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_zombie',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+    });
+
+    const getTransactionStatus = vi.fn(async () => status('PAID'));
+    const settledCount = await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', { getTransactionStatus }),
+    );
+
+    expect(getTransactionStatus).not.toHaveBeenCalled();
+    expect(settledCount).toBe(0);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PENDING');
+  });
+});
+
+describe('reconcilePendingPayments — FIX 3a: the CURRENCY binding', () => {
+  // There was no currency term anywhere in this system: all three adapters
+  // sent `CHECKOUT_CURRENCY = 'COP'` outbound and nothing read one back, so a
+  // payment of the same NUMBER of units in another currency satisfied the
+  // amount check exactly as well as the real one.
+  it('a matching reference and amount in a DIFFERENT currency settles nothing', async () => {
+    const { tenantId } = await signUpWithTenant('recon-currency-usd@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_usd',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const markPaidSpy = vi.spyOn(paymentsService, 'markPaid');
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        // 250,00 USD against a 250.000 COP order: same number, ~4.000x the money.
+        getTransactionStatus: async () =>
+          status('PAID', { reference: String(number), amountCents: 25_000, currency: 'USD' }),
+      }),
+    );
+
+    expect(callsForOrder(markPaidSpy, orderId)).toHaveLength(0);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('PENDING');
+    expect(after?.paymentStatus).toBe('PENDING');
+    expect(after?.stockReservedUntil).not.toBeNull();
+  });
+
+  it('an amount with NO currency at all settles nothing (unverifiable is not a pass)', async () => {
+    const { tenantId } = await signUpWithTenant('recon-currency-missing@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_no_currency',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const markPaidSpy = vi.spyOn(paymentsService, 'markPaid');
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async () => ({
+          status: 'PAID' as const,
+          reference: String(number),
+          amountCents: 25_000,
+          // currency deliberately absent
+        }),
+      }),
+    );
+
+    expect(callsForOrder(markPaidSpy, orderId)).toHaveLength(0);
+    expect((await prisma.order.findUnique({ where: { id: orderId } }))?.paymentStatus).toBe('PENDING');
+  });
+
+  it('a result with NO amount at all is still bound by reference alone, currency or not (unchanged behavior)', async () => {
+    const { tenantId } = await signUpWithTenant('recon-currency-no-amount@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_no_amount_no_currency',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+    });
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async () => ({ status: 'PAID' as const, reference: String(number) }),
+      }),
+    );
+
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PAID');
+  });
+});
+
+describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a non-account-scoped provider', () => {
+  // The exploit: ePayco's lookup takes no credential at all and Wompi's was
+  // observed answering with none, so `reference`/`amountCents`/`currency` —
+  // every term the binding check compares — are all values the PAYER chose. An
+  // attacker with their own merchant account pays THEMSELVES a transaction
+  // carrying the victim's order number and total, plants its id through the
+  // unauthenticated hint endpoint, and the binding passes TRUTHFULLY.
+  it.each([
+    ['wompi', FAKE_WOMPI_CREDS] as const,
+    ['epayco', FAKE_WOMPI_CREDS] as const,
+  ])(
+    '%s: a truthfully-binding PAID lookup from a hinted ref settles nothing, and the gateway is never even asked',
+    async (providerId, creds) => {
+      const { tenantId } = await signUpWithTenant(`recon-hint-${providerId}@demo.co`, 'owner');
+      await paymentsService.saveProviderCredentials(tenantId, providerId, creds);
+      const { orderId, number } = await seedOnlineOrder(tenantId, {
+        provider: providerId,
+        providerRef: 'attacker_planted_txn_paid_into_their_own_account',
+        providerRefSource: 'hint',
+        ageMinutes: 6,
+        reservedForMinutes: 9,
+        totalCents: 25_000,
+      });
+
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const markPaidSpy = vi.spyOn(paymentsService, 'markPaid');
+      const getTransactionStatus = vi.fn(async () =>
+        // Everything matches. That is the whole point — the values are the
+        // attacker's to choose.
+        status('PAID', { reference: String(number), amountCents: 25_000, currency: 'COP' }),
+      );
+
+      await reconcilePendingPayments(paymentsService, () =>
+        fakeProvider(providerId, { getTransactionStatus }),
+      );
+
+      expect(getTransactionStatus).not.toHaveBeenCalled();
+      expect(callsForOrder(markPaidSpy, orderId)).toHaveLength(0);
+      const after = await prisma.order.findUnique({ where: { id: orderId } });
+      expect(after?.status).toBe('PENDING');
+      expect(after?.paymentStatus).toBe('PENDING');
+      expect(after?.stockReservedUntil).not.toBeNull();
+    },
+  );
+
+  it('a NULL providerRefSource (a pre-migration row of unknown provenance) is treated as untrusted too', async () => {
+    const { tenantId } = await signUpWithTenant('recon-hint-null-source@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'ref_of_unknown_provenance',
+      providerRefSource: null,
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const getTransactionStatus = vi.fn(async () =>
+      status('PAID', { reference: String(number), amountCents: 25_000 }),
+    );
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', { getTransactionStatus }),
+    );
+
+    expect(getTransactionStatus).not.toHaveBeenCalled();
+    expect((await prisma.order.findUnique({ where: { id: orderId } }))?.paymentStatus).toBe('PENDING');
+  });
+
+  it("a webhook-VERIFIED ref on the same provider still settles — this gate is about provenance, not about wompi", async () => {
+    const { tenantId } = await signUpWithTenant('recon-verified-still-works@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_stamped_by_a_real_webhook',
+      providerRefSource: 'verified',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+    });
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async () => status('PAID', { reference: String(number), amountCents: 25_000 }),
+      }),
+    );
+
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PAID');
+  });
+
+  it('mercadopago IS account-scoped, so a hinted ref there is still looked up by id', async () => {
+    const { tenantId } = await signUpWithTenant('recon-hint-mp-allowed@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'mercadopago',
+      providerRef: 'mp-payment-from-the-return-page',
+      providerRefSource: 'hint',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+    });
+
+    const getTransactionStatus = vi.fn(async () =>
+      status('PAID', { reference: String(number), amountCents: 25_000 }),
+    );
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('mercadopago', { getTransactionStatus }),
+    );
+
+    // MP's lookup authenticates with the PRIVATE access token, so a truthful
+    // answer there is necessarily about a payment into THIS tenant's account.
+    expect(getTransactionStatus).toHaveBeenCalled();
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PAID');
+  });
+});
+
+describe('reconcilePendingPayments — FIX 4: a planted bogus ref no longer suppresses self-healing', () => {
+  // Before: the worker PREFERRED `order.providerRef` over `searchByReference`,
+  // so an attacker converted a RECOVERABLE order into a LOST one — an MP order
+  // with no ref self-heals to CONFIRMED/PAID off the search, but the same
+  // order with a bogus ref planted stopped at the failed by-id lookup and was
+  // cancelled and restocked with the shopper's money already taken.
+  it('a by-id lookup that fails to bind falls back to searchByReference and settles', async () => {
+    const { tenantId } = await signUpWithTenant('recon-fallback-search@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'mercadopago',
+      providerRef: 'bogus-ref-planted-by-an-attacker',
+      providerRefSource: 'hint',
+      ageMinutes: 7,
+      reservedForMinutes: 8,
+      totalCents: 25_000,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const getTransactionStatus = vi.fn(async () =>
+      // A real, PAID payment — for a DIFFERENT order. Truthful, and useless.
+      status('PAID', { reference: `${number}9`, amountCents: 25_000 }),
+    );
+    const searchByReference = vi.fn(async () => ({
+      providerRef: 'mp-payment-the-shopper-actually-made',
+      status: 'PAID' as const,
+      reference: String(number),
+      amountCents: 25_000,
+      currency: 'COP',
+    }));
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('mercadopago', { getTransactionStatus, searchByReference }),
+    );
+
+    expect(getTransactionStatus).toHaveBeenCalled();
+    expect(searchByReference).toHaveBeenCalledWith(String(number), expect.anything());
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PAID');
+    // Settled with the ref the GATEWAY vouched for, not the planted one.
+    expect(after?.providerRef).toBe('mp-payment-the-shopper-actually-made');
+    expect(after?.providerRefSource).toBe('verified');
+  });
+
+  it('the same fallback runs when the by-id lookup was REFUSED for provenance (search, then settle)', async () => {
+    const { tenantId } = await signUpWithTenant('recon-fallback-after-refusal@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'mercadopago',
+      providerRef: 'planted',
+      providerRefSource: 'hint',
+      ageMinutes: 7,
+      reservedForMinutes: 8,
+      totalCents: 25_000,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // MP is account-scoped so the by-id call IS made; script it to return a
+    // result that cannot bind (no reference), then prove the search still runs.
+    const getTransactionStatus = vi.fn(async () => ({ status: 'PAID' as const }));
+    const searchByReference = vi.fn(async () => ({
+      providerRef: 'mp-payment-real',
+      status: 'PAID' as const,
+      reference: String(number),
+      amountCents: 25_000,
+      currency: 'COP',
+    }));
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('mercadopago', { getTransactionStatus, searchByReference }),
+    );
+
+    expect(searchByReference).toHaveBeenCalled();
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.paymentStatus).toBe('PAID');
+    expect(after?.providerRef).toBe('mp-payment-real');
+  });
+
+  it('a provider with NO searchByReference and an unbindable by-id result is still left alone', async () => {
+    const { tenantId } = await signUpWithTenant('recon-fallback-none@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'wompi',
+      providerRef: 'wompi_txn_verified_but_wrong_order',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+      totalCents: 25_000,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const markPaidSpy = vi.spyOn(paymentsService, 'markPaid');
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async () => status('PAID', { reference: `${number}7`, amountCents: 25_000 }),
+      }),
+    );
+
+    expect(callsForOrder(markPaidSpy, orderId)).toHaveLength(0);
+    expect((await prisma.order.findUnique({ where: { id: orderId } }))?.paymentStatus).toBe('PENDING');
   });
 });

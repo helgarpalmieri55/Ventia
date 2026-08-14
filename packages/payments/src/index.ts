@@ -122,6 +122,24 @@ export interface TransactionStatusResult {
    * matching this codebase's cents-as-source-of-truth convention.
    * `undefined` when unavailable or non-numeric. */
   amountCents?: number;
+  /** The gateway's OWN record of the transaction CURRENCY, as the ISO-4217
+   * alphabetic code the gateway reports it (e.g. `"COP"`).
+   *
+   * ## Why an amount without a currency is not a binding (P3 wave-2 FIX 3)
+   *
+   * `amountCents` alone is a bare number. Every one of these adapters sends
+   * `CHECKOUT_CURRENCY = 'COP'` OUTBOUND, but nothing read the currency back
+   * INBOUND, so a transaction for the same numeric amount in a DIFFERENT
+   * currency satisfied the caller's amount check exactly as well as the real
+   * one — and 118.457 units of a currency worth ~4.000x the peso is not the
+   * same money at all. Reporting the gateway's own currency lets the caller
+   * require `=== 'COP'` before treating the amount as meaningful.
+   *
+   * `undefined` when the response genuinely doesn't carry it (or doesn't
+   * carry it as a string) — never fabricated, never defaulted to `'COP'`,
+   * same rule as the two fields above. Callers must treat `undefined` as
+   * "cannot verify", i.e. a REJECTION, not a pass. */
+  currency?: string;
 }
 
 /** The result of a lookup BY OUR OWN merchant reference (`searchByReference`).
@@ -165,6 +183,13 @@ export interface ReferenceSearchResult {
    * (normalized here even for gateways whose APIs speak major units).
    * `undefined` when unavailable or non-numeric. */
   amountCents?: number;
+  /** The gateway's OWN record of the chosen result's currency (ISO-4217
+   * alphabetic, e.g. `"COP"`) — same contract, and same reason for existing,
+   * as `TransactionStatusResult.currency`: an amount is only a binding once
+   * it is known to be denominated in the currency the order was priced in.
+   * `undefined` when absent or not a string; a rejection at the caller, never
+   * a pass. */
+  currency?: string;
 }
 
 export interface PaymentProvider {

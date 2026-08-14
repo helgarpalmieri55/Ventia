@@ -135,7 +135,10 @@ cross-origin `Set-Cookie` wouldn't be readable back from its own domain), instea
 (P3a), or `mercadopago`/`epayco` (P3b — see the Payments section below). For `cod`, checkout never
 touches `Product.stock` — stock is decremented on the `confirm` transition below (`PENDING` →
 `CONFIRMED`), not at order-creation time, and restocked on `cancel` from any status that had already
-decremented it. For any online provider (`wompi`/`mercadopago`/`epayco`), stock IS decremented
+decremented it. `confirm` is **COD-only** and the API enforces it: an order with a `paymentProvider`
+whose `paymentStatus` is still `PENDING` is rejected with `409 ONLINE_PAYMENT_PENDING`, because its
+stock was already decremented at checkout and confirming it by hand double-decremented and stranded
+it (the admin UI hides the button for those orders too). For any online provider (`wompi`/`mercadopago`/`epayco`), stock IS decremented
 immediately at order-creation time (an online-payment order's stock "reservation" *is* the real
 decrement, reusing the same primitive) and restocked on `cancel` or by the TTL-expiry worker if the
 shopper never completes payment; see
@@ -229,16 +232,23 @@ All three share the same provider-registry/webhook-controller/stock-reservation 
   it — not the spec's draft-time "30 min", which would arrive *after* that worker had already
   fired (design decision 4 in
   `docs/superpowers/specs/2026-07-30-p3c-payment-reconciliation-design.md`). It looks a
-  transaction up either by `Order.providerRef` (new column — stamped by `markPaid`/`markFailed`
+  transaction up either by `Order.providerRef` (stamped by `markPaid`/`markFailed`
   from a signature-verified webhook, or planted by Wompi's redirect return: `redirect-url` →
   `/pago/wompi-retorno/:orderNumber?id=` → `PATCH
   /v1/storefront/checkout/:orderNumber/provider-ref-hint`, which writes *only* `providerRef` and
-  never `paymentStatus`/`status`) or, for Mercado Pago only, by our own order number via
+  its `providerRefSource` provenance marker, never `paymentStatus`/`status`) or, for Mercado Pago
+  only, by our own order number via
   `searchByReference` (`GET /v1/payments/search?external_reference=`). **Before settling
-  anything it runs an order-binding check**: the reference — and, where the provider supplies it,
-  the amount — read out of the *gateway's own response* must equal the order's `number` /
-  `totalCents`; a mismatch, or a reference the adapter couldn't read, settles nothing in either
-  direction and leaves the order to the expiry worker. That check is what makes the deliberately
+  anything it runs an order-binding check**: the reference — and, where the provider supplies an
+  amount, the amount *and* its currency (`COP`) — read out of the *gateway's own response* must
+  equal the order's `number` / `totalCents`; a mismatch, or a reference the adapter couldn't read,
+  settles nothing in either direction, and the worker then falls back to `searchByReference` where
+  the provider has one (so a planted bogus ref can no longer suppress Mercado Pago's self-healing).
+  A binding check is **not** an account check: `Order.providerRefSource` records whether a ref came
+  from a verified webhook or from the unauthenticated hint endpoint, and a hint-sourced ref is only
+  ever looked up by id for providers whose lookup is merchant-account-scoped (Mercado Pago's private
+  access token). Wompi's lookup authenticates with the *public* key and was observed answering with
+  no credential at all, and ePayco's takes none — so for those two a hinted ref settles nothing. That check is what makes the deliberately
   unauthenticated hint endpoint safe, and must not be "optimized away": without it, a shopper who
   plants a real, genuinely-paid transaction id from their own past purchase onto someone else's
   `PENDING` order would get a truthful "yes, paid" from the gateway and a free order. The job

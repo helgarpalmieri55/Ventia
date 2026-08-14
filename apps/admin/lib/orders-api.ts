@@ -145,6 +145,33 @@ export const ALLOWED_ACTIONS: Record<OrderStatus, OrderAction[]> = {
   CANCELLED: [],
 };
 
+/** The subset of an order this gate reads — so the check can be unit-tested
+ * without building a whole `OrderDetail`. */
+export interface PaymentGateFields {
+  paymentStatus: string;
+  paymentProvider: string | null;
+}
+
+/**
+ * CLIENT-SIDE MIRROR of `services/api/src/orders/transitions.ts`'s
+ * `isBlockedByPendingOnlinePayment` — the same "confirm is COD-only" rule,
+ * hand-written independently for the same reason `ALLOWED_ACTIONS` above is
+ * (this app cannot import from `services/api/src`).
+ *
+ * `ALLOWED_ACTIONS` alone said "PENDING can be confirmed", so `/pedidos/[id]`
+ * rendered "Confirmar pedido" for EVERY pending order — including an
+ * online-payment order still waiting on its gateway, where pressing it
+ * double-decremented stock and stranded the order in CONFIRMED/PENDING (see
+ * the server-side function's doc comment for the reproduced damage).
+ *
+ * Like `ALLOWED_ACTIONS`, this is a UX gate and NOT a security boundary: the
+ * server re-checks the same rule under an advisory lock on every PATCH and
+ * answers `409 ONLINE_PAYMENT_PENDING` regardless of what this returns.
+ */
+export function isConfirmBlockedByPayment(order: PaymentGateFields): boolean {
+  return order.paymentStatus === 'PENDING' && order.paymentProvider !== null;
+}
+
 /** `shippingAddress` comes over the wire as `Prisma.JsonValue` (loosely
  * typed server-side too, see `orders.service.ts`'s `OrderDTO`) — defensively
  * narrowed to the `CheckoutAddressInput` shape (`@ventia/core`'s

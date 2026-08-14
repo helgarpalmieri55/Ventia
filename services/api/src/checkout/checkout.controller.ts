@@ -115,6 +115,41 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
   };
 }
 
+/** The largest value Postgres's `int4` can hold, and therefore the largest
+ * value `Order.number` can. Prisma REJECTS an out-of-range value for an `Int`
+ * filter by THROWING (a `PrismaClientValidationError`), exactly as it does for
+ * `NaN` — so an all-digits-but-huge path param 500s in precisely the same
+ * place, and with the same consequence, as the `NaN` the parse guards below
+ * were originally written for. Verified live: `/checkout/confirmacion/99999999999`
+ * returned a 500 before this bound existed. Wave 1 added the identical bound
+ * to the webhook route's reference parse; these two sibling routes are the
+ * ones it did not reach. */
+const MAX_INT4 = 2_147_483_647;
+
+/** Parses an `:orderNumber` path param into a value that is safe to hand
+ * Prisma as an `Order.number` filter, or `null` if it is not one. Folded into
+ * the callers' `ORDER_NOT_FOUND` 404 (rather than a distinct 400) since from
+ * the shopper's perspective a malformed order-number URL and a genuinely
+ * nonexistent order are the same outcome: "this URL doesn't point at a real
+ * order". */
+function parseOrderNumberParam(raw: string): number | null {
+  const orderNumber = parseInt(raw, 10);
+  if (!Number.isInteger(orderNumber) || orderNumber < 0 || orderNumber > MAX_INT4) return null;
+  return orderNumber;
+}
+
+/** Upper bound on a stored `providerRef` (P3 wave-2 FIX 5). No cap existed at
+ * all: a 90 KB `providerRef` was accepted and written to the column, with only
+ * `express.json()`'s 100 kb default standing between an unauthenticated caller
+ * and unbounded per-order storage growth.
+ *
+ * 128 is ample for every id this column ever legitimately holds — Wompi's
+ * transaction ids look like `01-1531231271-19365` (~20 chars), Mercado Pago's
+ * are numeric (~11), ePayco's `ref_payco` is numeric (~10). Anything longer is
+ * not a gateway id, so rejecting it loses nothing real and is far below any
+ * threshold where the write becomes interesting to an attacker. */
+const MAX_PROVIDER_REF_LENGTH = 128;
+
 /** Hand-rolled shape validation for the provider-ref-hint body, same
  * rationale (and same `VALIDATION_FAILED` + `details` response shape) as
  * `parseCheckoutBody` above: this package avoids a direct `zod` dependency
@@ -125,17 +160,29 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
  * Trimmed before storing: a browser round trip can easily append whitespace
  * to a query param, and a `providerRef` with a stray space would be fed
  * verbatim into a gateway URL path later and simply 404 there. A body whose
- * `providerRef` is missing, not a string, empty, or whitespace-only is a 400
- * rather than a silently-ignored no-op, so a broken caller is visible. */
+ * `providerRef` is missing, not a string, empty, whitespace-only, or longer
+ * than `MAX_PROVIDER_REF_LENGTH` is a 400 rather than a silently-ignored
+ * no-op, so a broken caller is visible. The length is checked AFTER trimming,
+ * so trailing whitespace can't push a legitimate id over the bound. */
 function parseProviderRefHintBody(body: unknown): { providerRef: string } {
   const b = (body ?? {}) as Record<string, unknown>;
-  if (typeof b.providerRef !== 'string' || b.providerRef.trim().length === 0) {
+  const trimmed = typeof b.providerRef === 'string' ? b.providerRef.trim() : '';
+  if (trimmed.length === 0) {
     throw new HttpException(
       { error: 'VALIDATION_FAILED', details: { providerRef: 'providerRef es requerido' } },
       400,
     );
   }
-  return { providerRef: b.providerRef.trim() };
+  if (trimmed.length > MAX_PROVIDER_REF_LENGTH) {
+    throw new HttpException(
+      {
+        error: 'VALIDATION_FAILED',
+        details: { providerRef: `providerRef debe tener máximo ${MAX_PROVIDER_REF_LENGTH} caracteres` },
+      },
+      400,
+    );
+  }
+  return { providerRef: trimmed };
 }
 
 @Controller('v1/storefront/checkout')
@@ -218,14 +265,11 @@ export class CheckoutController {
     // value does NOT simply match zero rows the way a merely-nonexistent
     // number would — Prisma's query engine rejects `NaN` outright with a
     // `PrismaClientValidationError` ("Argument `number` is missing"), which
-    // would otherwise surface as an uncaught 500. So malformed input needs
-    // its own explicit branch after all; it's folded into the same
-    // `ORDER_NOT_FOUND` 404 (rather than a distinct 400) since from the
-    // shopper's perspective a malformed confirmation URL and a genuinely
-    // nonexistent order number are the same outcome: "this URL doesn't point
-    // at a real order".
-    const orderNumber = parseInt(orderNumberParam, 10);
-    if (!Number.isInteger(orderNumber)) {
+    // would otherwise surface as an uncaught 500. An out-of-int4-range value
+    // throws in the same place for the same reason (P3 wave-2 FIX 6) — see
+    // `parseOrderNumberParam`/`MAX_INT4`.
+    const orderNumber = parseOrderNumberParam(orderNumberParam);
+    if (orderNumber === null) {
       throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
     }
 
@@ -295,19 +339,53 @@ export class CheckoutController {
    * together and the order is looked up BY that verified reference; this
    * by-id path needs the equivalent binding done explicitly.
    *
-   * Correspondingly, this endpoint writes `Order.providerRef` and NOTHING
-   * else — never `paymentStatus`/`status`. It cannot move an order's state
-   * one inch on its own, which is what keeps its blast radius at "an
-   * attacker can make an order un-reconcilable" (a denial of convenience
-   * that falls through to the existing stock-reservation expiry worker)
-   * rather than "an attacker can mark an order paid".
+   * Correspondingly, this endpoint writes `Order.providerRef` (plus its
+   * `providerRefSource` provenance marker, and an `OrderEvent` audit row) and
+   * NOTHING else — never `paymentStatus`/`status`. It cannot move an order's
+   * state one inch on its own.
    *
-   * The write is unconditional — an existing, different `providerRef` is
-   * overwritten rather than protected (design doc decision 2): a later,
-   * more-authoritative source (e.g. a real webhook that already ran) should
-   * win, and since every source is re-verified against the gateway anyway,
-   * guarding on "only if null" would buy nothing and would let a stale value
-   * pin an order into permanent unreconcilability. */
+   * ## What P3 wave-2 hardened here (FIX 5 + FIX 3), and why
+   *
+   * The original version accepted anything, from anyone, in any order state,
+   * and left no trace. Four verified defects, and what replaced each:
+   *
+   *  1. **No length cap.** A 90 KB `providerRef` was accepted and stored;
+   *     only `express.json()`'s 100 kb default bounded it. Now capped at
+   *     `MAX_PROVIDER_REF_LENGTH` — see that constant for why 128 is ample.
+   *  2. **No state filter.** Accepted on `PAID`, `CANCELLED` and COD orders
+   *     alike, none of which the reconciliation job will ever look at. Now
+   *     only while the order is genuinely awaiting an online payment:
+   *     `paymentProvider != null` and `paymentStatus` in (`PENDING`,
+   *     `FAILED`). `FAILED` is included on purpose — a declined attempt
+   *     leaves the order recoverable and retryable (see
+   *     `PaymentsService.markPaid`'s FIX 1 note), so the retry's return page
+   *     must still be able to report its new transaction id.
+   *  3. **Unconditional overwrite.** A `providerRef` a signature-verified
+   *     webhook had already stamped could be clobbered by anyone who knew the
+   *     order number — a repeatable denial of settlement. Now refused: a ref
+   *     whose `providerRefSource` is `'verified'` wins over any hint. This is
+   *     a deliberate REVERSAL of design decision 2's "a later source wins",
+   *     which assumed every source was equally trustworthy because every
+   *     source is re-verified against the gateway. FIX 3 established that is
+   *     false: re-verification proves the transaction exists and matches, not
+   *     that it was paid into THIS tenant's account.
+   *  4. **No audit trail.** The mutation left nothing behind. Now writes a
+   *     `provider_ref_hint` `OrderEvent` with actor `'shopper'`, so an
+   *     unexpected ref on an order is traceable to this endpoint rather than
+   *     being indistinguishable from a webhook stamp.
+   *
+   * `providerRefSource: 'hint'` is the load-bearing part for FIX 3: the
+   * reconciliation worker refuses to settle a by-id lookup from a hint-sourced
+   * ref on any provider whose transaction lookup is not merchant-account-scoped
+   * (today: Wompi and ePayco — see `ACCOUNT_SCOPED_LOOKUP_PROVIDERS` in
+   * `payments/reconciliation.worker.ts`). So even a hint that passes every
+   * check here cannot, on its own, settle an order on those providers.
+   *
+   * **Rate limiting is explicitly out of scope** and this endpoint remains
+   * unauthenticated and unthrottled: no rate-limiting infrastructure exists
+   * anywhere in this codebase, and it is tracked as a separate platform-wide
+   * item. 60 rapid unauthenticated PATCHes still all return 200. What the
+   * above changes bound is the DAMAGE per accepted call, not the call rate. */
   @Patch(':orderNumber/provider-ref-hint')
   async providerRefHint(
     @StorefrontTenantId() tenantId: string,
@@ -316,29 +394,80 @@ export class CheckoutController {
   ): Promise<{ ok: true }> {
     const { providerRef } = parseProviderRefHintBody(body);
 
-    // Same NaN guard, and the same fold-into-404, as `confirmation` above —
-    // see that method's comment for why this branch is load-bearing rather
-    // than defensive: Prisma's query engine REJECTS a literal `NaN`
-    // where-value with a PrismaClientValidationError instead of matching
-    // zero rows, which would otherwise surface as an uncaught 500.
-    const orderNumber = parseInt(orderNumberParam, 10);
-    if (!Number.isInteger(orderNumber)) {
+    // Same guard, and the same fold-into-404, as `confirmation` above — see
+    // that method's comment for why this branch is load-bearing rather than
+    // defensive: Prisma's query engine REJECTS both a literal `NaN` and an
+    // out-of-int4-range value for an `Int` where-clause by THROWING, instead
+    // of matching zero rows, which would otherwise surface as an uncaught 500.
+    const orderNumber = parseOrderNumberParam(orderNumberParam);
+    if (orderNumber === null) {
       throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
     }
 
-    // `updateMany` rather than findFirst-then-update: one round trip, and
-    // its `count` is exactly the "did this order exist for this tenant"
-    // answer the 404 needs. The tenant-scoped client AND-scopes this
-    // `where` with `tenantId` on top of RLS (see packages/db's
-    // tenant-client.ts), so an order number belonging to another tenant
-    // matches nothing here and 404s rather than being written.
-    const { count } = await tenantDb(tenantId).order.updateMany({
+    // Read-then-write rather than the previous single `updateMany`: the
+    // acceptance rules above (state filter, and "never clobber a verified
+    // ref") are conditions on the CURRENT row, and the audit event needs the
+    // order's id anyway. The tenant-scoped client AND-scopes this `where`
+    // with `tenantId` on top of RLS (see packages/db's tenant-client.ts), so
+    // an order number belonging to another tenant matches nothing here and
+    // 404s rather than being read or written.
+    //
+    // No advisory lock and no transaction: the two writes below touch only
+    // this order's `providerRef`/`providerRefSource` and append one event, and
+    // a hint racing a webhook stamp is not a correctness problem — whichever
+    // lands last, the reconciliation worker re-reads BOTH the ref and its
+    // provenance together and applies the same rules to whatever it finds.
+    // (The worst case is a hint landing microseconds after a verified stamp
+    // and downgrading it, which is exactly the pre-existing "attacker can make
+    // an order un-reconcilable" blast radius, not a new one.)
+    const db = tenantDb(tenantId);
+    const order = await db.order.findFirst({
       where: { tenantId, number: orderNumber },
-      data: { providerRef },
+      select: { id: true, paymentStatus: true, paymentProvider: true, providerRefSource: true },
     });
-    if (count === 0) {
+    if (!order) {
       throw new HttpException({ error: 'ORDER_NOT_FOUND' }, 404);
     }
+
+    const awaitingOnlinePayment =
+      order.paymentProvider !== null &&
+      (order.paymentStatus === 'PENDING' || order.paymentStatus === 'FAILED');
+    if (!awaitingOnlinePayment) {
+      // 409, not a silent 200: the caller is a bridge page that genuinely got
+      // this wrong (or an attacker), and a hint for an order that is already
+      // settled, cancelled, or COD can never be acted on. `ORDER_NOT_FOUND`
+      // would be a lie, and 200 would hide a broken storefront integration.
+      throw new HttpException(
+        {
+          error: 'ORDER_NOT_AWAITING_PAYMENT',
+          details: { paymentStatus: order.paymentStatus, paymentProvider: order.paymentProvider },
+        },
+        409,
+      );
+    }
+
+    if (order.providerRefSource === 'verified') {
+      throw new HttpException({ error: 'PROVIDER_REF_ALREADY_VERIFIED' }, 409);
+    }
+
+    await db.order.update({
+      where: { id: order.id },
+      data: { providerRef, providerRefSource: 'hint' },
+    });
+
+    // Audit trail (FIX 5, defect 4). `actor: 'shopper'` — this endpoint is
+    // reached by an anonymous browser, never by staff or by the system, and
+    // the event `data` deliberately records the value written so a support
+    // engineer looking at an order can see exactly what was planted and when.
+    await db.orderEvent.create({
+      data: {
+        tenantId,
+        orderId: order.id,
+        type: 'provider_ref_hint',
+        actor: 'shopper',
+        data: { providerRef, source: 'hint' } as Prisma.InputJsonValue,
+      },
+    });
 
     return { ok: true };
   }

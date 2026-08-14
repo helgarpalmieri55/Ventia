@@ -1,0 +1,24 @@
+-- Record WHERE `Order.providerRef` came from, so the reconciliation worker can
+-- tell a signature-verified value from an attacker-supplied one.
+--
+-- Safety notes (checked, not assumed):
+--
+--  1. Additive and nullable, so no data migration and no rewrite of existing
+--     rows: adding a nullable column with no default is a catalog-only change
+--     in Postgres.
+--
+--  2. NO BACKFILL IS PERFORMED, deliberately. Existing non-null `providerRef`
+--     values could have come either from a real webhook stamp or from the
+--     unauthenticated hint endpoint, and this migration cannot tell them
+--     apart. Backfilling them to 'verified' would launder exactly the values
+--     this column exists to distrust, so they stay NULL and every consumer
+--     treats NULL as untrusted (same as 'hint'). The only cost is that an
+--     order whose ref predates this migration falls back to the same paths an
+--     order with no ref at all already uses.
+--
+--  3. Only two values are ever written: 'verified' (PaymentsService.markPaid /
+--     markFailed, both of which run only after the gateway itself vouched for
+--     the ref) and 'hint' (the provider-ref-hint endpoint). No CHECK constraint is added — `paymentProvider` on this same
+--     table is likewise an unconstrained String, and the writers are two
+--     methods in one service plus one controller.
+ALTER TABLE "Order" ADD COLUMN "providerRefSource" TEXT;

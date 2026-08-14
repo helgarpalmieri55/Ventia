@@ -811,3 +811,155 @@ describe('order status transitions — shopper-facing emails', () => {
     expect(sentMail.length).toBe(countBefore); // no email for cancel
   });
 });
+
+// ---------------------------------------------------------------------------
+// P3 wave-2 FIX 2 regression tests: `confirm` is COD-only.
+// ---------------------------------------------------------------------------
+
+/** Seeds an ONLINE-payment order in exactly the state checkout leaves one in:
+ * PENDING/PENDING, `paymentProvider` set, stock already decremented by the
+ * checkout-time reservation and `stockReservedUntil` stamped 15 minutes out.
+ * The seed does NOT decrement stock itself — callers pass the product's
+ * post-reservation stock to `seedProduct` — so the assertions below read a
+ * known starting number. */
+async function seedReservedOnlineOrder(
+  tenantId: string,
+  items: Array<{ productId: string; qty: number }>,
+  overrides: { paymentStatus?: 'PENDING' | 'FAILED'; paymentProvider?: string } = {},
+): Promise<string> {
+  const order = await prisma.order.create({
+    data: {
+      tenantId,
+      number: orderNumberSeq++,
+      status: 'PENDING',
+      paymentStatus: overrides.paymentStatus ?? 'PENDING',
+      paymentProvider: overrides.paymentProvider ?? 'wompi',
+      stockReservedUntil: new Date(Date.now() + 15 * 60_000),
+      email: 'comprador@example.com',
+      phone: '3000000000',
+      shippingAddress: {},
+      subtotalCents: 30_000,
+      taxCents: 0,
+      totalCents: 30_000,
+    },
+  });
+  for (const item of items) {
+    await prisma.orderItem.create({
+      data: {
+        tenantId,
+        orderId: order.id,
+        productId: item.productId,
+        nameSnapshot: 'Item de prueba',
+        priceCentsSnapshot: 10_000,
+        qty: item.qty,
+        taxRateSnapshot: 'NINETEEN',
+      },
+    });
+  }
+  return order.id;
+}
+
+describe('order status transitions — FIX 2: confirm is rejected for an online order awaiting payment', () => {
+  // The live repro. A qty-3 order whose stock was reserved at checkout (100 ->
+  // 97): pressing "Confirmar pedido" decremented AGAIN (97 -> 94), left the
+  // order CONFIRMED/PENDING with `stockReservedUntil` still set, and created a
+  // permanent reconciliation zombie that swept every 2 minutes forever while
+  // `expireReservations()` (which filters `status: 'PENDING'`) could never
+  // release the reservation.
+  it('409 ONLINE_PAYMENT_PENDING, no double decrement, order completely untouched', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-confirm-online@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 97); // 100 minus the checkout reservation
+    const orderId = await seedReservedOnlineOrder(tenantId, [{ productId: product.id, qty: 3 }]);
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      error: 'ONLINE_PAYMENT_PENDING',
+      details: { paymentProvider: 'wompi', paymentStatus: 'PENDING' },
+    });
+
+    // No double decrement.
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: product.id } })).stock).toBe(97);
+    // And no InventoryMovement was written either — the whole transaction
+    // rolled back rather than half-applying.
+    expect(await prisma.inventoryMovement.count({ where: { orderId } })).toBe(0);
+
+    // The order is exactly as it was: still a live reconciliation candidate,
+    // still releasable by the 15-minute expiry worker.
+    const after = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(after.status).toBe('PENDING');
+    expect(after.paymentStatus).toBe('PENDING');
+    expect(after.stockReservedUntil).not.toBeNull();
+    expect(await prisma.orderEvent.count({ where: { orderId } })).toBe(0);
+  });
+
+  it.each(['wompi', 'mercadopago', 'epayco'])('rejects for %s too (the gate is on the provider being set, not on which one)', async (provider) => {
+    const { cookie, tenantId } = await signUpWithTenant(`orders-confirm-${provider}@demo.co`, 'owner');
+    const product = await seedProduct(tenantId, 50);
+    const orderId = await seedReservedOnlineOrder(tenantId, [{ productId: product.id, qty: 1 }], {
+      paymentProvider: provider,
+    });
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('ONLINE_PAYMENT_PENDING');
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: product.id } })).stock).toBe(50);
+  });
+
+  it('a COD order is unaffected: confirm still works and still decrements exactly once', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-confirm-cod-ok@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 2 }]);
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('CONFIRMED');
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: product.id } })).stock).toBe(8);
+  });
+
+  it('an online order whose payment already FAILED may still be confirmed, and does NOT decrement again', async () => {
+    // The payment has resolved (unsuccessfully), so the "wait for the gateway"
+    // rationale no longer applies — but the stock is still reserved, so
+    // confirming must not decrement a second time.
+    const { cookie, tenantId } = await signUpWithTenant('orders-confirm-failed-online@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 95);
+    const orderId = await seedReservedOnlineOrder(tenantId, [{ productId: product.id, qty: 5 }], {
+      paymentStatus: 'FAILED',
+    });
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+
+    expect(res.status).toBe(200);
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: product.id } })).stock).toBe(95);
+  });
+
+  it('every terminal/forward transition clears stockReservedUntil, not just cancel', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-clears-reservation@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 95);
+    const orderId = await seedReservedOnlineOrder(tenantId, [{ productId: product.id, qty: 5 }], {
+      paymentStatus: 'FAILED',
+    });
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+    expect(res.status).toBe(200);
+
+    // Previously only `cancel` cleared this, so a confirmed order kept a
+    // live-looking 15-minute hold that nothing could ever release.
+    const after = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(after.status).toBe('CONFIRMED');
+    expect(after.stockReservedUntil).toBeNull();
+  });
+});

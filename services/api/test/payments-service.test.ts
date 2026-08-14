@@ -625,3 +625,155 @@ describe('PaymentsService.markFailed', () => {
     ).resolves.toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// P3 wave-2 regression tests.
+// ---------------------------------------------------------------------------
+
+describe('PaymentsService.markPaid — FIX 1: a declined attempt must not block a successful retry', () => {
+  let orderNumberSeq = 20_000;
+
+  async function seedOrder(
+    tenantId: string,
+    status: OrderStatus,
+    paymentStatus: PaymentStatus,
+  ): Promise<string> {
+    const order = await prisma.order.create({
+      data: {
+        tenantId,
+        number: orderNumberSeq++,
+        status,
+        paymentStatus,
+        paymentProvider: 'wompi',
+        stockReservedUntil: new Date(Date.now() + 15 * 60_000),
+        email: 'comprador@example.com',
+        phone: '3000000000',
+        shippingAddress: {},
+        subtotalCents: 10_000,
+        taxCents: 0,
+        totalCents: 10_000,
+      },
+    });
+    return order.id;
+  }
+
+  // THE critical repro. `markPaid` required `paymentStatus === 'PENDING'`
+  // exactly, so a shopper whose first attempt was declined (PENDING/FAILED)
+  // and who then retried successfully had the retry's webhook silently
+  // no-op: charged, order eventually cancelled and restocked, no
+  // `payment_confirmed` event so the merchant had no signal either.
+  it('PENDING/FAILED -> CONFIRMED/PAID: a later PAID supersedes an earlier FAILED', async () => {
+    const { tenantId } = await signUpWithTenant('markpaid-after-failed@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'PENDING', 'FAILED');
+
+    await paymentsService.markPaid(tenantId, orderId, 'wompi', 'wompi-txn-retry-approved');
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('CONFIRMED');
+    expect(order.paymentStatus).toBe('PAID');
+    expect(order.stockReservedUntil).toBeNull();
+    expect(order.providerRef).toBe('wompi-txn-retry-approved');
+    expect(order.providerRefSource).toBe('verified');
+    expect(await prisma.orderEvent.count({ where: { orderId, type: 'payment_confirmed' } })).toBe(1);
+  });
+
+  // The full decline-then-retry sequence through the two real service
+  // methods, in order — the shape a webhook pair actually arrives in.
+  it('the whole sequence: markFailed then markPaid leaves the order CONFIRMED/PAID with both events', async () => {
+    const { tenantId } = await signUpWithTenant('markpaid-sequence@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'PENDING', 'PENDING');
+
+    await paymentsService.markFailed(tenantId, orderId, 'wompi', 'attempt-1-declined');
+    const afterDecline = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(afterDecline.status).toBe('PENDING');
+    expect(afterDecline.paymentStatus).toBe('FAILED');
+    // markFailed deliberately keeps the stock hold — the shopper may retry.
+    expect(afterDecline.stockReservedUntil).not.toBeNull();
+
+    await paymentsService.markPaid(tenantId, orderId, 'wompi', 'attempt-2-approved');
+    const afterRetry = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(afterRetry.status).toBe('CONFIRMED');
+    expect(afterRetry.paymentStatus).toBe('PAID');
+    expect(afterRetry.providerRef).toBe('attempt-2-approved');
+    expect(await prisma.orderEvent.count({ where: { orderId, type: 'payment_failed' } })).toBe(1);
+    expect(await prisma.orderEvent.count({ where: { orderId, type: 'payment_confirmed' } })).toBe(1);
+  });
+
+  // The asymmetry that keeps the pair monotonic — this is what stops the
+  // widened markPaid precondition from being a downgrade path.
+  it('the reverse is NOT allowed: a late FAILED after a PAID is still a no-op', async () => {
+    const { tenantId } = await signUpWithTenant('markfailed-after-paid@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'PENDING', 'PENDING');
+
+    await paymentsService.markPaid(tenantId, orderId, 'wompi', 'approved-txn');
+    await paymentsService.markFailed(tenantId, orderId, 'wompi', 'stale-declined-txn');
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('CONFIRMED');
+    expect(order.paymentStatus).toBe('PAID');
+    expect(order.providerRef).toBe('approved-txn');
+    expect(await prisma.orderEvent.count({ where: { orderId, type: 'payment_failed' } })).toBe(0);
+  });
+
+  // The question the widened precondition most obviously raises: can a stale
+  // PAID webhook now resurrect an order that was legitimately cancelled or
+  // expired? No — `status === 'PENDING'` is unchanged, and every terminal
+  // path moves `status` to CANCELLED.
+  it.each([
+    ['expired by the stock-reservation worker', 'CANCELLED' as const, 'EXPIRED' as const],
+    ['cancelled by the merchant after a decline', 'CANCELLED' as const, 'FAILED' as const],
+    ['cancelled by the merchant while pending', 'CANCELLED' as const, 'PENDING' as const],
+  ])('does NOT resurrect an order %s', async (label, orderStatus, paymentStatus) => {
+    const { tenantId } = await signUpWithTenant(
+      `markpaid-no-resurrect-${orderStatus}-${paymentStatus}@demo.co`,
+      'owner',
+    );
+    const orderId = await seedOrder(tenantId, orderStatus, paymentStatus);
+
+    await paymentsService.markPaid(tenantId, orderId, 'wompi', 'a-very-late-webhook');
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe(orderStatus);
+    expect(order.paymentStatus).toBe(paymentStatus);
+    expect(order.providerRef).toBeNull();
+    expect(await prisma.orderEvent.count({ where: { orderId } })).toBe(0);
+  });
+
+  it('a DELIVERED order is likewise untouched (status is not PENDING)', async () => {
+    const { tenantId } = await signUpWithTenant('markpaid-no-resurrect-delivered@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'DELIVERED', 'PAID');
+
+    await paymentsService.markPaid(tenantId, orderId, 'wompi', 'late-txn');
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe('DELIVERED');
+    expect(await prisma.orderEvent.count({ where: { orderId } })).toBe(0);
+  });
+});
+
+describe('PaymentsService.testConnection — FIX 6: a decryption failure is {ok:false}, never a 500', () => {
+  it('returns {ok:false, error} when the stored ciphertext cannot be decrypted', async () => {
+    const { tenantId } = await signUpWithTenant('testconn-bad-ciphertext@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+
+    // Corrupt the stored ciphertext exactly as a key rotation (or any other
+    // at-rest damage) would. `getTenantProviderConfig` used to be called
+    // OUTSIDE testConnection's try/catch, so `decrypt`'s throw escaped the
+    // method entirely and the merchant got an opaque 500 from a method whose
+    // own doc comment promises it never produces one.
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    const settings = tenant.settings as Record<string, unknown>;
+    const payments = settings.payments as Record<string, unknown>;
+    const providers = payments.providers as Record<string, Record<string, unknown>>;
+    providers.wompi.privateKeyEncrypted = 'not-valid-ciphertext';
+    await prisma.tenant.update({
+      where: { id: tenantId },
+      data: { settings: settings as never },
+    });
+
+    const result = await paymentsService.testConnection(tenantId, 'wompi');
+    expect(result.ok).toBe(false);
+    expect(typeof result.error).toBe('string');
+    expect(result.error!.length).toBeGreaterThan(0);
+  });
+});

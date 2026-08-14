@@ -666,6 +666,7 @@ export class EpaycoProvider implements PaymentProvider {
         x_cod_response?: unknown;
         x_extra1?: unknown;
         x_amount?: unknown;
+        x_currency_code?: unknown;
       };
     };
     const data = body.data;
@@ -684,18 +685,28 @@ export class EpaycoProvider implements PaymentProvider {
     // types it as a number — tolerate both rather than guess which one a
     // real response uses. NaN never escapes as an amount.
     const amountCents = parseMajorUnitsToCents(data.x_amount);
+    // `x_currency_code` is declared on the same first-party model this
+    // endpoint's other fields were verified against (see the module doc
+    // comment's P3c addendum), and is the SIGNED field on ePayco's
+    // confirmation webhook too — so its spelling is the one part of this
+    // response shape that has an officially-documented sibling. Read
+    // defensively; `undefined` (not `'COP'`) when absent or wrong-typed.
+    const currency =
+      typeof data.x_currency_code === 'string' && data.x_currency_code.length > 0
+        ? data.x_currency_code
+        : undefined;
 
     // Preferred, highest-confidence path: a string x_response field, using
     // the same officially-verified vocabulary as the webhook.
     if (typeof data.x_response === 'string') {
-      return { status: mapStatus(data.x_response), reference, amountCents };
+      return { status: mapStatus(data.x_response), reference, amountCents, currency };
     }
     // Lower-confidence fallback: a numeric code, under either spelling seen
     // across sources (see module doc comment).
     const numericCode = data.x_cod_respuesta ?? data.x_cod_response;
     if (numericCode !== undefined && numericCode !== null) {
       const mapped = NUMERIC_RESPONSE_CODE_MAP[String(numericCode)];
-      if (mapped) return { status: mapped, reference, amountCents };
+      if (mapped) return { status: mapped, reference, amountCents, currency };
     }
     throw new Error(
       'epayco getTransactionStatus: malformed response (missing x_response, and x_cod_respuesta/x_cod_response is either missing or an unrecognized code)',

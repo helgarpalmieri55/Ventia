@@ -135,6 +135,7 @@ describe('PATCH /v1/storefront/checkout/:orderNumber/provider-ref-hint — happy
 
     const after = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(after.providerRef).toBe('txn-abc');
+    expect(after.providerRefSource).toBe('hint');
 
     // Everything else byte-identical. Compared as a whole record (minus the
     // one field this endpoint is allowed to write, and `updatedAt` which
@@ -143,6 +144,9 @@ describe('PATCH /v1/storefront/checkout/:orderNumber/provider-ref-hint — happy
     const strip = (o: Record<string, unknown>) => {
       const rest = { ...o };
       delete rest.providerRef;
+      // P3 wave-2 FIX 3/5: this endpoint now also stamps the ref's PROVENANCE,
+      // which is the second (and only other) column it is allowed to write.
+      delete rest.providerRefSource;
       delete rest.updatedAt;
       return rest;
     };
@@ -153,14 +157,28 @@ describe('PATCH /v1/storefront/checkout/:orderNumber/provider-ref-hint — happy
     expect(after.status).toBe('PENDING');
   });
 
-  it('overwrites an existing non-null providerRef unconditionally (a later source wins; this hint is advisory either way)', async () => {
-    const order = await seedOrder(tenantAId, 103, { providerRef: 'old-value' });
+  it('overwrites an existing hint-sourced providerRef (a later hint from the same untrusted source wins)', async () => {
+    const order = await seedOrder(tenantAId, 103, { providerRef: 'old-value', providerRefSource: 'hint' });
 
     const res = await patchHint(103, 'hint-a.ventia.localhost', { providerRef: 'new-value' });
     expect(res.status).toBe(200);
 
     const after = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(after.providerRef).toBe('new-value');
+    expect(after.providerRefSource).toBe('hint');
+  });
+
+  it('writes a provider_ref_hint OrderEvent so the mutation is traceable (it used to leave no trace at all)', async () => {
+    const order = await seedOrder(tenantAId, 104);
+
+    const res = await patchHint(104, 'hint-a.ventia.localhost', { providerRef: 'txn-audited' });
+    expect(res.status).toBe(200);
+
+    const events = await prisma.orderEvent.findMany({ where: { orderId: order.id } });
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('provider_ref_hint');
+    expect(events[0].actor).toBe('shopper');
+    expect(events[0].data).toMatchObject({ providerRef: 'txn-audited', source: 'hint' });
   });
 });
 
@@ -232,6 +250,110 @@ describe('PATCH /v1/storefront/checkout/:orderNumber/provider-ref-hint — cross
     await seedOrder(tenantAId, 501);
 
     const res = await patchHint(501, 'hint-b.ventia.localhost', { providerRef: 'should-not-land' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('ORDER_NOT_FOUND');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3 wave-2 FIX 5 regression tests. Each of the four defects below was
+// verified against the pre-fix endpoint.
+// ---------------------------------------------------------------------------
+
+describe('PATCH provider-ref-hint — FIX 5: length cap', () => {
+  it('rejects an oversized providerRef (a 90 KB value used to be accepted and STORED)', async () => {
+    const order = await seedOrder(tenantAId, 600);
+    const huge = 'x'.repeat(90_000);
+
+    const res = await patchHint(600, 'hint-a.ventia.localhost', { providerRef: huge });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).providerRef).toBeNull();
+  });
+
+  it('rejects at 129 chars and accepts at 128 (the cap is inclusive, and ~6x any real gateway id)', async () => {
+    const order = await seedOrder(tenantAId, 601);
+
+    const tooLong = await patchHint(601, 'hint-a.ventia.localhost', { providerRef: 'a'.repeat(129) });
+    expect(tooLong.status).toBe(400);
+
+    const atLimit = await patchHint(601, 'hint-a.ventia.localhost', { providerRef: 'b'.repeat(128) });
+    expect(atLimit.status).toBe(200);
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).providerRef).toBe(
+      'b'.repeat(128),
+    );
+  });
+
+  it('measures the cap AFTER trimming, so trailing whitespace cannot push a real id over it', async () => {
+    const order = await seedOrder(tenantAId, 602);
+    const res = await patchHint(602, 'hint-a.ventia.localhost', {
+      providerRef: `  ${'c'.repeat(128)}  `,
+    });
+    expect(res.status).toBe(200);
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).providerRef).toBe(
+      'c'.repeat(128),
+    );
+  });
+});
+
+describe('PATCH provider-ref-hint — FIX 5: state filter', () => {
+  // A hint is only ever useful while the reconciliation worker might still act
+  // on the order. It used to be accepted on PAID, CANCELLED and COD orders
+  // alike, where it can never be read again.
+  it.each([
+    ['an already-PAID order', { status: 'CONFIRMED', paymentStatus: 'PAID' }],
+    ['a cancelled order', { status: 'CANCELLED', paymentStatus: 'EXPIRED' }],
+    ['a COD order', { paymentStatus: 'COD', paymentProvider: null }],
+  ])('409 ORDER_NOT_AWAITING_PAYMENT for %s, and nothing is written', async (_label, overrides) => {
+    const number = 610 + Math.floor(Math.random() * 10_000);
+    const order = await seedOrder(tenantAId, number, overrides);
+
+    const res = await patchHint(number, 'hint-a.ventia.localhost', { providerRef: 'txn-too-late' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('ORDER_NOT_AWAITING_PAYMENT');
+    const after = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.providerRef).toBeNull();
+    expect(await prisma.orderEvent.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('a FAILED (declined) online order IS still accepted — the shopper may retry', async () => {
+    const order = await seedOrder(tenantAId, 640, { paymentStatus: 'FAILED' });
+
+    const res = await patchHint(640, 'hint-a.ventia.localhost', { providerRef: 'txn-retry-attempt' });
+
+    expect(res.status).toBe(200);
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).providerRef).toBe(
+      'txn-retry-attempt',
+    );
+  });
+});
+
+describe('PATCH provider-ref-hint — FIX 5: a webhook-verified ref cannot be clobbered', () => {
+  // The denial-of-settlement this closes: anyone who knew an order number
+  // could overwrite the transaction id a real, signature-verified webhook had
+  // already stamped, making the order unreconcilable — repeatably, for free.
+  it('409 PROVIDER_REF_ALREADY_VERIFIED, and the verified ref survives untouched', async () => {
+    const order = await seedOrder(tenantAId, 650, {
+      providerRef: 'stamped-by-a-real-webhook',
+      providerRefSource: 'verified',
+    });
+
+    const res = await patchHint(650, 'hint-a.ventia.localhost', { providerRef: 'attacker-garbage' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('PROVIDER_REF_ALREADY_VERIFIED');
+    const after = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.providerRef).toBe('stamped-by-a-real-webhook');
+    expect(after.providerRefSource).toBe('verified');
+    expect(await prisma.orderEvent.count({ where: { orderId: order.id } })).toBe(0);
+  });
+});
+
+describe('PATCH provider-ref-hint — FIX 6: an out-of-int4-range order number 404s rather than 500ing', () => {
+  it.each(['99999999999', '2147483648'])('404s for %s', async (orderNumber) => {
+    const res = await patchHint(orderNumber, 'hint-a.ventia.localhost', { providerRef: 'txn-abc' });
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('ORDER_NOT_FOUND');
   });

@@ -105,6 +105,86 @@ interface CandidateOrder {
   totalCents: number;
   paymentProvider: string | null;
   providerRef: string | null;
+  providerRefSource: string | null;
+}
+
+/** The ISO-4217 code every order in this system is priced in. `Order` has no
+ * currency column — `totalCents` is COP by construction (checkout, the
+ * catalog's `priceCents`, and all three adapters' outbound
+ * `CHECKOUT_CURRENCY` are all COP) — so this is the constant the gateway's
+ * own reported currency must match, not a per-order lookup. */
+const ORDER_CURRENCY = 'COP';
+
+/**
+ * The providers whose transaction-status lookup is bound to the CALLING
+ * MERCHANT'S OWN ACCOUNT, and therefore whose "this transaction is PAID"
+ * answer says something about money that reached THIS tenant.
+ *
+ * ## What was actually established (P3 wave-2 FIX 3), per provider
+ *
+ * - **`mercadopago` — account-scoped. IN.** `getTransactionStatus` /
+ *   `searchByReference` authenticate with `cfg.privateKey`, MP's private
+ *   ACCESS TOKEN. A payment resource is readable only by the account that
+ *   owns it, so a truthful `approved` from that call is necessarily about a
+ *   payment into this tenant's own MP account.
+ *
+ * - **`epayco` — NOT account-scoped. OUT.** `EpaycoProvider.getTransactionStatus`
+ *   ignores its `cfg` entirely (`_cfg`), because the endpoint it calls
+ *   (`GET secure.epayco.co/validation/v1/reference/{ref_payco}`) takes no
+ *   credential at all — any `ref_payco` resolves globally. This is stated in
+ *   that adapter's own doc comment and was already flagged in wave 1's
+ *   webhook fix as "ACCOUNT-SCOPING FOR EPAYCO REMAINS UNSOLVED".
+ *
+ * - **`wompi` — assumed NOT account-scoped. OUT.** Its lookup sends
+ *   `Authorization: Bearer <cfg.publicKey>`, which Wompi's own docs describe
+ *   as the browser-safe, client-side-usable credential. Probed directly
+ *   during this change (`GET {sandbox,production}.wompi.co/v1/transactions/{id}`):
+ *   **with no Authorization header at all, and with an obviously bogus
+ *   `pub_test_` bearer, the API answered `404 NOT_FOUND_ERROR` in every
+ *   case — never `401`/`403`.** An endpoint that does not reject a missing
+ *   credential is not authorizing on it. This is strong but NOT conclusive
+ *   evidence: no Wompi sandbox account was available, so the decisive test —
+ *   reading a real transaction belonging to a DIFFERENT merchant — could not
+ *   be run. The conservative reading is the one taken here.
+ *
+ * ## What being OUT costs, and why it is still right
+ *
+ * The concrete attack it stops (verified against ePayco's semantics, assumed
+ * for Wompi's): an attacker with their own merchant account on the same
+ * gateway creates a transaction whose reference is the VICTIM'S order number
+ * and whose amount is the victim's total, pays it **into their own account**,
+ * plants that transaction id via the unauthenticated hint endpoint, and the
+ * binding check passes *truthfully* — reference matches, amount matches,
+ * currency matches — because every one of those values is chosen by the
+ * payer. `markPaid` then fires and the merchant ships goods for money they
+ * never received.
+ *
+ * The cost is that Wompi's redirect-return capture (`/pago/wompi-retorno`,
+ * P3c Task 2) no longer settles anything by itself: the hint is still stored
+ * (and is still useful for support/audit), but reconciliation will not act on
+ * it. Wompi's signature-verified WEBHOOK path is unaffected and remains the
+ * authoritative settle path, and a webhook-stamped `providerRef` reconciles
+ * for all three providers exactly as before.
+ *
+ * The line to revisit first if this is ever relaxed: a merchant identifier on
+ * the gateway's own lookup response that can be compared against
+ * `cfg.publicKey`/`cfg.epaycoCustomerId`. Wompi's docs show a `merchant`
+ * object (and a `merchant_public_key` field) on SOME transaction payloads,
+ * but its presence on the by-id GET response could not be confirmed without
+ * an account, so nothing here reads it — a binding check against a field
+ * that turns out to be absent silently degrades to no check at all, which is
+ * worse than the honest refusal below.
+ */
+const ACCOUNT_SCOPED_LOOKUP_PROVIDERS: ReadonlySet<PaymentProviderId> = new Set<PaymentProviderId>([
+  'mercadopago',
+]);
+
+/** `Order.providerRefSource` is a plain nullable String (schema.prisma). Only
+ * `'verified'` means "the gateway itself vouched for this ref" — `'hint'` and
+ * NULL (pre-migration rows, or any writer that didn't say) are both treated as
+ * attacker-controlled. Fail closed. */
+function isGatewayVerifiedRef(source: string | null): boolean {
+  return source === 'verified';
 }
 
 /**
@@ -149,6 +229,17 @@ interface CandidateOrder {
  *   `order.totalCents`. It is optional per provider/response, so it can only
  *   ever add confidence — a missing amount is not by itself a failure, but a
  *   present, mismatched one is.
+ * - `currency` (P3 wave-2 FIX 3) must be present AND equal `'COP'` WHENEVER
+ *   an `amountCents` is being compared. There was previously no currency term
+ *   anywhere in this system: `TransactionStatusResult`/`ReferenceSearchResult`
+ *   carried none, and all three adapters hardcoded `CHECKOUT_CURRENCY = 'COP'`
+ *   OUTBOUND only — so a payment of the same NUMBER of units in a different
+ *   currency satisfied the amount check exactly as well as the real one. An
+ *   amount is not a quantity of money until you know what it is denominated
+ *   in, so a present amount with a missing/other currency is a REJECTION, not
+ *   a partial pass. (A result with no amount at all is unchanged: it already
+ *   binds on `reference` alone, and there is no amount for a currency to
+ *   qualify.)
  *
  * ## What "not bound" means
  *
@@ -167,8 +258,21 @@ function checkOrderBinding(result: TransactionStatusResult, order: CandidateOrde
   if (result.reference !== expectedReference) {
     return `gateway reference ${JSON.stringify(result.reference)} does not match this order's reference ${JSON.stringify(expectedReference)}`;
   }
-  if (result.amountCents !== undefined && result.amountCents !== order.totalCents) {
-    return `gateway amount ${result.amountCents} does not match this order's total ${order.totalCents}`;
+  if (result.amountCents !== undefined) {
+    if (result.amountCents !== order.totalCents) {
+      return `gateway amount ${result.amountCents} does not match this order's total ${order.totalCents}`;
+    }
+    // Checked only alongside a present amount, on purpose: the currency
+    // qualifies the amount, and a result carrying no amount at all is bound
+    // by `reference` alone (unchanged behavior — see this function's doc
+    // comment). Every one of the three adapters DOES report a currency
+    // alongside an amount (`data.currency`, `currency_id`,
+    // `x_currency_code`), so a result with an amount but no currency means
+    // the response was not the shape we expect and is treated as
+    // unverifiable rather than waved through.
+    if (result.currency !== ORDER_CURRENCY) {
+      return `gateway currency ${JSON.stringify(result.currency)} is not ${ORDER_CURRENCY} — its amount ${result.amountCents} is not comparable to this order's total ${order.totalCents}`;
+    }
   }
   return null;
 }
@@ -213,7 +317,33 @@ export async function reconcilePendingPayments(
 
   const candidates = await platformDb.order.findMany({
     where: {
-      paymentStatus: 'PENDING',
+      // P3 wave-2 FIX 2: an order whose `status` has already moved on is NOT
+      // a reconciliation candidate, whatever its `paymentStatus` says. This
+      // one line kills a reproduced permanent zombie: a merchant pressing
+      // "Confirmar pedido" on an online-payment order left it
+      // CONFIRMED/PENDING with `stockReservedUntil` still set, which matched
+      // this query forever — one outbound gateway call and one settle attempt
+      // on EVERY 2-minute sweep, for the rest of that order's life, while
+      // `expireReservations()` (which filters `status: 'PENDING'`) could
+      // never release it. Because this query is `orderBy createdAt asc` with
+      // `take: RECONCILE_BATCH_LIMIT`, such orders accumulate at the FRONT of
+      // the queue and eventually starve every real candidate platform-wide —
+      // falsifying the "bounded in practice" premise in RECONCILE_BATCH_LIMIT's
+      // own doc comment. The `confirm` guard in orders.service.ts stops new
+      // zombies being created; this stops the ones that already exist (and
+      // any future way of reaching the same state) from sweeping forever.
+      status: 'PENDING',
+      // P3 wave-2 FIX 1: `FAILED` belongs here alongside `PENDING`. A declined
+      // attempt sets `paymentStatus: 'FAILED'` while deliberately leaving the
+      // order PENDING and its stock reserved *because the shopper may retry*
+      // (see markFailed's doc comment). Filtering on `PENDING` alone meant
+      // that the moment one attempt was declined, the order dropped out of
+      // reconciliation entirely — so if the SUCCESSFUL retry's webhook was
+      // ever lost, nothing was left to recover it and the 15-minute expiry
+      // worker cancelled and restocked an order the shopper had paid for.
+      // `markPaid` accepts `PENDING`->`FAILED`->PAID for exactly this reason;
+      // this is the half that makes it reachable without a webhook.
+      paymentStatus: { in: ['PENDING', 'FAILED'] },
       stockReservedUntil: { not: null },
       createdAt: { lt: cutoff },
       // Online-payment orders only. COD orders never reach here anyway
@@ -225,7 +355,15 @@ export async function reconcilePendingPayments(
       // as two independent filters is unambiguous.
       AND: [{ paymentProvider: { not: null } }, { paymentProvider: { not: 'cod' } }],
     },
-    select: { id: true, tenantId: true, number: true, totalCents: true, paymentProvider: true, providerRef: true },
+    select: {
+      id: true,
+      tenantId: true,
+      number: true,
+      totalCents: true,
+      paymentProvider: true,
+      providerRef: true,
+      providerRefSource: true,
+    },
     // Oldest first, so a truncated sweep always drains the FRONT of the
     // backlog instead of re-reading an arbitrary page and starving the same
     // orders forever. Anything past the limit is picked up on the next
@@ -302,68 +440,116 @@ async function reconcileOneOrder(
   const provider = resolveProvider(providerId);
 
   // The resolved gateway answer + the transaction id we would settle with.
-  let result: TransactionStatusResult;
-  let providerRef: string;
+  // Null until a lookup produces a result that PASSED `checkOrderBinding`;
+  // nothing below this point may settle from an unbound one.
+  let result: TransactionStatusResult | null = null;
+  let providerRef: string | null = null;
 
-  if (order.providerRef) {
-    // Step 1 — we have a transaction id (from a real webhook's `markPaid`/
-    // `markFailed` stamp, or from Wompi's redirect-return hint). Ask the
-    // gateway about it directly. NOTE the hint source is unauthenticated, which
-    // is exactly why `checkOrderBinding` below is mandatory.
-    providerRef = order.providerRef;
-    result = await provider.getTransactionStatus(order.providerRef, cfg);
-  } else if (provider.searchByReference) {
-    // Step 2 — no transaction id at all, but this provider can look one up BY
-    // OUR OWN reference. Today that is Mercado Pago and only Mercado Pago
-    // (design decision 5); this branches on the CAPABILITY rather than on
-    // `providerId === 'mercadopago'` because that is what the optional
-    // interface method means — a future provider that implements it should get
-    // this path without editing this line, and Wompi/ePayco, for which the
-    // method is genuinely undefined, still fall through to step 3.
-    const found = await provider.searchByReference(String(order.number), cfg);
-    if (!found) {
-      // No payment attempt exists for this reference — nothing to reconcile.
-      return false;
-    }
-    providerRef = found.providerRef;
-    result = {
-      status: found.status,
-      // The GATEWAY's own assertions about the chosen transaction, passed
-      // through verbatim — never this call's own query key restated. That
-      // earlier shortcut made the binding check below a TAUTOLOGY on this path
-      // (it compared `String(order.number)` to itself) and left the amount
-      // unchecked entirely, so the whole guarantee rested on the gateway's
-      // server-side reference filter being exact-match: documented, but never
-      // verified by us at runtime, and a query-construction bug or a gateway
-      // moving to prefix/fuzzy matching (a search for order `14` returning a
-      // payment for `142`) would have defeated it silently. `undefined` in
-      // either field stays `undefined` — `checkOrderBinding` rejects a missing
-      // reference, which is the correct outcome for a result we cannot verify.
-      reference: found.reference,
-      amountCents: found.amountCents,
-    };
-  } else {
-    // Step 3 — Wompi/ePayco with no `providerRef` at all: no API path exists
-    // (design decision 3, confirmed by this phase's own research, not assumed).
-    // Skip entirely; this order can only ever fall through to the existing
-    // 15-minute stock-reservation expiry worker. This is the phase's biggest
-    // disclosed coverage gap, and it is deliberate.
-    return false;
-  }
-
-  // ⚠️ MANDATORY — see `checkOrderBinding`'s doc comment before touching this.
-  // Nothing below may run for a result we cannot prove is about THIS order.
-  const notBoundReason = checkOrderBinding(result, order);
-  if (notBoundReason) {
+  // ⚠️ MANDATORY on EVERY path — see `checkOrderBinding`'s doc comment before
+  // touching this. Nothing may settle from a result we cannot prove is about
+  // THIS order. Applied per-lookup (rather than once at the end) so that a
+  // result which fails to bind can fall through to the NEXT lookup instead of
+  // ending the whole attempt — see the `searchByReference` fallback below.
+  // Returns the candidate when it binds, `null` when it does not.
+  const boundOrNull = (candidate: TransactionStatusResult, via: string): TransactionStatusResult | null => {
+    const notBoundReason = checkOrderBinding(candidate, order);
+    if (!notBoundReason) return candidate;
     console.error('[reconciliation-worker] gateway result is not bound to this order — settling nothing', {
       orderId: order.id,
       tenantId: order.tenantId,
       provider: providerId,
+      via,
       orderReference: String(order.number),
-      gatewayReference: result.reference,
-      gatewayStatus: result.status,
+      gatewayReference: candidate.reference,
+      gatewayStatus: candidate.status,
       reason: notBoundReason,
     });
+    return null;
+  };
+
+  // Step 1 — we have a transaction id, either stamped by a signature-verified
+  // webhook (`providerRefSource === 'verified'`) or planted through the
+  // deliberately-unauthenticated hint endpoint.
+  if (order.providerRef) {
+    if (!isGatewayVerifiedRef(order.providerRefSource) && !ACCOUNT_SCOPED_LOOKUP_PROVIDERS.has(providerId)) {
+      // P3 wave-2 FIX 3. An unverified ref is a value the PAYER chose, and so
+      // are the `reference`/`amountCents`/`currency` the gateway will report
+      // back for it — every term `checkOrderBinding` compares. For a provider
+      // whose lookup is not bound to THIS tenant's merchant account, all four
+      // can be satisfied truthfully by a transaction paid into SOMEONE ELSE'S
+      // account. So this doesn't even make the call: there is no answer it
+      // could give that would establish what we need. See
+      // `ACCOUNT_SCOPED_LOOKUP_PROVIDERS` for the per-provider evidence and
+      // for exactly what functionality this costs.
+      console.error(
+        '[reconciliation-worker] refusing a by-id lookup: unverified providerRef on a provider whose lookup is not account-scoped',
+        {
+          orderId: order.id,
+          tenantId: order.tenantId,
+          provider: providerId,
+          providerRefSource: order.providerRefSource,
+        },
+      );
+    } else {
+      result = boundOrNull(await provider.getTransactionStatus(order.providerRef, cfg), 'by-id');
+      if (result) providerRef = order.providerRef;
+    }
+  }
+
+  // Step 2 — look one up BY OUR OWN reference. Today that is Mercado Pago and
+  // only Mercado Pago (design decision 5); this branches on the CAPABILITY
+  // rather than on `providerId === 'mercadopago'` because that is what the
+  // optional interface method means — a future provider that implements it
+  // gets this path without editing this line.
+  //
+  // P3 wave-2 FIX 4: this now also runs when step 1 was SKIPPED or FAILED TO
+  // BIND, not only when the order had no `providerRef` at all. Preferring a
+  // by-id lookup unconditionally handed an attacker a way to turn a
+  // RECOVERABLE order into a LOST one: an MP order with no ref self-heals to
+  // CONFIRMED/PAID off this very search, but the same order with a bogus ref
+  // planted through the hint endpoint stopped at the failed by-id lookup and
+  // was left to be cancelled and restocked with the shopper's money already
+  // taken. A denial-of-settlement that costs the attacker nothing. The
+  // gateway's own by-OUR-reference answer doesn't care what was planted, so
+  // falling back to it removes the leverage entirely.
+  if (!result && provider.searchByReference) {
+    const found = await provider.searchByReference(String(order.number), cfg);
+    if (found) {
+      result = boundOrNull(
+        {
+          status: found.status,
+          // The GATEWAY's own assertions about the chosen transaction, passed
+          // through verbatim — never this call's own query key restated. That
+          // earlier shortcut made the binding check a TAUTOLOGY on this path
+          // (it compared `String(order.number)` to itself) and left the amount
+          // unchecked entirely, so the whole guarantee rested on the gateway's
+          // server-side reference filter being exact-match: documented, but
+          // never verified by us at runtime, and a query-construction bug or a
+          // gateway moving to prefix/fuzzy matching (a search for order `14`
+          // returning a payment for `142`) would have defeated it silently.
+          // `undefined` in any field stays `undefined` — `checkOrderBinding`
+          // rejects a missing reference, which is the correct outcome for a
+          // result we cannot verify.
+          reference: found.reference,
+          amountCents: found.amountCents,
+          currency: found.currency,
+        },
+        'search-by-reference',
+      );
+      if (result) providerRef = found.providerRef;
+    }
+    // `found === null` — no payment attempt exists for this reference.
+    // Nothing to reconcile; falls through to the return below.
+  }
+
+  // Nothing resolved and bound: Wompi/ePayco with no usable `providerRef` (no
+  // by-our-reference API path exists for either — design decision 3, confirmed
+  // by that phase's own research), a lookup that didn't bind, or a search that
+  // found nothing. Leave the order completely alone; it falls through to the
+  // existing 15-minute stock-reservation expiry worker exactly as an
+  // unreconcilable order already does. This remains the phase's biggest
+  // disclosed coverage gap, and it is deliberate.
+  if (!result || !providerRef) {
     return false;
   }
 

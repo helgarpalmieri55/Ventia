@@ -152,8 +152,8 @@
 
 ### M6 — Orders
 - Two enums: `status` = `PENDING | CONFIRMED | PREPARING | SHIPPED | DELIVERED | CANCELLED` and `payment_status` = `PENDING | PAID | FAILED | EXPIRED | COD`.
-- Flow (online): checkout creates order (`PENDING`/`PENDING`) → webhook `PAID` → status `CONFIRMED`. Flow (COD): order (`PENDING`/`COD`) → merchant confirms by phone/WhatsApp → `CONFIRMED`.
-- Merchant actions: confirm (COD), mark `PREPARING`, mark `SHIPPED` (carrier name + tracking number, free text v1), mark `DELIVERED`, cancel (restocks inventory, records reason).
+- Flow (online): checkout creates order (`PENDING`/`PENDING`) → webhook `PAID` → status `CONFIRMED`. *(A declined attempt sets `payment_status: FAILED` while leaving `status: PENDING` and the stock hold intact, and a later `PAID` supersedes it — `PENDING`/`FAILED` → `CONFIRMED`/`PAID` — so a shopper who retries after a decline is not charged for an order that then gets cancelled under them. The reverse is never allowed: a `FAILED` event can only ever move a `PENDING`/`PENDING` order.)* Flow (COD): order (`PENDING`/`COD`) → merchant confirms by phone/WhatsApp → `CONFIRMED`.
+- Merchant actions: confirm (COD), mark `PREPARING`, mark `SHIPPED` (carrier name + tracking number, free text v1), mark `DELIVERED`, cancel (restocks inventory, records reason). *(The COD scoping of `confirm` is now enforced in code — `409 ONLINE_PAYMENT_PENDING` for an online-payment order whose payment hasn't resolved — rather than being convention only. It previously double-decremented stock, since an online order's stock is decremented at checkout, and left the order in a state neither the reconciliation nor the expiry sweep could ever resolve.)*
 - `order_events` timeline (who/what/when, including webhook-driven transitions).
 - Public tracking: order number + email **or** phone must match; shows status timeline + tracking number.
 - Order numbers: per-tenant sequential with prefix (e.g., `VNT-1042`) — never expose raw UUIDs to shoppers.

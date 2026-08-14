@@ -349,6 +349,38 @@ model Order {
   // getTransactionStatus/searchByReference call. Null until any
   // IMPLEMENTED source above fires.
   providerRef        String?
+  // PROVENANCE of `providerRef` — how the value currently in that column was
+  // established, and therefore how much it may be trusted. Exactly two values
+  // are ever written (kept a plain String, like `paymentProvider`, rather
+  // than a new enum):
+  //
+  //   'verified' — stamped by PaymentsService.markPaid/markFailed. Those are
+  //                only ever reached from a signature-verified webhook, or
+  //                from the reconciliation worker AFTER its mandatory binding
+  //                check against an account-scoped, authenticated gateway
+  //                lookup. Either way the gateway itself vouched for the ref.
+  //   'hint'     — written by the deliberately-unauthenticated
+  //                provider-ref-hint endpoint. Anyone who can guess an order
+  //                number can set this, so it is attacker-controlled by
+  //                assumption.
+  //
+  // Why this distinction is load-bearing (P3 wave-2 FIX 3): Wompi's and
+  // ePayco's transaction-lookup endpoints are NOT merchant-scoped — ePayco's
+  // takes no credential at all, and Wompi's `GET /v1/transactions/{id}` was
+  // empirically observed answering with NO Authorization header and with a
+  // bogus one (404 NOT_FOUND, never 401). So for those two providers a
+  // truthful "this transaction is PAID for reference R and amount A" says
+  // nothing about WHOSE gateway account received the money: an attacker with
+  // their own merchant account can manufacture a transaction carrying the
+  // victim's order number and total, then plant its id here. The
+  // reconciliation worker therefore refuses to settle a by-id lookup from a
+  // 'hint'-sourced ref for any provider whose lookup isn't account-scoped
+  // (see ACCOUNT_SCOPED_LOOKUP_PROVIDERS in reconciliation.worker.ts).
+  //
+  // NULL means "unknown provenance" — pre-migration rows, and any future
+  // writer that forgets to say. Treated exactly like 'hint' (untrusted) by
+  // every consumer: fail closed, never open.
+  providerRefSource  String?
   customerId         String?       @db.Uuid
   email              String
   phone              String

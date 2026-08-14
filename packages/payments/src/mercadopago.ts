@@ -322,6 +322,10 @@ interface MercadoPagoSearchResult {
    * MAJOR-unit (pesos) decimal, NOT cents. */
   external_reference?: string;
   transaction_amount?: number;
+  /** ISO-4217 code (`"COP"`), same field name and vocabulary as on the by-id
+   * payment resource — carried here so the search path can report the same
+   * currency binding the by-id path does. */
+  currency_id?: string;
 }
 
 interface MercadoPagoSearchResponse {
@@ -533,18 +537,25 @@ export class MercadoPagoProvider implements PaymentProvider {
       status?: unknown;
       external_reference?: unknown;
       transaction_amount?: unknown;
+      currency_id?: unknown;
     };
     if (typeof body.status !== 'string') {
       throw new Error('mercadopago getTransactionStatus: malformed response (missing status)');
     }
     const rawReference = body.external_reference;
     const rawAmount = body.transaction_amount;
+    const rawCurrency = body.currency_id;
     return {
       status: mapStatus(body.status),
       reference: typeof rawReference === 'string' && rawReference.length > 0 ? rawReference : undefined,
       // Pesos in, cents out — see this method's doc comment on units.
       amountCents:
         typeof rawAmount === 'number' && Number.isFinite(rawAmount) ? Math.round(rawAmount * 100) : undefined,
+      // MP names this field `currency_id` (not `currency`) on the payment
+      // resource, and its value is the plain ISO-4217 code (`"COP"`) — the
+      // same vocabulary the other two adapters report, so callers compare one
+      // string across all three. Never defaulted; `undefined` when absent.
+      currency: typeof rawCurrency === 'string' && rawCurrency.length > 0 ? rawCurrency : undefined,
     };
   }
 
@@ -631,9 +642,14 @@ export class MercadoPagoProvider implements PaymentProvider {
     const chosen = mostRecentApproved ?? sorted[0];
 
     const rawAmount: unknown = chosen.transaction_amount;
+    const rawCurrency: unknown = chosen.currency_id;
     return {
       providerRef: String(chosen.id),
       status: mapStatus(chosen.status),
+      // Same defensive read (and same "never fabricate 'COP'" rule) as
+      // getTransactionStatus above — the caller's currency binding must be
+      // able to fail on this path too, not just on the by-id one.
+      currency: typeof rawCurrency === 'string' && rawCurrency.length > 0 ? rawCurrency : undefined,
       // The CHOSEN result's own reference — guaranteed non-empty and equal to
       // `reference` by the filter above, but read off the result rather than
       // echoed from the query so the caller is looking at the gateway's data.

@@ -158,10 +158,20 @@ export class PaymentsService {
    * flagged here rather than silently assumed correct.
    */
   async testConnection(tenantId: string, provider: PaymentProviderId): Promise<TestConnectionResult> {
-    const cfg = await this.getTenantProviderConfig(tenantId, provider);
-    if (!cfg) return { ok: false, error: 'not configured' };
-
+    // The config read is INSIDE the try (P3 wave-2 FIX 6). It used to sit
+    // outside it, which contradicted the "NEVER lets a failure propagate as a
+    // 500" promise two paragraphs up: `getTenantProviderConfig` calls
+    // `loadEncryptionKey()` (throws when `PAYMENTS_ENCRYPTION_KEY` is
+    // missing/malformed), `decrypt()` (throws on ciphertext written under a
+    // rotated key or otherwise corrupted), and `findUniqueOrThrow`. Any of
+    // those escaped this method entirely, and a merchant clicking "probar
+    // conexión" got an opaque 500 instead of the `{ok:false, error}` this
+    // method's whole contract is built around — the exact failure a merchant
+    // most needs a readable message for, since it means their saved
+    // credentials can no longer be read back at all.
     try {
+      const cfg = await this.getTenantProviderConfig(tenantId, provider);
+      if (!cfg) return { ok: false, error: 'not configured' };
       await getProvider(provider).getTransactionStatus('test-connection-check', cfg);
       return { ok: true };
     } catch (err) {
@@ -174,11 +184,43 @@ export class PaymentsService {
    * path, deliberately NOT `OrdersService.transition('confirm')` (which
    * unconditionally decrements stock, correct for COD but a double-decrement
    * here since an online-payment order's stock was already reserved at
-   * checkout). Validates `status === 'PENDING' && paymentStatus ===
-   * 'PENDING'`; any other state (order not found, or already
-   * transitioned/cancelled) is a safe, idempotent no-op — a webhook retry
-   * arriving after this already ran once (or racing some other transition)
-   * must never throw.
+   * checkout). Validates `status === 'PENDING'` and a `paymentStatus` of
+   * either `'PENDING'` or `'FAILED'`; any other state (order not found, or
+   * already transitioned/cancelled) is a safe, idempotent no-op — a webhook
+   * retry arriving after this already ran once (or racing some other
+   * transition) must never throw.
+   *
+   * ## Why `FAILED` is accepted here (P3 wave-2 FIX 1 — the critical one)
+   *
+   * This used to require `paymentStatus === 'PENDING'` exactly. Declined-then-
+   * retried is an ordinary, everyday flow on PSE and cards, and it broke
+   * end to end, reproduced live:
+   *
+   * ```
+   * PENDING/PENDING  → attempt 1 declined  → PENDING/FAILED   (markFailed)
+   *                  → attempt 2 APPROVED  → PENDING/FAILED   ← silently dropped
+   *                  → reconciliation       → settled = 0     (it filtered paymentStatus PENDING)
+   *                  → 15-min expiry        → CANCELLED/EXPIRED, stock restocked
+   * ```
+   *
+   * The shopper WAS charged, the order was cancelled under them, and no
+   * `payment_confirmed` event was ever written so the merchant had no signal
+   * either. It also directly contradicted `markFailed`'s own doc comment,
+   * which explains that it deliberately does not cancel the order or release
+   * its stock **because the shopper may retry** — a retry this precondition
+   * made unreachable.
+   *
+   * The widening is one-directional and cannot be used to downgrade a
+   * settled order: a later PAID supersedes an earlier FAILED, never the
+   * reverse, because `markFailed` still requires `paymentStatus ===
+   * 'PENDING'` exactly. Once this method has run, `paymentStatus` is `'PAID'`
+   * and `status` is `'CONFIRMED'`, so neither method's precondition matches
+   * again — the state machine here is still strictly monotonic.
+   *
+   * `status === 'PENDING'` is UNCHANGED and is what keeps a stale event from
+   * resurrecting a dead order: an expired order is `CANCELLED`/`EXPIRED` and
+   * a merchant-cancelled one is `CANCELLED`, so both fail this guard exactly
+   * as they did before.
    *
    * Same advisory-lock-per-order transaction pattern as
    * `orders.service.ts`'s `transition()` (`SET LOCAL ROLE ventia_app` +
@@ -194,8 +236,12 @@ export class PaymentsService {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`;
 
       const order = await tx.order.findFirst({ where: { id: orderId, tenantId } });
-      if (!order || order.status !== 'PENDING' || order.paymentStatus !== 'PENDING') {
-        // Not found, or not in the exact state this transition requires:
+      if (
+        !order ||
+        order.status !== 'PENDING' ||
+        (order.paymentStatus !== 'PENDING' && order.paymentStatus !== 'FAILED')
+      ) {
+        // Not found, or not in a state this transition may run from:
         // idempotent no-op, not an error (a webhook retry after this already
         // ran once, or a race with some other actor, must not fail).
         return;
@@ -219,6 +265,17 @@ export class PaymentsService {
           // this same order; not itself a correctness requirement of this
           // transition.
           providerRef,
+          // P3 wave-2 FIX 3/5: record HOW this ref was established, not just
+          // what it is. `'verified'` is honest for both of this method's
+          // callers: the webhook controller only reaches here after a
+          // signature check, and the reconciliation worker only reaches here
+          // after `checkOrderBinding` passed against an ACCOUNT-SCOPED
+          // authenticated gateway lookup (it refuses to settle a hint-sourced
+          // ref through a lookup that isn't account-scoped — see
+          // `ACCOUNT_SCOPED_LOOKUP_PROVIDERS` in reconciliation.worker.ts).
+          // Stamping it here is what lets the hint endpoint refuse to clobber
+          // a ref the gateway already vouched for.
+          providerRefSource: 'verified',
         },
       });
 
@@ -254,6 +311,13 @@ export class PaymentsService {
    * late FAILED event for an order that's already `CONFIRMED`/`PAID` (or
    * already `FAILED`, or `CANCELLED`) is a safe, idempotent no-op, exactly
    * like `markPaid`'s own no-op branch.
+   *
+   * This precondition is DELIBERATELY NOT widened the way `markPaid`'s was in
+   * P3 wave-2 FIX 1. The asymmetry is the point: a later `PAID` supersedes an
+   * earlier `FAILED` (the shopper retried and the retry went through), but a
+   * later `FAILED` must never supersede a `PAID` (that would un-settle an
+   * order whose money already moved). Keeping `'PENDING'` exactly here is
+   * what makes the pair monotonic.
    *
    * Deliberately does NOT touch `status` or `stockReservedUntil` (design
    * decision: a failed attempt doesn't cancel the order or release its stock
@@ -308,6 +372,9 @@ export class PaymentsService {
           // markPaid/markFailed call; nothing here depends on this value
           // being "the final" one.
           providerRef,
+          // See markPaid's identical stamp for why `'verified'` is accurate
+          // for both callers of this method.
+          providerRefSource: 'verified',
         },
       });
 

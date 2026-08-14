@@ -657,7 +657,7 @@ describe('EpaycoProvider.getTransactionStatus', () => {
     // 49,900 pesos -> 4,990,000 cents. Same major-unit convention (and same
     // `* 100` conversion) `verifyAndParseWebhook` already applies to the
     // identically-named `x_amount` field on the confirmation webhook.
-    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000 });
+    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000, currency: 'COP' });
   });
 
   it('accepts x_amount delivered as a numeric STRING (ePayco form-encodes the same field on its webhook side)', async () => {
@@ -669,7 +669,10 @@ describe('EpaycoProvider.getTransactionStatus', () => {
       ),
     );
     const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
-    expect(result).toEqual({ status: 'PAID', reference: '7', amountCents: 4990000 });
+    // No `x_currency_code` in this fixture, so `currency` is `undefined` —
+    // never defaulted to 'COP'. The reconciliation worker treats that as
+    // unverifiable and refuses to settle on the amount (P3 wave-2 FIX 3).
+    expect(result).toEqual({ status: 'PAID', reference: '7', amountCents: 4990000, currency: undefined });
   });
 
   it('leaves reference/amountCents undefined (rather than throwing or fabricating) when the response omits them', async () => {
@@ -719,4 +722,33 @@ describe('EpaycoProvider.getTransactionStatus', () => {
       provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch),
     ).rejects.toThrow(/missing data/);
   });
+
+  // --- P3 wave-2 FIX 3: the CURRENCY term. `x_currency_code` is declared on
+  // the same first-party response model this endpoint's other fields were
+  // verified against, and is the SIGNED currency field on ePayco's own
+  // confirmation webhook.
+  it('reports x_currency_code so the caller can require COP', async () => {
+    const provider = new EpaycoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ data: { x_response: 'Aceptada', x_extra1: '1042', x_amount: 49900, x_currency_code: 'USD' } }),
+        { status: 200 },
+      ),
+    );
+    const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result.currency).toBe('USD');
+  });
+
+  it('reports the currency on the NUMERIC-code fallback path too', async () => {
+    const provider = new EpaycoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ data: { x_cod_respuesta: 1, x_extra1: '1042', x_amount: 49900, x_currency_code: 'COP' } }),
+        { status: 200 },
+      ),
+    );
+    const result = await provider.getTransactionStatus('ref-1', cfg, fetchImpl as unknown as typeof fetch);
+    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000, currency: 'COP' });
+  });
+
 });

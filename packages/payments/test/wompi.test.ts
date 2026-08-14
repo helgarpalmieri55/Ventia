@@ -427,7 +427,7 @@ describe('WompiProvider.getTransactionStatus', () => {
 
     const result = await provider.getTransactionStatus('txn-abc', cfg, fetchImpl as unknown as typeof fetch);
 
-    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000 });
+    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000, currency: 'COP' });
   });
 
   it('leaves reference/amountCents undefined (rather than throwing) when the response omits them — only `status` is required', async () => {
@@ -461,4 +461,40 @@ describe('WompiProvider.getTransactionStatus', () => {
     expect(result.reference).toBeUndefined();
     expect(result.amountCents).toBeUndefined();
   });
+
+  // --- P3 wave-2 FIX 3: the CURRENCY term.
+  //
+  // `amountCents` alone is a bare number. Nothing read a currency back until
+  // now, so a transaction for the same NUMBER of units in another currency
+  // satisfied the caller's amount check exactly as well as the real one.
+  it("reports Wompi's own data.currency so the caller can require COP", async () => {
+    const provider = new WompiProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          data: { id: 'txn-usd', reference: '1042', status: 'APPROVED', amount_in_cents: 4990000, currency: 'USD' },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    const result = await provider.getTransactionStatus('txn-usd', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result.currency).toBe('USD');
+  });
+
+  it('leaves currency undefined rather than defaulting to COP when the response omits it', async () => {
+    const provider = new WompiProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ data: { id: 'txn-x', reference: '1042', status: 'APPROVED', amount_in_cents: 4990000 } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    const result = await provider.getTransactionStatus('txn-x', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result.currency).toBeUndefined();
+  });
+
 });

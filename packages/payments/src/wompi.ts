@@ -423,7 +423,7 @@ export class WompiProvider implements PaymentProvider {
       throw new Error(`wompi getTransactionStatus: HTTP ${res.status}`);
     }
     const body = (await res.json()) as {
-      data?: { status?: unknown; reference?: unknown; amount_in_cents?: unknown };
+      data?: { status?: unknown; reference?: unknown; amount_in_cents?: unknown; currency?: unknown };
     };
     const status = body.data?.status;
     if (typeof status !== 'string') {
@@ -431,11 +431,18 @@ export class WompiProvider implements PaymentProvider {
     }
     const rawReference = body.data?.reference;
     const rawAmount = body.data?.amount_in_cents;
+    const rawCurrency = body.data?.currency;
     return {
       status: mapStatus(status),
       reference: typeof rawReference === 'string' && rawReference.length > 0 ? rawReference : undefined,
       // Already cents (Wompi's own unit) — passed through, not scaled.
       amountCents: typeof rawAmount === 'number' && Number.isFinite(rawAmount) ? rawAmount : undefined,
+      // `data.currency` sits alongside `data.amount_in_cents` on Wompi's
+      // transaction resource and is the same ISO-4217 code
+      // `createCheckoutSession` sends outbound as `CHECKOUT_CURRENCY`. Read
+      // defensively and left `undefined` rather than defaulted to `'COP'` —
+      // a fabricated currency would defeat the caller's check silently.
+      currency: typeof rawCurrency === 'string' && rawCurrency.length > 0 ? rawCurrency : undefined,
     };
   }
 

@@ -484,7 +484,7 @@ describe('MercadoPagoProvider.getTransactionStatus', () => {
     // direction `verifyAndParseWebhook` already converts, and the inverse of
     // `createCheckoutSession`'s `unit_price: totalCents / 100`. Getting this
     // backwards would make every amount check 10,000x off.
-    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000 });
+    expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000, currency: 'COP' });
   });
 
   it('rounds a fractional transaction_amount to whole cents rather than emitting a float', async () => {
@@ -542,6 +542,37 @@ describe('MercadoPagoProvider.getTransactionStatus', () => {
       provider.getTransactionStatus('missing', cfg, fetchImpl as unknown as typeof fetch),
     ).rejects.toThrow(/HTTP 404/);
   });
+
+  // --- P3 wave-2 FIX 3: the CURRENCY term. MP names this `currency_id` on
+  // the payment resource, not `currency`.
+  it("reports MP's own currency_id so the caller can require COP", async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ id: 42, status: 'approved', external_reference: '1042', transaction_amount: 49900, currency_id: 'USD' }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await provider.getTransactionStatus('42', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result.currency).toBe('USD');
+  });
+
+  it('leaves currency undefined rather than defaulting to COP when currency_id is absent', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ id: 42, status: 'approved', external_reference: '1042', transaction_amount: 49900 }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await provider.getTransactionStatus('42', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result.currency).toBeUndefined();
+  });
+
 });
 
 describe('MercadoPagoProvider.searchByReference', () => {
@@ -768,4 +799,57 @@ describe('MercadoPagoProvider.searchByReference', () => {
     expect(result?.amountCents).toBeUndefined();
     expect(result?.reference).toBe('ORD-0008');
   });
+
+  // --- P3 wave-2 FIX 3: the search path reports the CHOSEN result's own
+  // currency too, so the worker's binding check has the same three terms on
+  // both lookup paths.
+  it("reports the chosen result's own currency_id", async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: 991,
+              status: 'approved',
+              external_reference: 'ORD-CUR',
+              transaction_amount: 49900,
+              currency_id: 'COP',
+              date_created: '2026-01-01T00:00:00.000-05:00',
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await provider.searchByReference('ORD-CUR', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toMatchObject({ providerRef: '991', status: 'PAID', amountCents: 4990000, currency: 'COP' });
+  });
+
+  it('leaves currency undefined on the search path when the result omits currency_id', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: 992,
+              status: 'approved',
+              external_reference: 'ORD-NOCUR',
+              transaction_amount: 49900,
+              date_created: '2026-01-01T00:00:00.000-05:00',
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await provider.searchByReference('ORD-NOCUR', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result?.currency).toBeUndefined();
+  });
+
 });
