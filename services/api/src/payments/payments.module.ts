@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
+import { ReconciliationWorker } from './reconciliation.worker';
 import { StockReservationWorker } from './stock-reservation.worker';
 import { WebhooksController } from './webhooks.controller';
 
@@ -27,9 +28,14 @@ import { WebhooksController } from './webhooks.controller';
 // `onModuleInit` would start it in every test run too). `main.ts`'s
 // `if (require.main === module)` real-boot block is the ONLY caller of
 // `app.get(StockReservationWorker).start()`.
+// ReconciliationWorker (P3c Task 4) is registered exactly the same way and for
+// exactly the same reasons — ordinary non-Global provider, no Nest lifecycle
+// hook, started only from main.ts's real-boot block. It depends on
+// PaymentsService (it settles orders through markPaid/markFailed), which this
+// same module provides, so no extra imports are needed.
 @Module({
   controllers: [WebhooksController],
-  providers: [PaymentsService, StockReservationWorker],
-  exports: [PaymentsService, StockReservationWorker],
+  providers: [PaymentsService, StockReservationWorker, ReconciliationWorker],
+  exports: [PaymentsService, StockReservationWorker, ReconciliationWorker],
 })
 export class PaymentsModule {}

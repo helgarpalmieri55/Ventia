@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser';
 import { toNodeHandler } from 'better-auth/node';
 import { AppModule } from './app.module';
 import { AUTH_INSTANCE, type AuthInstance } from './admin/auth-instance';
+import { ReconciliationWorker } from './payments/reconciliation.worker';
 import { StockReservationWorker } from './payments/stock-reservation.worker';
 
 export async function createApp(): Promise<INestApplication> {
@@ -86,5 +87,12 @@ if (require.main === module) {
     // doc comment) implements no such lifecycle hook — `start()` is a plain
     // method nothing but this line calls.
     await app.get(StockReservationWorker).start();
+    // Starts the payment-status reconciliation BullMQ scheduling (P3c Task 4)
+    // — a sibling of the line above, here for the identical reason: it is the
+    // real-process-boot branch, which no test's import graph reaches.
+    // ReconciliationWorker implements no Nest lifecycle hook either (see its
+    // own doc comment), so registering it in PaymentsModule starts nothing on
+    // its own.
+    await app.get(ReconciliationWorker).start();
   })();
 }
