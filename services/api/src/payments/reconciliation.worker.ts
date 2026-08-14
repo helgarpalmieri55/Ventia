@@ -32,6 +32,38 @@ const RECONCILE_MIN_AGE_MS = 5 * 60_000;
  * between the 5-minute floor and the 15-minute stock release. */
 const SWEEP_INTERVAL_MS = 2 * 60_000;
 
+/** Hard ceiling on how many orders ONE sweep will look at (P3c review
+ * follow-up). Exported so the test asserts the real, shared value rather than
+ * a copy of it.
+ *
+ * Why bound it at all: each candidate costs ONE SEQUENTIAL outbound gateway
+ * call, and there is no per-order timeout. An unbounded `findMany` therefore
+ * means a platform-wide gateway outage turns one sweep into N sequential
+ * hanging HTTP calls — while the 2-minute repeat keeps firing more sweeps on
+ * top of it.
+ *
+ * Why 250 specifically:
+ *  - The candidate set is bounded in PRACTICE, not just in theory: an order
+ *    only qualifies between the 5-minute floor and the moment the (unmodified)
+ *    15-minute stock-reservation expiry worker takes it out of
+ *    `PENDING`/`stockReservedUntil IS NOT NULL`. So the steady-state backlog is
+ *    roughly "unpaid online orders created platform-wide in a ~10-minute
+ *    window" — 250 is comfortably above that for this system's size, meaning
+ *    the limit is inert in normal operation and only bites during a genuine
+ *    pile-up.
+ *  - It also keeps the worst case inside the cadence: 250 sequential calls at a
+ *    typical few-hundred-ms gateway latency stays under the 2-minute
+ *    `SWEEP_INTERVAL_MS`, so sweeps don't routinely overlap themselves.
+ *
+ * Truncation is safe, not lossy: the query is ordered OLDEST-FIRST, so each
+ * run drains the front of the backlog and whatever it didn't reach is simply
+ * picked up by the next run 2 minutes later (and, failing that, still falls
+ * through to the 15-minute expiry worker exactly as an unreconcilable order
+ * already does). A bounded query with a NON-deterministic order would be the
+ * dangerous version — it could re-read the same arbitrary page forever and
+ * starve the rest. */
+export const RECONCILE_BATCH_LIMIT = 250;
+
 const QUEUE_NAME = 'payment-reconciliation';
 const JOB_NAME = 'sweep';
 /** Fixed, stable id for the REPEATABLE JOB REGISTRATION (not a per-run job id
@@ -194,6 +226,14 @@ export async function reconcilePendingPayments(
       AND: [{ paymentProvider: { not: null } }, { paymentProvider: { not: 'cod' } }],
     },
     select: { id: true, tenantId: true, number: true, totalCents: true, paymentProvider: true, providerRef: true },
+    // Oldest first, so a truncated sweep always drains the FRONT of the
+    // backlog instead of re-reading an arbitrary page and starving the same
+    // orders forever. Anything past the limit is picked up on the next
+    // 2-minute run — no order is dropped, only deferred.
+    orderBy: { createdAt: 'asc' },
+    // See RECONCILE_BATCH_LIMIT's doc comment for why this bound exists and
+    // why 250.
+    take: RECONCILE_BATCH_LIMIT,
   });
 
   let settledCount = 0;
@@ -288,15 +328,19 @@ async function reconcileOneOrder(
     providerRef = found.providerRef;
     result = {
       status: found.status,
-      // `searchByReference` is bound BY CONSTRUCTION: the gateway was asked for
-      // payments whose OWN `external_reference` equals this exact string, and
-      // returned this one. Restating that query key here is therefore reading
-      // back a fact the gateway asserted, not fabricating a binding — and it
-      // keeps the check below UNIFORM across every path, so no future reader
-      // has to work out which paths are exempt from it. (`amountCents` stays
-      // undefined: the search result genuinely doesn't carry an amount, and
-      // inventing one would be exactly the fabrication this design forbids.)
-      reference: String(order.number),
+      // The GATEWAY's own assertions about the chosen transaction, passed
+      // through verbatim — never this call's own query key restated. That
+      // earlier shortcut made the binding check below a TAUTOLOGY on this path
+      // (it compared `String(order.number)` to itself) and left the amount
+      // unchecked entirely, so the whole guarantee rested on the gateway's
+      // server-side reference filter being exact-match: documented, but never
+      // verified by us at runtime, and a query-construction bug or a gateway
+      // moving to prefix/fuzzy matching (a search for order `14` returning a
+      // payment for `142`) would have defeated it silently. `undefined` in
+      // either field stays `undefined` — `checkOrderBinding` rejects a missing
+      // reference, which is the correct outcome for a result we cannot verify.
+      reference: found.reference,
+      amountCents: found.amountCents,
     };
   } else {
     // Step 3 — Wompi/ePayco with no `providerRef` at all: no API path exists
@@ -332,7 +376,14 @@ async function reconcileOneOrder(
     // `markFailed` deliberately touches ONLY `paymentStatus` — it does not
     // cancel the order or release its stock hold (the shopper may retry). This
     // job never expires or restocks anything itself (design decision 7).
-    await paymentsService.markFailed(order.tenantId, order.id, providerId, providerRef);
+    //
+    // `result.status` is passed through as the audit-only `gatewayStatus`
+    // because BOTH terminal non-PAID statuses land here and both become
+    // `paymentStatus: 'FAILED'`: Mercado Pago maps `refunded`/`charged_back`
+    // to `EXPIRED`, so without this a reversed payment would be
+    // indistinguishable from a declined card afterwards. It changes nothing
+    // about the transition itself — see `markFailed`'s own doc comment.
+    await paymentsService.markFailed(order.tenantId, order.id, providerId, providerRef, result.status);
     return true;
   }
 

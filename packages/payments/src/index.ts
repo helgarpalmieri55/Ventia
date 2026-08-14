@@ -124,6 +124,49 @@ export interface TransactionStatusResult {
   amountCents?: number;
 }
 
+/** The result of a lookup BY OUR OWN merchant reference (`searchByReference`).
+ *
+ * ## Why this carries `reference`/`amountCents` too (P3c review follow-up)
+ *
+ * It would be tempting to argue this path needs no binding fields at all: the
+ * gateway was asked for payments whose own `external_reference` equals our
+ * order number, so whatever comes back is bound "by construction". The
+ * reconciliation worker originally relied on exactly that, restating its own
+ * query key as the result's `reference` — which made the worker's binding
+ * comparison a TAUTOLOGY on this path (it compared a value to itself), left
+ * the amount entirely unchecked, and rested the whole guarantee on a
+ * server-side filter we document but never verify at runtime. A
+ * query-construction bug, or a gateway that ever moves to prefix/fuzzy
+ * matching (a search for order `14` returning a payment for `142`), would
+ * silently defeat it, and no test could catch the regression.
+ *
+ * So this shape carries the GATEWAY's own assertions about the chosen
+ * transaction, exactly like `TransactionStatusResult` does for the by-id
+ * path, and every caller runs the SAME binding check over both. Adapters
+ * additionally SHOULD drop non-matching results before choosing among them
+ * (see `MercadoPagoProvider.searchByReference`) — belt and braces, not a
+ * replacement for the caller's check.
+ *
+ * Both binding fields are OPTIONAL, matching `TransactionStatusResult`'s
+ * existing convention: an adapter that genuinely cannot read one emits
+ * `undefined` rather than fabricating a value — and `undefined` must remain a
+ * REJECTION at the caller's binding check, never a pass. */
+export interface ReferenceSearchResult {
+  /** The gateway's OWN transaction id for the chosen attempt — what a later
+   * `getTransactionStatus` call, and `Order.providerRef`, would use. */
+  providerRef: string;
+  status: NormalizedStatus;
+  /** The gateway's OWN record of the merchant reference the CHOSEN result is
+   * for — same contract as `TransactionStatusResult.reference` (the plain
+   * `String(order.number)` form). `undefined` when the response doesn't carry
+   * it in the expected type; never the caller's own query key echoed back. */
+  reference?: string;
+  /** The gateway's OWN record of the chosen result's amount, in CENTS
+   * (normalized here even for gateways whose APIs speak major units).
+   * `undefined` when unavailable or non-numeric. */
+  amountCents?: number;
+}
+
 export interface PaymentProvider {
   readonly id: PaymentProviderId;
   createCheckoutSession(order: OrderForPayment, cfg: TenantProviderConfig): Promise<{ redirectUrl: string }>;
@@ -142,7 +185,7 @@ export interface PaymentProvider {
   searchByReference?(
     reference: string,
     cfg: TenantProviderConfig,
-  ): Promise<{ providerRef: string; status: NormalizedStatus } | null>;
+  ): Promise<ReferenceSearchResult | null>;
 }
 
 export { WompiProvider } from './wompi.js';

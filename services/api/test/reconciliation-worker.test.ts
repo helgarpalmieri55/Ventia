@@ -21,6 +21,7 @@ let app: INestApplication;
 let signUpWithTenant: typeof SignUpWithTenant;
 let prisma: PrismaClientType;
 let reconcilePendingPayments: typeof ReconcilePendingPayments;
+let RECONCILE_BATCH_LIMIT: number;
 let expireReservations: typeof ExpireReservations;
 let paymentsService: PaymentsServiceType;
 
@@ -50,7 +51,9 @@ beforeAll(async () => {
 
   ({ signUpWithTenant } = await import('./admin-helpers'));
   ({ platformDb: prisma } = (await import('@ventia/db')) as unknown as { platformDb: PrismaClientType });
-  ({ reconcilePendingPayments } = await import('../src/payments/reconciliation.worker'));
+  ({ reconcilePendingPayments, RECONCILE_BATCH_LIMIT } = await import(
+    '../src/payments/reconciliation.worker'
+  ));
   ({ expireReservations } = await import('../src/payments/stock-reservation.worker'));
   const { PaymentsService } = await import('../src/payments/payments.service');
   paymentsService = app.get(PaymentsService);
@@ -274,6 +277,50 @@ describe('reconcilePendingPayments — (b) a known providerRef the gateway repor
     expect(after?.status).toBe('PENDING'); // untouched
     expect(after?.stockReservedUntil).not.toBeNull(); // untouched — this job never releases stock
     expect(await prisma.orderEvent.count({ where: { orderId, type: 'payment_failed' } })).toBe(1);
+
+    // The gateway's own resolved status is recorded alongside provider/
+    // providerRef — see the EXPIRED case below for why this matters.
+    const event = await prisma.orderEvent.findFirst({ where: { orderId, type: 'payment_failed' } });
+    expect(event?.data).toMatchObject({ provider: 'wompi', gatewayStatus: 'FAILED' });
+  });
+
+  // Mercado Pago maps `refunded`/`charged_back` -> EXPIRED, and this worker
+  // settles EVERY non-PAID terminal status through `markFailed`, which by
+  // design sets `paymentStatus: 'FAILED'`. So a refunded order and a declined
+  // card end up indistinguishable on the Order row itself. That outcome is
+  // deliberate and unchanged (nothing here auto-un-confirms or restocks), but
+  // the distinction must at least survive in the audit trail.
+  it("records an EXPIRED gateway status (MP's refunded/charged_back) in the payment_failed event, while still settling to FAILED", async () => {
+    const { tenantId } = await signUpWithTenant('recon-expired-audit@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'mercadopago',
+      providerRef: 'mp-payment-refunded-99',
+      ageMinutes: 6,
+      reservedForMinutes: 9,
+    });
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('mercadopago', {
+        getTransactionStatus: async () =>
+          status('EXPIRED', { reference: String(number), amountCents: 25_000 }),
+      }),
+    );
+
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    // markFailed's outcome is unchanged: paymentStatus FAILED, status and the
+    // stock hold untouched.
+    expect(after?.paymentStatus).toBe('FAILED');
+    expect(after?.status).toBe('PENDING');
+    expect(after?.stockReservedUntil).not.toBeNull();
+
+    const event = await prisma.orderEvent.findFirst({ where: { orderId, type: 'payment_failed' } });
+    expect(event?.data).toMatchObject({
+      provider: 'mercadopago',
+      providerRef: 'mp-payment-refunded-99',
+      // The one piece of information the FAILED paymentStatus throws away.
+      gatewayStatus: 'EXPIRED',
+    });
   });
 });
 
@@ -312,7 +359,15 @@ describe('reconcilePendingPayments — (d) mercadopago with no providerRef falls
       reservedForMinutes: 8,
     });
 
-    const searchByReference = vi.fn(async () => ({ providerRef: 'mp-payment-112233', status: 'PAID' as const }));
+    // The gateway's OWN reference/amount come back on the result and are what
+    // the binding check runs against (see the search-path cases in (e2) below)
+    // — a search result that carried neither would no longer settle anything.
+    const searchByReference = vi.fn(async () => ({
+      providerRef: 'mp-payment-112233',
+      status: 'PAID' as const,
+      reference: String(number),
+      amountCents: 25_000,
+    }));
     const getTransactionStatus = vi.fn(async () => status('PENDING'));
 
     await reconcilePendingPayments(paymentsService, () =>
@@ -562,6 +617,158 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
     expect(after?.stockReservedUntil).not.toBeNull();
   });
 
+  // --- The SEARCH path's own binding (P3c review follow-up).
+  //
+  // These four cases were IMPOSSIBLE to write before: the worker used to
+  // restate its own query key as the search result's `reference`
+  // (`reference: String(order.number)`), so the binding comparison on this path
+  // compared a value to itself — a tautology — and `amountCents` was never
+  // populated at all, so there was no amount binding here whatsoever. The whole
+  // guarantee rested on Mercado Pago's server-side `external_reference` filter
+  // being exact-match: documented, but never verified by us at runtime, and no
+  // test could have caught a regression because the interface gave a fake
+  // provider no way to return a mismatched reference in the first place.
+  //
+  // `ReferenceSearchResult` now carries the gateway's OWN reference/amount, so
+  // the SAME `checkOrderBinding` runs on this path with honest data, and these
+  // tests can drive it. (The real `MercadoPagoProvider.searchByReference` also
+  // drops mismatched results itself — belt and braces, covered in
+  // `packages/payments/test/mercadopago.test.ts` — but that is the ADAPTER's
+  // defence; this is the WORKER's, and the worker must not depend on it.)
+  it('a search result whose reference is for a DIFFERENT order settles nothing', async () => {
+    const { tenantId } = await signUpWithTenant('recon-bind-search-wrong-ref@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'mercadopago',
+      providerRef: null,
+      ageMinutes: 7,
+      reservedForMinutes: 8,
+      totalCents: 25_000,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const markPaidSpy = vi.spyOn(paymentsService, 'markPaid');
+    const markFailedSpy = vi.spyOn(paymentsService, 'markFailed');
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('mercadopago', {
+        // What a prefix/fuzzy-matching search would hand back: a real, PAID
+        // payment — for order `${number}2`, not for this order.
+        searchByReference: async () => ({
+          providerRef: 'mp-payment-belonging-to-another-order',
+          status: 'PAID' as const,
+          reference: `${number}2`,
+          amountCents: 25_000,
+        }),
+      }),
+    );
+
+    expect(callsForOrder(markPaidSpy, orderId)).toHaveLength(0);
+    expect(callsForOrder(markFailedSpy, orderId)).toHaveLength(0);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('PENDING');
+    expect(after?.paymentStatus).toBe('PENDING');
+    expect(after?.providerRef).toBeNull();
+    expect(after?.stockReservedUntil).not.toBeNull();
+    expect(await prisma.orderEvent.count({ where: { orderId } })).toBe(0);
+  });
+
+  it('a search result with NO reference at all (undefined) settles nothing', async () => {
+    const { tenantId } = await signUpWithTenant('recon-bind-search-no-ref@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
+    const { orderId } = await seedOnlineOrder(tenantId, {
+      provider: 'mercadopago',
+      providerRef: null,
+      ageMinutes: 7,
+      reservedForMinutes: 8,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const markPaidSpy = vi.spyOn(paymentsService, 'markPaid');
+    const markFailedSpy = vi.spyOn(paymentsService, 'markFailed');
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('mercadopago', {
+        // An adapter that genuinely could not read `external_reference` emits
+        // `undefined` rather than fabricating one — and `undefined` is a
+        // REJECTION here, never a pass, exactly as on the by-id path.
+        searchByReference: async () => ({ providerRef: 'mp-payment-unverifiable', status: 'PAID' as const }),
+      }),
+    );
+
+    expect(callsForOrder(markPaidSpy, orderId)).toHaveLength(0);
+    expect(callsForOrder(markFailedSpy, orderId)).toHaveLength(0);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('PENDING');
+    expect(after?.paymentStatus).toBe('PENDING');
+    expect(after?.providerRef).toBeNull();
+    expect(after?.stockReservedUntil).not.toBeNull();
+  });
+
+  it('a search result with a MATCHING reference but a mismatched amountCents settles nothing', async () => {
+    const { tenantId } = await signUpWithTenant('recon-bind-search-wrong-amount@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'mercadopago',
+      providerRef: null,
+      ageMinutes: 7,
+      reservedForMinutes: 8,
+      totalCents: 25_000,
+    });
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const markPaidSpy = vi.spyOn(paymentsService, 'markPaid');
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('mercadopago', {
+        // Right order number, wrong money — an amount binding that simply did
+        // not exist on this path before.
+        searchByReference: async () => ({
+          providerRef: 'mp-payment-underpaid',
+          status: 'PAID' as const,
+          reference: String(number),
+          amountCents: 100_000,
+        }),
+      }),
+    );
+
+    expect(callsForOrder(markPaidSpy, orderId)).toHaveLength(0);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('PENDING');
+    expect(after?.paymentStatus).toBe('PENDING');
+    expect(after?.providerRef).toBeNull();
+    expect(after?.stockReservedUntil).not.toBeNull();
+  });
+
+  it('a search result whose OWN reference and amount both match does settle', async () => {
+    const { tenantId } = await signUpWithTenant('recon-bind-search-ok@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
+    const { orderId, number } = await seedOnlineOrder(tenantId, {
+      provider: 'mercadopago',
+      providerRef: null,
+      ageMinutes: 7,
+      reservedForMinutes: 8,
+      totalCents: 25_000,
+    });
+
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('mercadopago', {
+        searchByReference: async () => ({
+          providerRef: 'mp-payment-445566',
+          status: 'PAID' as const,
+          reference: String(number),
+          amountCents: 25_000,
+        }),
+      }),
+    );
+
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PAID');
+    expect(after?.providerRef).toBe('mp-payment-445566');
+    expect(after?.stockReservedUntil).toBeNull();
+  });
+
   it('a matching reference with NO amountCents at all still settles (the amount check only binds when available)', async () => {
     const { tenantId } = await signUpWithTenant('recon-bind-no-amount@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
@@ -699,6 +906,69 @@ describe('reconcilePendingPayments — a tenant with no saved credentials', () =
     const after = await prisma.order.findUnique({ where: { id: orderId } });
     expect(after?.paymentStatus).toBe('PENDING');
   });
+});
+
+describe('reconcilePendingPayments — (h) the candidate query is bounded and deterministically ordered', () => {
+  // Without a `take`, a platform-wide gateway outage means one sweep issues N
+  // sequential HTTP calls (N = every unsettled online order across every
+  // tenant) while the 2-minute repeat keeps firing on top of it. Without a
+  // deterministic ORDER, a bounded sweep could also keep re-reading the same
+  // arbitrary slice forever and starve the rest.
+  // Asserted through REAL BEHAVIOUR (how many orders one sweep actually
+  // touches, and which ones), not by inspecting the Prisma call's arguments:
+  // `platformDb.order.findMany` is a proxied delegate that cannot be spied on
+  // without breaking the client for the rest of the file.
+  it('touches at most RECONCILE_BATCH_LIMIT orders per sweep, oldest first', async () => {
+    const { tenantId } = await signUpWithTenant('recon-bounded-query@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
+
+    const overflow = 5;
+    const total = RECONCILE_BATCH_LIMIT + overflow;
+    const now = Date.now();
+    // Index 0 is the NEWEST, index total-1 the OLDEST — so the last
+    // `overflow` orders by age are exactly the ones a bounded, oldest-first
+    // sweep must leave for the next run.
+    await prisma.order.createMany({
+      data: Array.from({ length: total }, (_, i) => ({
+        tenantId,
+        number: orderNumberSeq++,
+        status: 'PENDING' as const,
+        paymentStatus: 'PENDING' as const,
+        paymentProvider: 'wompi',
+        providerRef: `wompi_txn_bounded_${i}`,
+        stockReservedUntil: new Date(now + 9 * 60_000),
+        createdAt: new Date(now - 6 * 60_000 - i * 1_000),
+        email: 'comprador@example.com',
+        phone: '3000000000',
+        shippingAddress: {},
+        subtotalCents: 25_000,
+        taxCents: 0,
+        totalCents: 25_000,
+      })),
+    });
+
+    const seen = new Set<string>();
+    await reconcilePendingPayments(paymentsService, () =>
+      fakeProvider('wompi', {
+        getTransactionStatus: async (providerRef: string) => {
+          seen.add(providerRef);
+          // Still PENDING per the gateway: this sweep settles nothing, so the
+          // only thing being measured is HOW MANY orders it reached.
+          return status('PENDING');
+        },
+      }),
+    );
+
+    expect(RECONCILE_BATCH_LIMIT).toBeGreaterThan(0);
+    expect(seen.size).toBe(RECONCILE_BATCH_LIMIT);
+    // The oldest was reached...
+    expect(seen.has(`wompi_txn_bounded_${total - 1}`)).toBe(true);
+    // ...and the newest `overflow` were deferred to the next 2-minute run
+    // rather than being starved by an arbitrary, unordered page.
+    for (let i = 0; i < overflow; i++) {
+      expect(seen.has(`wompi_txn_bounded_${i}`)).toBe(false);
+    }
+  }, 60_000);
 });
 
 describe('reconcilePendingPayments — COD and already-settled orders are out of scope', () => {

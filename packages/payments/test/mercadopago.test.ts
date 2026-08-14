@@ -477,6 +477,7 @@ describe('MercadoPagoProvider.searchByReference', () => {
       {
         id: 555,
         status: 'approved',
+        external_reference: 'ORD-0002',
         date_created: '2026-07-30T10:00:00.000-04:00',
         date_approved: '2026-07-30T10:01:00.000-04:00',
       },
@@ -484,7 +485,7 @@ describe('MercadoPagoProvider.searchByReference', () => {
 
     const result = await provider.searchByReference('ORD-0002', cfg, fetchImpl as unknown as typeof fetch);
 
-    expect(result).toEqual({ providerRef: '555', status: 'PAID' });
+    expect(result).toEqual({ providerRef: '555', status: 'PAID', reference: 'ORD-0002' });
   });
 
   it('multiple results with mixed statuses: picks the approved one regardless of array position (NOT first)', async () => {
@@ -498,18 +499,21 @@ describe('MercadoPagoProvider.searchByReference', () => {
       {
         id: 111,
         status: 'rejected',
+        external_reference: 'ORD-0003',
         date_created: '2026-07-30T09:00:00.000-04:00',
         date_approved: null,
       },
       {
         id: 222,
         status: 'rejected',
+        external_reference: 'ORD-0003',
         date_created: '2026-07-30T09:30:00.000-04:00',
         date_approved: null,
       },
       {
         id: 333,
         status: 'approved',
+        external_reference: 'ORD-0003',
         date_created: '2026-07-30T09:15:00.000-04:00',
         date_approved: '2026-07-30T09:16:00.000-04:00',
       },
@@ -517,7 +521,7 @@ describe('MercadoPagoProvider.searchByReference', () => {
 
     const result = await provider.searchByReference('ORD-0003', cfg, fetchImpl as unknown as typeof fetch);
 
-    expect(result).toEqual({ providerRef: '333', status: 'PAID' });
+    expect(result).toEqual({ providerRef: '333', status: 'PAID', reference: 'ORD-0003' });
   });
 
   it('no approved result among multiple -> picks the most recent attempt of any status', async () => {
@@ -526,13 +530,25 @@ describe('MercadoPagoProvider.searchByReference', () => {
     // 222, but it is NOT first in the array — proves the client-side sort,
     // not just "take the last element", actually runs.
     const fetchImpl = mockSearch([
-      { id: 222, status: 'rejected', date_created: '2026-07-30T09:30:00.000-04:00', date_approved: null },
-      { id: 111, status: 'cancelled', date_created: '2026-07-30T09:00:00.000-04:00', date_approved: null },
+      {
+        id: 222,
+        status: 'rejected',
+        external_reference: 'ORD-0004',
+        date_created: '2026-07-30T09:30:00.000-04:00',
+        date_approved: null,
+      },
+      {
+        id: 111,
+        status: 'cancelled',
+        external_reference: 'ORD-0004',
+        date_created: '2026-07-30T09:00:00.000-04:00',
+        date_approved: null,
+      },
     ]);
 
     const result = await provider.searchByReference('ORD-0004', cfg, fetchImpl as unknown as typeof fetch);
 
-    expect(result).toEqual({ providerRef: '222', status: 'FAILED' });
+    expect(result).toEqual({ providerRef: '222', status: 'FAILED', reference: 'ORD-0004' });
   });
 
   it('throws on a non-2xx response instead of returning null or a bogus result', async () => {
@@ -542,5 +558,119 @@ describe('MercadoPagoProvider.searchByReference', () => {
     await expect(
       provider.searchByReference('ORD-0005', cfg, fetchImpl as unknown as typeof fetch),
     ).rejects.toThrow(/HTTP 401/);
+  });
+
+  // --- P3c review follow-up: the search result now carries the GATEWAY'S OWN
+  // `external_reference`/`transaction_amount` back to the caller, so the
+  // reconciliation worker's `checkOrderBinding` can verify a real, gateway-
+  // asserted binding instead of restating its own query key (which made the
+  // reference comparison a tautology on this path).
+  it("carries the CHOSEN result's own external_reference and transaction_amount (pesos -> cents)", async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = mockSearch([
+      {
+        id: 777,
+        status: 'approved',
+        external_reference: 'ORD-0006',
+        transaction_amount: 250.5,
+        date_created: '2026-07-30T10:00:00.000-04:00',
+        date_approved: '2026-07-30T10:01:00.000-04:00',
+      },
+    ]);
+
+    const result = await provider.searchByReference('ORD-0006', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({
+      providerRef: '777',
+      status: 'PAID',
+      reference: 'ORD-0006',
+      // MAJOR units in (pesos), cents out — identical conversion to
+      // getTransactionStatus/verifyAndParseWebhook in this same adapter.
+      amountCents: 25_050,
+    });
+  });
+
+  it('DROPS a result whose external_reference does not equal the queried reference', async () => {
+    const provider = new MercadoPagoProvider();
+    // The exact failure mode the belt-and-braces filter exists for: MP's
+    // server-side filter is documented as exact-match, but a query-construction
+    // bug (or MP ever switching to prefix/fuzzy matching) could return a
+    // payment for order "142" when we searched for order "14". That result must
+    // never be chosen — not even as the "most recent attempt of any status".
+    const fetchImpl = mockSearch([
+      {
+        id: 999,
+        status: 'approved',
+        external_reference: '142',
+        transaction_amount: 100,
+        date_created: '2026-07-30T11:00:00.000-04:00',
+        date_approved: '2026-07-30T11:01:00.000-04:00',
+      },
+    ]);
+
+    const result = await provider.searchByReference('14', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toBeNull();
+  });
+
+  it('drops the mismatched result but still returns a genuinely matching one', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = mockSearch([
+      {
+        id: 999,
+        status: 'approved',
+        external_reference: '142',
+        transaction_amount: 100,
+        date_created: '2026-07-30T11:00:00.000-04:00',
+        date_approved: '2026-07-30T11:01:00.000-04:00',
+      },
+      {
+        id: 888,
+        status: 'approved',
+        external_reference: '14',
+        transaction_amount: 30,
+        date_created: '2026-07-30T10:00:00.000-04:00',
+        date_approved: '2026-07-30T10:01:00.000-04:00',
+      },
+    ]);
+
+    const result = await provider.searchByReference('14', cfg, fetchImpl as unknown as typeof fetch);
+
+    // The mismatched entry is the most recent AND approved — it would win every
+    // selection rule if it were not dropped first.
+    expect(result).toEqual({ providerRef: '888', status: 'PAID', reference: '14', amountCents: 3_000 });
+  });
+
+  it('drops a result carrying NO external_reference at all rather than trusting the query', async () => {
+    const provider = new MercadoPagoProvider();
+    // `external_reference` is optional on MP's own payment type. An entry we
+    // cannot verify is not an entry we can bind an order to — and the caller
+    // must never be handed one whose `reference` we would have had to invent.
+    const fetchImpl = mockSearch([
+      { id: 321, status: 'approved', date_created: '2026-07-30T10:00:00.000-04:00', date_approved: null },
+    ]);
+
+    const result = await provider.searchByReference('ORD-0007', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result).toBeNull();
+  });
+
+  it('leaves amountCents undefined for a wrong-typed transaction_amount rather than coercing it', async () => {
+    const provider = new MercadoPagoProvider();
+    const fetchImpl = mockSearch([
+      {
+        id: 654,
+        status: 'approved',
+        external_reference: 'ORD-0008',
+        transaction_amount: '250.50', // a string, not a number
+        date_created: '2026-07-30T10:00:00.000-04:00',
+        date_approved: '2026-07-30T10:01:00.000-04:00',
+      },
+    ]);
+
+    const result = await provider.searchByReference('ORD-0008', cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result?.amountCents).toBeUndefined();
+    expect(result?.reference).toBe('ORD-0008');
   });
 });

@@ -5,6 +5,7 @@ import type {
   OrderForPayment,
   PaymentProvider,
   RawRequest,
+  ReferenceSearchResult,
   TenantProviderConfig,
   TransactionStatusResult,
 } from './index.js';
@@ -314,6 +315,13 @@ interface MercadoPagoSearchResult {
   status: string;
   date_created?: string;
   date_approved?: string | null;
+  /** The SAME two fields `GET /v1/payments/:id` returns (see
+   * `MercadoPagoPaymentResponse` above) — both are documented on each
+   * `results[]` entry of the search response, and both are optional on MP's
+   * own payment type, hence read defensively below. `transaction_amount` is a
+   * MAJOR-unit (pesos) decimal, NOT cents. */
+  external_reference?: string;
+  transaction_amount?: number;
 }
 
 interface MercadoPagoSearchResponse {
@@ -545,12 +553,41 @@ export class MercadoPagoProvider implements PaymentProvider {
    * exactly what this call does — see class doc comment). Returns `null` for
    * an empty `results` array. Throws on any non-2xx response, same posture
    * as `getTransactionStatus`/`createCheckoutSession` above — never silently
-   * treated as "no match found". */
+   * treated as "no match found".
+   *
+   * ## Order-binding fields + the mismatch filter (P3c review follow-up)
+   *
+   * Two changes, both about NOT relying on MP's server-side filter as an
+   * unverified article of faith:
+   *
+   * 1. The returned `reference`/`amountCents` come off the CHOSEN result's own
+   *    `external_reference`/`transaction_amount` — the gateway's own
+   *    assertions, the same two fields `getTransactionStatus` already reads
+   *    off the by-id payment resource — so the reconciliation worker can run
+   *    the SAME real binding check on this path as on the by-id one, instead
+   *    of comparing its own query key to itself. Both are read defensively
+   *    and left `undefined` when absent or wrong-typed, never coerced.
+   *    **UNITS:** `transaction_amount` is MAJOR units (pesos) and this
+   *    codebase stores CENTS, so this multiplies by 100 — identical to
+   *    `getTransactionStatus`/`verifyAndParseWebhook` above.
+   * 2. Belt and braces: any result whose own `external_reference` does not
+   *    EXACTLY equal the reference we searched for is DROPPED before choosing
+   *    among them. `external_reference={ref}` is documented as an exact-match
+   *    server-side filter, but a query-construction bug here, or MP ever
+   *    moving to prefix/fuzzy matching (a search for order `14` returning a
+   *    payment for `142`), would otherwise hand the caller a truthful answer
+   *    about the WRONG order. A result carrying NO `external_reference` at all
+   *    is likewise dropped rather than assumed to match: unverifiable is not
+   *    the same as verified, and inventing the value from our own query is
+   *    exactly the fabrication this design forbids. An all-dropped result set
+   *    is indistinguishable, to the caller, from "no payment exists for this
+   *    reference" — `null` — which is the correct, safe outcome either way
+   *    (the reconciliation worker leaves such an order completely alone). */
   async searchByReference(
     reference: string,
     cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
-  ): Promise<{ providerRef: string; status: NormalizedStatus } | null> {
+  ): Promise<ReferenceSearchResult | null> {
     const res = await fetchImpl(
       `${API_BASE}/v1/payments/search?external_reference=${encodeURIComponent(reference)}`,
       { headers: { Authorization: `Bearer ${cfg.privateKey}` } },
@@ -559,7 +596,12 @@ export class MercadoPagoProvider implements PaymentProvider {
       throw new Error(`mercadopago searchByReference: HTTP ${res.status}`);
     }
     const body = (await res.json()) as Partial<MercadoPagoSearchResponse>;
-    const results = Array.isArray(body.results) ? body.results : [];
+    const rawResults = Array.isArray(body.results) ? body.results : [];
+    // Drop everything the gateway did not itself assert is about THIS
+    // reference, BEFORE any selection rule runs — see this method's doc
+    // comment. Done first so a mismatched entry can never win by being the
+    // most recent or the only `approved` one.
+    const results = rawResults.filter((r) => r.external_reference === reference);
     if (results.length === 0) return null;
 
     const timestampOf = (r: MercadoPagoSearchResult): number => {
@@ -574,7 +616,18 @@ export class MercadoPagoProvider implements PaymentProvider {
     const mostRecentApproved = sorted.find((r) => r.status === 'approved');
     const chosen = mostRecentApproved ?? sorted[0];
 
-    return { providerRef: String(chosen.id), status: mapStatus(chosen.status) };
+    const rawAmount: unknown = chosen.transaction_amount;
+    return {
+      providerRef: String(chosen.id),
+      status: mapStatus(chosen.status),
+      // The CHOSEN result's own reference — guaranteed non-empty and equal to
+      // `reference` by the filter above, but read off the result rather than
+      // echoed from the query so the caller is looking at the gateway's data.
+      reference: chosen.external_reference,
+      // Pesos in, cents out — see this method's doc comment on units.
+      amountCents:
+        typeof rawAmount === 'number' && Number.isFinite(rawAmount) ? Math.round(rawAmount * 100) : undefined,
+    };
   }
 
   // `refund` deliberately left unimplemented — same rationale as

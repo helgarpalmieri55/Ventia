@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, platformDb, tenantDb } from '@ventia/db';
-import type { PaymentProviderId, TenantProviderConfig } from '@ventia/payments';
+import type { NormalizedStatus, PaymentProviderId, TenantProviderConfig } from '@ventia/payments';
 import { decrypt, encrypt, loadEncryptionKey } from './encryption';
 import { getProvider } from './provider-registry';
 
@@ -259,8 +259,35 @@ export class PaymentsService {
    * decision: a failed attempt doesn't cancel the order or release its stock
    * hold — the shopper may retry; the TTL expiry job, Task 6, is the only
    * thing that ever restocks a reserved-but-unpaid order).
+   *
+   * ## `gatewayStatus` (optional, P3c review follow-up) — audit only
+   *
+   * Every non-`PAID` TERMINAL status settles through this one method, so more
+   * than one real-world outcome collapses into `paymentStatus: 'FAILED'`. In
+   * particular Mercado Pago maps `refunded`/`charged_back` to `EXPIRED`
+   * (`packages/payments/src/mercadopago.ts`'s `mapStatus`), and the
+   * reconciliation worker settles `FAILED` and `EXPIRED` identically — so a
+   * REFUNDED order and a DECLINED CARD become indistinguishable on the `Order`
+   * row afterwards.
+   *
+   * Passing the gateway's own normalized status here records that distinction
+   * in the `payment_failed` `OrderEvent`'s `data`, so it is at least auditable
+   * after the fact. It is PURELY ADDITIVE: it does not change this method's
+   * preconditions, its advisory lock, or its `paymentStatus: 'FAILED'`
+   * outcome, and it is optional precisely so the existing webhook caller
+   * (`webhooks.controller.ts`, which only ever reaches here for an already-
+   * `FAILED` event) keeps behaving — and writing — exactly as before. Deciding
+   * to treat a reversal differently from a decline (a real un-confirm/restock
+   * flow) is a separate, unbuilt piece of work; this only makes sure the
+   * information needed for it isn't thrown away in the meantime.
    */
-  async markFailed(tenantId: string, orderId: string, provider: string, providerRef: string): Promise<void> {
+  async markFailed(
+    tenantId: string,
+    orderId: string,
+    provider: string,
+    providerRef: string,
+    gatewayStatus?: NormalizedStatus,
+  ): Promise<void> {
     await platformDb.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
@@ -290,7 +317,15 @@ export class PaymentsService {
           orderId,
           type: 'payment_failed',
           actor: 'system',
-          data: { provider, providerRef } as Prisma.InputJsonValue,
+          // The `gatewayStatus` key is OMITTED entirely when the caller didn't
+          // supply one, rather than written as an explicit `null` — so the
+          // existing webhook path's event `data` is byte-for-byte what it was
+          // before this parameter existed.
+          data: {
+            provider,
+            providerRef,
+            ...(gatewayStatus !== undefined ? { gatewayStatus } : {}),
+          } as Prisma.InputJsonValue,
         },
       });
     });
