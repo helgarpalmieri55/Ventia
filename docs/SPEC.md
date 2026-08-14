@@ -147,7 +147,7 @@
 - **Order of implementation:** Wompi (cards, PSE, Nequi, botón Bancolombia) → Mercado Pago (Checkout Pro) → ePayco (Smart Checkout). All three via hosted checkout redirect in v1 — no card data ever touches Ventia.
 - Per-tenant credentials (public/private keys) encrypted at rest (AES-256-GCM, key from env), entered in merchant admin with a "test connection" button using sandbox mode.
 - Webhooks: one endpoint per provider (`/webhooks/payments/:provider/:tenantId`); verify signature per official docs; idempotency via unique `(provider, event_id)` in `webhook_events`; process through a queue, never inline.
-- Reconciliation: BullMQ repeatable job — orders `PENDING` with a checkout session older than 30 min → poll `getTransactionStatus` → settle or expire.
+- Reconciliation: BullMQ repeatable job — orders `PENDING` with a checkout session older than 30 min → poll `getTransactionStatus` → settle or expire. *(Shipped in P3c with a **5-minute floor and a 2-minute cadence**, not 30 minutes — a deliberate, documented deviation: by 30 minutes the 15-minute stock-reservation TTL worker above would already have restocked and cancelled the order, so a 30-minute pass would either match nothing or have to un-cancel an order and re-decrement possibly-resold stock. See decision 4 in `docs/superpowers/specs/2026-07-30-p3c-payment-reconciliation-design.md`. The shipped job also never expires or restocks anything itself — it only ever settles via `markPaid`/`markFailed`, leaving expiry to the existing TTL worker — and it settles nothing unless the gateway's own response is bound to that order by reference and amount.)*
 - **AC:** sandbox happy-path e2e per gateway (Playwright where the sandbox allows; recorded HTTP fixtures otherwise); replaying the same webhook 10× results in exactly one state transition; a webhook with an invalid signature returns 401 and is logged.
 
 ### M6 — Orders
@@ -314,7 +314,7 @@ Public storefront with theming, search, cart, full checkout with Colombian addre
 
 **P3 — Online Payments + Order lifecycle** *(M5, M6, M10)*
 `PaymentProvider` interface, **Wompi**, then **Mercado Pago**, then **ePayco**; webhooks + idempotency + reconciliation job; stock reservation TTL; full notifications.
-**DoD:** sandbox purchase succeeds on all three gateways; webhook replay test passes; abandoned checkout releases stock; payment_status transitions fully covered by tests.
+**DoD:** sandbox purchase succeeds on all three gateways; webhook replay test passes; abandoned checkout releases stock; payment_status transitions fully covered by tests. *(Shipped as P3a/P3b/P3c — see the README's Phase status for what was and wasn't verified live, notably that no real gateway sandbox account was available and that the reconciliation job's threshold deviates from M5's "30 min" above for the reason footnoted there.)*
 
 **P4 — AI Agent (web)** *(§7, M7, M8 agent config)*
 Agent module, all seven tools, streaming widget, per-tenant config UI, budgets + usage metering, attribution KPI, eval suite.

@@ -312,9 +312,28 @@ transaction reference`.
     Note the comparison is against `String(order.number)` — the PLAIN string form of
     the `Order.number` Int column (e.g. `"42"`), never the `VNT-`-prefixed display
     string, matching `NormalizedPaymentEvent.reference`'s existing documented
-    contract. `searchByReference` (step 2) is already bound by construction — it
-    QUERIES by our own reference — but the result it hands back still flows into the
-    same settle path, so keep the check uniform rather than special-casing it.
+    contract.
+
+    **CORRECTION (commit `7025be5`, Task 4 review follow-up) — this block previously
+    said `searchByReference` (step 2) "is already bound by construction — it QUERIES
+    by our own reference". That is now FALSE, and it was never safe to rest on.**
+    "Bound by construction" rested entirely on Mercado Pago's server-side
+    `external_reference` filter being exact-match: documented, but never verified by
+    us at runtime, and unfalsifiable by any test — the old interface gave a fake
+    provider no way to return a mismatched reference at all, so a query-construction
+    bug or a gateway quietly moving to prefix/fuzzy matching (a search for order `14`
+    returning a payment for `142`) would have defeated the guarantee silently. Worse,
+    the worker used to *restate its own query key* as the result's `reference`, making
+    the check on that path a tautology comparing a value to itself, with no amount
+    binding at all. **The search path now carries real, gateway-asserted binding:**
+    `searchByReference` returns `ReferenceSearchResult`
+    (`{providerRef, status, reference?, amountCents?}`); `MercadoPagoProvider` reads
+    `external_reference`/`transaction_amount` back out of the gateway's OWN response
+    body (and drops any result whose `external_reference` doesn't exactly equal the
+    queried reference before choosing among them); and the worker passes those
+    through verbatim into the same `checkOrderBinding`. So step 2's result is checked
+    against the gateway's own assertion, exactly like step 1's — keep the check
+    uniform across both paths, and never special-case either as exempt.
 
   - Resolved `PAID` (**and bound**) → `paymentsService.markPaid(tenantId, orderId,
     provider, providerRef)`. Resolved `FAILED`/`EXPIRED` (**and bound**) →

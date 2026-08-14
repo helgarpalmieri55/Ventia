@@ -164,7 +164,7 @@ return the identical `404 ORDER_NOT_FOUND` (same code path, not just the same st
 numbers are sequential and guessable, so this endpoint must not let an attacker distinguish
 "guessed a real number" from "guessed wrong" by contact-checking after an existence check.
 
-### Payments (Wompi, Mercado Pago, ePayco) — P3a/P3b
+### Payments (Wompi, Mercado Pago, ePayco) — P3a/P3b/P3c
 
 Online payments now cover **three gateways** end to end: admin credential UI, encrypted storage,
 checkout redirect, and webhook confirmation — **Wompi** (P3a), Colombia's hosted "Web Checkout";
@@ -207,6 +207,31 @@ All three share the same provider-registry/webhook-controller/stock-reservation 
   clears its stock reservation; idempotency is enforced by
   `WebhookEvent`'s `@@unique([provider, eventId])` constraint — replaying the identical webhook
   any number of times returns `200` every time but only ever transitions the order once.
+- **Payment-status reconciliation (P3c)** catches payments whose webhook never arrived.
+  `services/api/src/payments/reconciliation.worker.ts` is a BullMQ repeatable job (started from
+  `main.ts`'s real-boot block, alongside the stock-reservation worker) that every **2 minutes**
+  sweeps every tenant's online-payment orders still `PENDING`/`PENDING` with a live
+  `stockReservedUntil` and **older than 5 minutes**, and re-asks the gateway's own authenticated
+  API. Both thresholds sit deliberately *below* the existing 15-minute stock-reservation TTL, so
+  an order gets ~5 reconciliation attempts before the expiry worker would ever cancel and restock
+  it — not the spec's draft-time "30 min", which would arrive *after* that worker had already
+  fired (design decision 4 in
+  `docs/superpowers/specs/2026-07-30-p3c-payment-reconciliation-design.md`). It looks a
+  transaction up either by `Order.providerRef` (new column — stamped by `markPaid`/`markFailed`
+  from a signature-verified webhook, or planted by Wompi's redirect return: `redirect-url` →
+  `/pago/wompi-retorno/:orderNumber?id=` → `PATCH
+  /v1/storefront/checkout/:orderNumber/provider-ref-hint`, which writes *only* `providerRef` and
+  never `paymentStatus`/`status`) or, for Mercado Pago only, by our own order number via
+  `searchByReference` (`GET /v1/payments/search?external_reference=`). **Before settling
+  anything it runs an order-binding check**: the reference — and, where the provider supplies it,
+  the amount — read out of the *gateway's own response* must equal the order's `number` /
+  `totalCents`; a mismatch, or a reference the adapter couldn't read, settles nothing in either
+  direction and leaves the order to the expiry worker. That check is what makes the deliberately
+  unauthenticated hint endpoint safe, and must not be "optimized away": without it, a shopper who
+  plants a real, genuinely-paid transaction id from their own past purchase onto someone else's
+  `PENDING` order would get a truthful "yes, paid" from the gateway and a free order. The job
+  only ever calls the existing `markPaid`/`markFailed`; it never expires, cancels or restocks
+  anything itself.
 
 ### Onboarding, staff & launch
 
@@ -303,37 +328,81 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
   fulfillment, public order tracking. DoD: first complete sale — browse → checkout → COD order →
   merchant confirms → shipped → delivered, with emails at each step — verified end to end via
   `apps/admin/e2e/p2-dod.spec.ts`; Lighthouse budget recorded (see `scripts/lighthouse.sh`).
-- **P3 — Online Payments + Order lifecycle** ⬜
-  - **P3a — Payment infrastructure + Wompi** done: encrypted per-tenant credential storage
-    (`PAYMENTS_ENCRYPTION_KEY`, AES-256-GCM), a provider-registry abstraction, the Wompi adapter
-    (checkout redirect + signed webhook verification), stock reservation at checkout with a
-    TTL-expiry worker, and an admin credentials UI. DoD: a `wompi` checkout reserves stock, a real
-    validly-signed webhook confirms payment and decrements stock exactly once, and replaying the
-    identical webhook is a verified no-op — proven end to end via real HTTP + a real Postgres (no
-    real Wompi sandbox account available in this environment; verified with well-formed fake
-    credentials exercising the real encryption/signature-verification code paths, not mocked at
-    the provider level). P3b (Mercado Pago, ePayco) and P3c (payment-status reconciliation job)
-    remained undone at this point.
-  - **P3b — Mercado Pago + ePayco** done: generalized `checkout.service.ts`'s payment-method
-    branching to any online provider (zero behavior change for `cod`/`wompi`), a Mercado Pago
-    adapter (real server-side Checkout Pro preference creation + HMAC-SHA256 webhook
-    verification), an ePayco adapter (Smart Checkout session creation + `^`-joined SHA-256
-    webhook verification) plus its storefront `/pago/epayco` bridge page for the client-side
-    widget, admin credentials UI for both, and checkout/webhook wiring reusing P3a's registry
-    unchanged. DoD: for BOTH new gateways independently, a checkout reserves stock, a real
-    validly-signed webhook confirms payment and decrements stock exactly once, and replaying the
-    identical webhook is a verified no-op — proven end to end via real HTTP + a real Postgres (no
-    real Mercado Pago/ePayco sandbox account available in this environment; verified with
-    well-formed fake credentials exercising the real encryption/signature-verification code
-    paths, not mocked at the provider level). ePayco's full chain (webhook → confirm →
-    stock-decrement → idempotency) was verified live end to end; Mercado Pago's webhook path
-    could only be verified through its signature-verification step live (proven via a real,
-    correctly-signed payload reaching Mercado Pago's own live API for the mandatory follow-up
-    `GET /v1/payments/:id` lookup, vs. a tampered signature failing earlier, with a different
-    error) — the follow-up call itself needs real Mercado Pago credentials to succeed, so
-    `markPaid`/stock-decrement/idempotency for Mercado Pago rely on its own mocked-fetch unit
-    tests (`packages/payments/test/mercadopago.test.ts`) rather than a live pass. P3c
-    (payment-status reconciliation job) remains undone.
+- **P3 — Online Payments + Order lifecycle** ✅ (P3a + P3b + P3c, all three in): encrypted
+  per-tenant credential storage (`PAYMENTS_ENCRYPTION_KEY`, AES-256-GCM) behind a
+  provider-registry abstraction; three gateway adapters — **Wompi** (P3a: locally-signed Web
+  Checkout redirect + SHA-256 checksum webhook), **Mercado Pago** (P3b: real server-side Checkout
+  Pro preference creation + HMAC-SHA256 `x-signature` webhook) and **ePayco** (P3b: Smart Checkout
+  session creation + `^`-joined SHA-256 webhook, driven from the storefront's `/pago/epayco`
+  bridge page for its client-side widget); stock reservation at checkout with the 15-minute
+  TTL-expiry worker; an admin credentials UI with a per-provider "test connection"; and
+  **payment-status reconciliation (P3c)** for the payments whose webhook never arrives. The
+  reconciliation worker is a BullMQ repeatable job sweeping every tenant's still-`PENDING` online
+  orders **older than 5 minutes, every 2 minutes** — both figures deliberately *below* the
+  existing 15-minute stock-reservation TTL rather than the spec's draft-time "30 min", because at
+  30 minutes the expiry worker would already have cancelled the order and restocked it, so
+  reconciliation would have to un-cancel an order and re-decrement possibly-resold stock (design
+  decision 4). It resolves each order through the gateway's own authenticated API, by
+  `Order.providerRef` (stamped by `markPaid`/`markFailed` from a verified webhook, or captured
+  from Wompi's redirect return via the new, deliberately unauthenticated `PATCH
+  /v1/storefront/checkout/:orderNumber/provider-ref-hint`) or, for Mercado Pago only, by our own
+  order number via `searchByReference`. An **order-binding check** — the reference *and*, where
+  available, the amount, read out of the gateway's own response, must match the order's
+  `number`/`totalCents` — gates every settle, in both directions; that check is exactly what
+  makes the unauthenticated hint endpoint safe, since a planted-but-genuinely-paid transaction id
+  gets a truthful "yes" from the gateway and still settles nothing. The job never expires,
+  cancels or restocks anything itself. DoD: for all three gateways independently, a checkout
+  reserves stock, a real validly-signed webhook confirms payment and decrements stock exactly
+  once, and replaying the identical webhook is a verified no-op; and a `PENDING` order whose
+  webhook never arrived is instead settled by the reconciliation sweep — the webhook chains
+  proven end to end over real HTTP against a real Postgres (P3a/P3b), and reconciliation proven
+  against the same real Postgres with the hint endpoint hit over real HTTP and the gateway's
+  status/search response faked (no sandbox account, see below), including the binding guard's
+  fraud case — a genuinely-paid transaction id planted on someone else's order — reproduced live
+  and confirmed to leave that order completely untouched.
+  - **Disclosed limitations** (what was and wasn't verified, same posture as P3a/P3b's own
+    notes):
+    - **ePayco has no redirect-return capture at all — the phase's biggest coverage gap.** Its
+      checkout hooks (`setHooks({onResponse})`) structurally cannot fire in the `standard` mode
+      this app uses (`open()` is a `window.location.href` full-page redirect that unloads the
+      bridge page), are never invoked at all on the `sessionId` code path, and carry no
+      transaction reference on any path — established in P3c Task 3 by reading ePayco's actual
+      shipped `checkout-v2.js` (421 KB, `ref_payco`/`x_ref_payco`: 0 occurrences), whose behavior
+      *contradicts ePayco's own prose docs*; the shipped code was taken as the authority.
+      Consequence: ePayco's only `providerRef` source is `markPaid`/`markFailed` stamping one
+      from an already-verified webhook, so an ePayco order whose webhook **never** arrives can
+      never be reconciled — it always falls through to the 15-minute stock-reservation expiry
+      worker. Reconciliation therefore helps ePayco only in the narrow "one webhook arrived, a
+      later one was lost" case, **not** the "no webhook ever arrived" case it primarily exists
+      for.
+    - **Related, still open:** `PAYMENTS_STOREFRONT_BASE_URL` is a single *global* URL, so the
+      redirect URLs handed to Wompi and ePayco are wrong for any deployment with 2+ tenants on
+      those gateways; and ePayco shoppers in `standard` mode have no automatic return path at all
+      (the bridge page's hook-driven handlers are proven dead in that mode, leaving the manual
+      "Ya pagué" link as the only way back). Both share one root cause — `OrderForPayment`
+      carries no tenant domain — and fixing that would also unlock ePayco's response-page return,
+      which ePayco's own first-party samples show *does* carry the `ref_payco` reconciliation
+      needs.
+    - **`Order.number` is per-tenant**, so two tenants sharing one gateway account would produce
+      colliding references. Pre-existing rather than introduced here — the already-shipped
+      webhook path makes the identical assumption — but worth stating alongside the binding
+      check, which compares against exactly that number.
+    - **No real gateway sandbox account was available for any of P3a/P3b/P3c.** Every live
+      verification used well-formed *fake* credentials against real HTTP and a real Postgres,
+      exercising the real encryption / signature-verification / binding code paths rather than
+      stubbing them — none of it is a real sandbox transaction. P3a/P3b's webhook passes were not
+      mocked at the provider level at all: a real, correctly-signed payload went through the real
+      adapter. P3c's reconciliation passes necessarily *were* faked at the adapter edge (a
+      scripted `getTransactionStatus`/`searchByReference` injected through the worker's
+      provider-resolver seam), since there is no account to produce a real gateway answer from;
+      everything downstream of that answer — the binding check, `markPaid`/`markFailed`, the
+      advisory lock, the real DB writes — ran for real, as did the hint endpoint over HTTP. A
+      further exception, from P3b: Mercado Pago's webhook path
+      was verified live only through its signature-verification step (a correctly-signed payload
+      reached Mercado Pago's own live API for the mandatory follow-up `GET /v1/payments/:id`,
+      where a tampered one failed earlier with a different error); its
+      `markPaid`/stock-decrement/idempotency chain rests on mocked-fetch unit tests
+      (`packages/payments/test/mercadopago.test.ts`).
 - **P4 — AI Agent (web)** ⬜
 - **P5 — WhatsApp + Human handoff** ⬜
 - **P6 — Platform Admin + Hardening + Pilot** ⬜
