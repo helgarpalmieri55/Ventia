@@ -451,11 +451,25 @@ export class MercadoPagoProvider implements PaymentProvider {
 
     return {
       provider: 'mercadopago',
-      // MP's own stable payment id — no composition trick needed, unlike
-      // Wompi's `transaction.id:timestamp` workaround (Wompi's own event
-      // payload has no dedicated unique-event-id field; MP's payment id
-      // already is one).
-      eventId: String(payment.id),
+      // P3 wave-1 fix 3 — this used to be a bare `String(payment.id)`, which
+      // was WRONG in the same way Wompi's bare `transaction.id` would have
+      // been (hence wompi.ts's own `id:timestamp` composition): MP's
+      // `data.id` is the PAYMENT id, not an event id, and MP fires ONE
+      // notification per status change on the SAME payment. So the first,
+      // still-`pending` delivery claimed the `(provider, tenantId, eventId)`
+      // idempotency row in `webhooks.controller.ts`, and the later `approved`
+      // delivery — the one that actually settles the order — collided with it
+      // and was discarded as a replay: 200 OK, order stuck PENDING/PENDING.
+      //
+      // Composed from the payment id plus the payment's OWN gateway status
+      // (read from the authenticated lookup above, never from the request
+      // body), which is exactly the thing that distinguishes those
+      // deliveries. Deliberately NOT composed with `x-request-id` or the
+      // signature's `ts`: those vary per DELIVERY, so including either would
+      // make every genuine MP retry look like a brand-new event and settle
+      // the order more than once — the opposite failure. Same-notification
+      // redeliveries keep producing an identical id and still dedupe.
+      eventId: `${String(payment.id)}:${payment.status}`,
       providerRef: String(payment.id),
       reference: payment.external_reference,
       status: mapStatus(payment.status),

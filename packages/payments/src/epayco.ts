@@ -465,12 +465,55 @@ export class EpaycoProvider implements PaymentProvider {
   }
 
   /** Verifies and parses an ePayco confirmation ("URL de confirmación")
-   * webhook. No network call is made here (unlike Mercado Pago's mandatory
-   * follow-up payment lookup) — ePayco's real confirmation POST carries
-   * every field this adapter needs directly, confirmed against
-   * url-de-confirmacion (see module doc comment). Throws on any
-   * verification failure, same contract as the other two adapters. */
-  async verifyAndParseWebhook(req: RawRequest, cfg: TenantProviderConfig): Promise<NormalizedPaymentEvent> {
+   * webhook, then RE-VERIFIES it against ePayco's own transaction lookup.
+   *
+   * ## Why a lookup is mandatory here (P3 wave-1 fix 1, CRITICAL)
+   *
+   * ePayco's documented confirmation signature is
+   * `SHA256(P_CUST_ID^P_KEY^x_ref_payco^x_transaction_id^x_amount^x_currency_code)`
+   * — verified verbatim, and implemented correctly below. But that 4-tuple
+   * covers NEITHER `x_response` (the payment status) NOR `x_extra1` (which
+   * order the payment is for), and this method reads and reports both. A
+   * genuine, fully-signed confirmation could therefore be replayed verbatim
+   * with ONLY those two unsigned fields rewritten, pointing a real 100-COP
+   * payment at a 999,999-COP order and reporting it PAID — reproduced with a
+   * working exploit before this fix. This is inherent to ePayco's own
+   * formula: any correct implementation of it has this property, so the fix
+   * cannot live in the hash.
+   *
+   * So the status and the reference are taken from ePayco's OWN record of the
+   * transaction — looked up by the SIGNED `x_ref_payco` via
+   * `getTransactionStatus` below, the same binding pattern
+   * `reconciliation.worker.ts` already applies on its own lookup path — and
+   * the body's unsigned `x_extra1` is only accepted if the gateway's own
+   * record AGREES with it. The gateway's amount (when it reports one) must
+   * likewise agree with the SIGNED `x_amount`. Anything unverifiable
+   * (missing reference, failed lookup) REJECTS: an unverifiable claim is
+   * never treated as a verified one, and there is deliberately no fallback to
+   * the unsigned fields.
+   *
+   * ## What this does NOT establish — read before trusting it
+   *
+   * ePayco's lookup endpoint (`/validation/v1/reference/{ref}`) is
+   * UNAUTHENTICATED and ignores the caller's credentials entirely: any
+   * reference resolves globally, for any merchant. So this re-verification
+   * binds the STATUS and the ORDER REFERENCE to the signed transaction — it
+   * does NOT establish that the transaction belongs to THIS merchant/tenant.
+   * **Account-scoping for ePayco remains unsolved** and is explicitly out of
+   * this change's scope. What actually stops a cross-account or re-pointed
+   * confirmation from settling the wrong order is the unconditional
+   * `event.amountCents === order.totalCents` check in
+   * `services/api/src/payments/webhooks.controller.ts`, which runs for all
+   * three providers before any settle.
+   *
+   * Throws on any verification failure, same contract as the other two
+   * adapters (the caller responds 401 and the gateway retries later — the
+   * right posture for a transient lookup outage). */
+  async verifyAndParseWebhook(
+    req: RawRequest,
+    cfg: TenantProviderConfig,
+    fetchImpl: typeof fetch = fetch,
+  ): Promise<NormalizedPaymentEvent> {
     const eventsSecret = requireEventsSecret(cfg);
     const epaycoCustomerId = requireEpaycoCustomerId(cfg);
 
@@ -505,18 +548,67 @@ export class EpaycoProvider implements PaymentProvider {
       throw new Error('epayco webhook: signature mismatch');
     }
 
+    // The SIGNED amount, in cents. Parsed through the same shared helper the
+    // lookup path uses so an unparseable `x_amount` becomes a REJECTION
+    // rather than a `NaN` amount silently flowing out of this adapter (the
+    // old `Math.round(Number(xAmount) * 100)` produced exactly that). This
+    // value is load-bearing: it is what the controller compares against the
+    // order's total.
+    const signedAmountCents = parseMajorUnitsToCents(xAmount);
+    if (signedAmountCents === undefined) {
+      throw new Error(`epayco webhook: x_amount is not a parseable amount (${JSON.stringify(xAmount)})`);
+    }
+
+    // --- Re-verification against ePayco's own record (see doc comment).
+    const looked = await this.getTransactionStatus(xRefPayco, cfg, fetchImpl);
+    if (looked.reference === undefined) {
+      throw new Error(
+        'epayco webhook: gateway lookup carries no reference — cannot verify which order this signed transaction is for',
+      );
+    }
+    if (looked.reference !== xExtra1) {
+      throw new Error(
+        `epayco webhook: gateway reference ${JSON.stringify(looked.reference)} does not match the payload's unsigned x_extra1 ${JSON.stringify(xExtra1)}`,
+      );
+    }
+    if (looked.amountCents !== undefined && looked.amountCents !== signedAmountCents) {
+      throw new Error(
+        `epayco webhook: gateway amount ${looked.amountCents} does not match the signed x_amount ${signedAmountCents}`,
+      );
+    }
+
+    // NOTE on `xResponse`: it is required to be PRESENT (a confirmation
+    // without it is malformed), but its value is deliberately NOT used and
+    // deliberately NOT required to agree with the lookup — a confirmation
+    // sent while the payment was `Pendiente` and looked up after it settled
+    // legitimately disagrees, and the gateway's own current record is the
+    // more truthful of the two. `mapStatus` is therefore applied to the
+    // LOOKUP's status inside `getTransactionStatus`, not to this field.
     return {
       provider: 'epayco',
-      // Genuinely unresolved which of x_ref_payco/x_transaction_id alone is
-      // guaranteed unique across a confirmation retry — composed for safety,
-      // see module doc comment.
-      eventId: `${xRefPayco}:${xTransactionId}`,
+      // `x_ref_payco:x_transaction_id` — it is genuinely unresolved which of
+      // the two alone is unique across a confirmation retry, so both are
+      // composed in (see module doc comment). The resolved STATUS is composed
+      // in as well, for the same reason `mercadopago.ts` composes its own
+      // (P3 wave-1 fix 3): the status this adapter reports now comes from the
+      // gateway and CAN legitimately differ between two confirmations for one
+      // transaction (`Pendiente` then `Aceptada` on a PSE flow). Without it,
+      // the first, non-settling confirmation would claim the idempotency row
+      // and the later settling one would be discarded as a replay. Still
+      // fully deterministic: a true redelivery of one confirmation resolves to
+      // the same status and therefore the same id, and still dedupes.
+      eventId: `${xRefPayco}:${xTransactionId}:${looked.status}`,
       // The exact path segment ePayco's own status-lookup endpoint takes
       // (see getTransactionStatus below) — kept as a single plain value.
       providerRef: xRefPayco,
-      reference: xExtra1,
-      status: mapStatus(xResponse),
-      amountCents: Math.round(Number(xAmount) * 100),
+      // The GATEWAY's own reference, not the body's unsigned field (they are
+      // proven equal immediately above — this is which of the two is the
+      // source of truth, not a behavioural difference).
+      reference: looked.reference,
+      status: looked.status,
+      // The SIGNED amount: cryptographically bound, and cross-checked against
+      // the gateway's own figure above where one is available.
+      amountCents: signedAmountCents,
     };
   }
 

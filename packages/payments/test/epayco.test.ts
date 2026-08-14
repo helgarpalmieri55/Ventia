@@ -234,6 +234,30 @@ function buildSignedWebhookRequest(opts: {
   return { headers: {}, rawBody };
 }
 
+/** Stubs ePayco's own transaction lookup (`GET
+ * /validation/v1/reference/{x_ref_payco}`), which `verifyAndParseWebhook` now
+ * ALWAYS calls after the signature check — see the "unsigned-field
+ * re-verification (fix 1)" describe block below for why. Defaults agree with
+ * `buildSignedWebhookRequest`'s own defaults so the happy paths stay happy. */
+function mockReferenceLookup(overrides: Record<string, unknown> = {}) {
+  const data: Record<string, unknown> = {
+    x_response: 'Aceptada',
+    x_extra1: 'ORD-0001',
+    x_amount: 49900,
+    ...overrides,
+  };
+  return vi.fn(async () => new Response(JSON.stringify({ data }), { status: 200 }));
+}
+
+/** A fetch stub that fails the test if it is ever called — used by the cases
+ * that must be rejected BEFORE any network call is made (bad signature,
+ * missing fields, missing credentials). */
+function neverCalledFetch() {
+  return vi.fn(async () => {
+    throw new Error('fetch must not be called on this path');
+  });
+}
+
 describe('EpaycoProvider.verifyAndParseWebhook', () => {
   it('accepts a validly-signed, form-urlencoded confirmation and normalizes it', async () => {
     const provider = new EpaycoProvider();
@@ -248,11 +272,19 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
       eventsSecret: cfg.eventsSecret!,
     });
 
-    const result = await provider.verifyAndParseWebhook(req, cfg);
+    const result = await provider.verifyAndParseWebhook(
+      req,
+      cfg,
+      mockReferenceLookup() as unknown as typeof fetch,
+    );
 
     expect(result).toEqual({
       provider: 'epayco',
-      eventId: 'ref-123:txn-456',
+      // P3 wave-1 fix 1: the resolved status is part of the event id now —
+      // same reasoning as mercadopago.ts's fix-3 composition, since the
+      // status this adapter reports comes from the gateway lookup and CAN
+      // legitimately change between two confirmations for one transaction.
+      eventId: 'ref-123:txn-456:PAID',
       providerRef: 'ref-123',
       reference: 'ORD-0001',
       status: 'PAID',
@@ -274,7 +306,11 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
       encoding: 'json',
     });
 
-    const result = await provider.verifyAndParseWebhook(req, cfg);
+    const result = await provider.verifyAndParseWebhook(
+      req,
+      cfg,
+      mockReferenceLookup({ x_extra1: 'ORD-0002', x_amount: 100 }) as unknown as typeof fetch,
+    );
     expect(result.status).toBe('PAID');
     expect(result.reference).toBe('ORD-0002');
   });
@@ -297,7 +333,11 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
     params.set('x_signature', tampered);
     req.rawBody = Buffer.from(params.toString(), 'utf8');
 
-    await expect(provider.verifyAndParseWebhook(req, cfg)).rejects.toThrow(/signature mismatch/);
+    const fetchImpl = neverCalledFetch();
+    await expect(
+      provider.verifyAndParseWebhook(req, cfg, fetchImpl as unknown as typeof fetch),
+    ).rejects.toThrow(/signature mismatch/);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('rejects a x_signature of the WRONG LENGTH without crashing (timingSafeEqual length guard)', async () => {
@@ -317,7 +357,11 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
     params.set('x_signature', `${original}ff`); // 2 extra hex chars — wrong length
     req.rawBody = Buffer.from(params.toString(), 'utf8');
 
-    await expect(provider.verifyAndParseWebhook(req, cfg)).rejects.toThrow(/signature mismatch/);
+    const fetchImpl = neverCalledFetch();
+    await expect(
+      provider.verifyAndParseWebhook(req, cfg, fetchImpl as unknown as typeof fetch),
+    ).rejects.toThrow(/signature mismatch/);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('rejects when a required field is missing', async () => {
@@ -326,7 +370,9 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
       headers: {},
       rawBody: Buffer.from(new URLSearchParams({ x_ref_payco: 'ref-1' }).toString(), 'utf8'),
     };
-    await expect(provider.verifyAndParseWebhook(req, cfg)).rejects.toThrow(/missing one or more required fields/);
+    await expect(
+      provider.verifyAndParseWebhook(req, cfg, neverCalledFetch() as unknown as typeof fetch),
+    ).rejects.toThrow(/missing one or more required fields/);
   });
 
   it('throws if eventsSecret is missing from cfg', async () => {
@@ -342,7 +388,9 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
       epaycoCustomerId: '1',
       eventsSecret: 'irrelevant',
     });
-    await expect(provider.verifyAndParseWebhook(req, badCfg)).rejects.toThrow(/eventsSecret/);
+    await expect(
+      provider.verifyAndParseWebhook(req, badCfg, neverCalledFetch() as unknown as typeof fetch),
+    ).rejects.toThrow(/eventsSecret/);
   });
 
   it('throws if epaycoCustomerId is missing from cfg', async () => {
@@ -358,7 +406,9 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
       epaycoCustomerId: 'irrelevant',
       eventsSecret: 'secret',
     });
-    await expect(provider.verifyAndParseWebhook(req, badCfg)).rejects.toThrow(/epaycoCustomerId/);
+    await expect(
+      provider.verifyAndParseWebhook(req, badCfg, neverCalledFetch() as unknown as typeof fetch),
+    ).rejects.toThrow(/epaycoCustomerId/);
   });
 
   it.each([
@@ -378,8 +428,171 @@ describe('EpaycoProvider.verifyAndParseWebhook', () => {
       epaycoCustomerId: cfg.epaycoCustomerId!,
       eventsSecret: cfg.eventsSecret!,
     });
-    const result = await provider.verifyAndParseWebhook(req, cfg);
+    // The status now comes from the GATEWAY LOOKUP, not from the body's own
+    // unsigned x_response — so the lookup is what carries the vocabulary
+    // under test here. (The body still has to carry a matching x_response:
+    // it is a required field.)
+    const result = await provider.verifyAndParseWebhook(
+      req,
+      cfg,
+      mockReferenceLookup({ x_response: xResponse, x_extra1: 'ORD-9', x_amount: 500 }) as unknown as typeof fetch,
+    );
     expect(result.status).toBe(expected);
+  });
+});
+
+/** P3 wave-1 fix 1 (ePayco half) — regression coverage for a CRITICAL defect.
+ *
+ * ePayco's documented confirmation signature is
+ * `SHA256(P_CUST_ID^P_KEY^x_ref_payco^x_transaction_id^x_amount^x_currency_code)`.
+ * That 4-tuple covers NEITHER `x_response` (the status) NOR `x_extra1` (which
+ * order this is), yet this adapter reads and acts on both. So one genuine,
+ * fully-signed confirmation could be replayed verbatim with only those two
+ * unsigned fields swapped — pointing a real 100-COP payment at a 999,999-COP
+ * order and marking it paid. This is inherent to ePayco's own formula: any
+ * correct implementation of it has this property, so the fix cannot live in
+ * the hash.
+ *
+ * The remedy implemented here is to re-fetch the transaction from ePayco's own
+ * lookup endpoint, keyed on the SIGNED `x_ref_payco`, and take the status and
+ * reference from THAT response, requiring the looked-up reference to match the
+ * body's `x_extra1` and the looked-up amount to match the SIGNED `x_amount`.
+ *
+ * HONEST LIMIT, stated here so no reader over-reads these tests: ePayco's
+ * lookup endpoint is unauthenticated and ignores the caller's credentials
+ * entirely (any reference resolves globally), so this re-verification binds
+ * STATUS and REFERENCE to the signed transaction — it does NOT establish that
+ * the transaction belongs to THIS merchant. Account-scoping for ePayco remains
+ * unsolved. The controller's unconditional order-amount check is the layer
+ * that actually stops a mismatched settlement. */
+describe('EpaycoProvider.verifyAndParseWebhook — unsigned-field re-verification (fix 1)', () => {
+  it('takes the status from the gateway lookup, NOT from the unsigned x_response', async () => {
+    const provider = new EpaycoProvider();
+    // The attacker (or a stale delivery) claims "Aceptada" in the unsigned
+    // field; the gateway's own record says the transaction was rejected.
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-777',
+      xTransactionId: 'txn-777',
+      xAmount: '49900.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+    const fetchImpl = mockReferenceLookup({ x_response: 'Rechazada' });
+
+    const result = await provider.verifyAndParseWebhook(req, cfg, fetchImpl as unknown as typeof fetch);
+
+    expect(result.status).toBe('FAILED');
+    // Looked up BY THE SIGNED x_ref_payco — the only transaction identifier
+    // in the payload that the signature actually covers.
+    const [url] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://secure.epayco.co/validation/v1/reference/ref-777');
+  });
+
+  it('rejects the exact reported exploit: a genuine signed 4-tuple replayed with only x_extra1 swapped', async () => {
+    const provider = new EpaycoProvider();
+    // Verbatim replay of a REAL, correctly-signed confirmation for order
+    // ORD-0001 — the signature still validates, because none of the four
+    // signed fields were touched — with the unsigned order pointer swapped to
+    // a different, much more expensive order.
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-123',
+      xTransactionId: 'txn-456',
+      xAmount: '100.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-9999-EXPENSIVE',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+
+    await expect(
+      provider.verifyAndParseWebhook(
+        req,
+        cfg,
+        // The gateway's own record still says this transaction is for ORD-0001.
+        mockReferenceLookup({ x_extra1: 'ORD-0001', x_amount: 100 }) as unknown as typeof fetch,
+      ),
+    ).rejects.toThrow(/does not match/);
+  });
+
+  it('rejects when the lookup carries no reference at all (unverifiable is not verified)', async () => {
+    const provider = new EpaycoProvider();
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-1',
+      xTransactionId: 'txn-1',
+      xAmount: '100.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+    await expect(
+      provider.verifyAndParseWebhook(
+        req,
+        cfg,
+        mockReferenceLookup({ x_extra1: undefined }) as unknown as typeof fetch,
+      ),
+    ).rejects.toThrow(/carries no reference/);
+  });
+
+  it("rejects when the lookup's amount contradicts the SIGNED x_amount", async () => {
+    const provider = new EpaycoProvider();
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-1',
+      xTransactionId: 'txn-1',
+      xAmount: '100.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+    await expect(
+      provider.verifyAndParseWebhook(
+        req,
+        cfg,
+        mockReferenceLookup({ x_amount: 999999 }) as unknown as typeof fetch,
+      ),
+    ).rejects.toThrow(/amount/);
+  });
+
+  it('fails closed when the lookup itself fails (never falls back to the unsigned fields)', async () => {
+    const provider = new EpaycoProvider();
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-1',
+      xTransactionId: 'txn-1',
+      xAmount: '100.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+    const fetchImpl = vi.fn(async () => new Response('nope', { status: 503 }));
+    await expect(
+      provider.verifyAndParseWebhook(req, cfg, fetchImpl as unknown as typeof fetch),
+    ).rejects.toThrow(/HTTP 503/);
+  });
+
+  it('rejects a non-numeric signed x_amount instead of emitting NaN as the amount', async () => {
+    const provider = new EpaycoProvider();
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-1',
+      xTransactionId: 'txn-1',
+      xAmount: 'not-a-number',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+    await expect(
+      provider.verifyAndParseWebhook(req, cfg, neverCalledFetch() as unknown as typeof fetch),
+    ).rejects.toThrow(/x_amount/);
   });
 });
 

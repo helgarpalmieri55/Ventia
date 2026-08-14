@@ -227,6 +227,33 @@ describe('WompiProvider.verifyAndParseWebhook', () => {
     await expect(provider.verifyAndParseWebhook(toRawRequest(payload), cfg)).rejects.toThrow(/signature mismatch/);
   });
 
+  it('rejects a checksum of the WRONG LENGTH without crashing (timingSafeEqual length guard, fix 7)', async () => {
+    // The comparison is constant-time now (`timingSafeEqual`), matching
+    // mercadopago.ts and epayco.ts — and `timingSafeEqual` THROWS on
+    // mismatched lengths rather than returning false, so a truncated or
+    // padded checksum has to fail verification like any other mismatch
+    // instead of surfacing as a TypeError/500 from the webhook route.
+    const provider = new WompiProvider();
+    const payload = buildSignedWebhookPayload({
+      transactionId: 'txn-1234-abcd',
+      status: 'APPROVED',
+      amountInCents: 4990000,
+      reference: 'ORD-0001',
+      timestamp: 1700000000,
+      eventsSecret: cfg.eventsSecret!,
+    });
+    const original = payload.signature.checksum;
+
+    payload.signature.checksum = `${original}ff`; // 2 hex chars too long
+    await expect(provider.verifyAndParseWebhook(toRawRequest(payload), cfg)).rejects.toThrow(/signature mismatch/);
+
+    payload.signature.checksum = original.slice(0, -4); // and too short
+    await expect(provider.verifyAndParseWebhook(toRawRequest(payload), cfg)).rejects.toThrow(/signature mismatch/);
+
+    payload.signature.checksum = ''; // and empty
+    await expect(provider.verifyAndParseWebhook(toRawRequest(payload), cfg)).rejects.toThrow(/signature mismatch/);
+  });
+
   it('rejects a payload where a signed field was tampered with but the checksum was not recomputed', async () => {
     const provider = new WompiProvider();
     const payload = buildSignedWebhookPayload({

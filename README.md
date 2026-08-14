@@ -204,9 +204,21 @@ All three share the same provider-registry/webhook-controller/stock-reservation 
   middleware (see `services/api/src/main.ts`) — this matters even for ePayco, whose real
   confirmation POST is `application/x-www-form-urlencoded`, not JSON, unlike the other two. A
   verified `APPROVED`/`approved`/`Aceptada` event transitions the order to `CONFIRMED`/`PAID` and
-  clears its stock reservation; idempotency is enforced by
-  `WebhookEvent`'s `@@unique([provider, eventId])` constraint — replaying the identical webhook
-  any number of times returns `200` every time but only ever transitions the order once.
+  clears its stock reservation — but **only if the event's amount equals the order's total**: that
+  check is unconditional, runs for all three providers before any settlement, and is what
+  neutralizes both ePayco's unsigned status/order fields (its documented signature formula covers
+  neither) and Wompi's undelimited checksum concatenation (adjacent numeric fields alias, so one
+  genuine checksum also validates a re-split naming a different amount and a different order). A
+  mismatch is recorded with `result: 'amount_mismatch'` and acknowledged `200` — retrying could
+  never change the outcome, and a 4xx would only invite gateway retry storms. Idempotency is
+  enforced by `WebhookEvent`'s `@@unique([provider, tenantId, eventId])` constraint —
+  **tenant-scoped**, because two tenants sharing one gateway merchant account share its webhook
+  secret, so one delivery verifies at both endpoints — and a conflict short-circuits only when the
+  existing row was actually processed, so a delivery whose processing threw is reprocessed by the
+  gateway's retry rather than swallowed. Replaying the identical webhook any number of times
+  returns `200` every time but only ever transitions the order once. **Deviation from
+  `docs/SPEC.md`:** webhooks are processed inline, not "through a queue, never inline" as M5
+  requires — recorded in that bullet in `docs/SPEC.md`, still open work.
 - **Payment-status reconciliation (P3c)** catches payments whose webhook never arrived.
   `services/api/src/payments/reconciliation.worker.ts` is a BullMQ repeatable job (started from
   `main.ts`'s real-boot block, alongside the stock-reservation worker) that every **2 minutes**

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type {
   NormalizedPaymentEvent,
   NormalizedStatus,
@@ -78,6 +78,24 @@ function buildRedirectUrl(orderNumber: string): string {
 
 function sha256Hex(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
+}
+
+/** Constant-time comparison of two hex digests — byte-for-byte identical to
+ * `mercadopago.ts`'s and `epayco.ts`'s own helpers of the same name, and
+ * adopted here (P3 wave-1 fix 7) purely for consistency across the three
+ * adapters: the previous `computed !== checksum` was not practically
+ * exploitable over a network against a SHA-256 hex digest, but there is no
+ * reason for one of three webhook verifiers to be the odd one out.
+ *
+ * `timingSafeEqual` THROWS on mismatched lengths rather than returning false,
+ * so an attacker-controlled (or simply truncated) checksum of a different
+ * length must be length-guarded here — it has to fail verification like any
+ * other mismatch, never crash the caller. */
+function timingSafeEqualHex(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
 }
 
 /** Resolves a dot-separated path (e.g. "transaction.status") against a
@@ -262,6 +280,21 @@ export class WompiProvider implements PaymentProvider {
       throw new Error('wompi webhook: missing signature.properties, signature.checksum, or timestamp');
     }
 
+    // KNOWN, DELIBERATE WEAKNESS OF WOMPI'S OWN FORMULA (P3 wave-1 fix 2).
+    // The values are concatenated with NO delimiter — that is Wompi's
+    // documented formula, so this implementation follows it — which means
+    // adjacent numeric fields ALIAS: `(id, status, 50000000, 1042)` and
+    // `(id, status, 5000000010, 42)` concatenate to the same bytes and
+    // therefore share one valid checksum. An attacker holding one genuine
+    // 500,000-COP event's checksum can re-split it into a different
+    // (amount, reference) pair that a signature check alone cannot tell apart.
+    // Changing the hash is not an option (it must match what Wompi computes),
+    // so the defense lives one layer up: `webhooks.controller.ts` refuses to
+    // settle unless `event.amountCents` equals the resolved order's
+    // `totalCents`, which makes every re-split point at an order whose total
+    // doesn't match. See that controller's amount check and the
+    // `(50000000, 1042)` / `(5000000010, 42)` regression test in
+    // services/api/test/webhooks.test.ts.
     const data = body.data;
     const concatenatedValues = properties.map((path) => {
       const value = readPath(data, String(path));
@@ -269,7 +302,7 @@ export class WompiProvider implements PaymentProvider {
     });
     const computed = sha256Hex(`${concatenatedValues.join('')}${timestamp}${eventsSecret}`);
 
-    if (computed !== checksum) {
+    if (!timingSafeEqualHex(computed, checksum)) {
       throw new Error('wompi webhook: signature mismatch');
     }
 

@@ -150,7 +150,10 @@ describe('MercadoPagoProvider.verifyAndParseWebhook', () => {
 
     expect(result).toEqual({
       provider: 'mercadopago',
-      eventId: '123456789',
+      // P3 wave-1 fix 3: payment id + the payment's own gateway status, NOT
+      // the bare payment id this used to assert — see the dedicated
+      // "eventId composition (fix 3)" describe block below for why.
+      eventId: '123456789:approved',
       providerRef: '123456789',
       reference: 'ORD-0001',
       status: 'PAID',
@@ -335,6 +338,98 @@ describe('MercadoPagoProvider.verifyAndParseWebhook', () => {
     expect(cancelledResult.status).toBe('FAILED');
     expect(refundedResult.status).toBe('EXPIRED');
     expect(cancelledResult.status).not.toBe(refundedResult.status);
+  });
+});
+
+/** P3 wave-1 fix 3 — regression coverage for a HIGH-severity defect.
+ *
+ * `eventId` used to be `String(payment.id)` — the PAYMENT id, not an EVENT
+ * id. Mercado Pago fires ONE notification per status change on the SAME
+ * payment (`pending` -> `approved` is two deliveries carrying the same
+ * `data.id`), so under the old composition the first, still-unpaid delivery
+ * inserted the `WebhookEvent` idempotency row and the LATER, APPROVED one
+ * collided with it and was discarded as a "replay" — 200 OK, order left
+ * PENDING/PENDING forever. Wompi's adapter already composes
+ * `transaction.id:timestamp` to avoid exactly this; MP now composes the
+ * payment id with the payment's own gateway status.
+ *
+ * The two properties below are in tension and BOTH matter — a composition
+ * that satisfies only one of them is not a fix:
+ *  1. two deliveries for the same payment at DIFFERENT statuses must produce
+ *     DIFFERENT event ids (or the settling one gets swallowed), and
+ *  2. two deliveries of the SAME notification must produce the SAME event id
+ *     (or genuine gateway retries settle the order twice). This is why the
+ *     per-DELIVERY values available here (`x-request-id`, the signature's
+ *     `ts`) are deliberately NOT part of the composition: they differ across
+ *     redeliveries of one notification and would defeat dedupe entirely. */
+describe('MercadoPagoProvider.verifyAndParseWebhook — eventId composition (fix 3)', () => {
+  it('the pending and approved notifications for ONE payment produce DIFFERENT eventIds', async () => {
+    const provider = new MercadoPagoProvider();
+
+    const pendingReq = buildSignedWebhookRequest({
+      dataId: '123456789',
+      ts: '1742505638683',
+      requestId: 'req-delivery-1',
+      eventsSecret: cfg.eventsSecret!,
+    });
+    const pending = await provider.verifyAndParseWebhook(
+      pendingReq,
+      cfg,
+      mockPaymentLookup({ status: 'pending' }) as unknown as typeof fetch,
+    );
+
+    // Same payment id — the shopper finished paying, MP notifies again.
+    const approvedReq = buildSignedWebhookRequest({
+      dataId: '123456789',
+      ts: '1742505699999',
+      requestId: 'req-delivery-2',
+      eventsSecret: cfg.eventsSecret!,
+    });
+    const approved = await provider.verifyAndParseWebhook(
+      approvedReq,
+      cfg,
+      mockPaymentLookup({ status: 'approved' }) as unknown as typeof fetch,
+    );
+
+    expect(pending.status).toBe('PENDING');
+    expect(approved.status).toBe('PAID');
+    // The whole point: these must not collapse onto one idempotency key.
+    expect(approved.eventId).not.toBe(pending.eventId);
+    // Both still identify the same payment for every other purpose.
+    expect(pending.providerRef).toBe('123456789');
+    expect(approved.providerRef).toBe('123456789');
+    // Composition is payment id + the payment's own gateway status.
+    expect(pending.eventId).toBe('123456789:pending');
+    expect(approved.eventId).toBe('123456789:approved');
+  });
+
+  it('two deliveries of the SAME notification still produce the SAME eventId (dedupe preserved)', async () => {
+    const provider = new MercadoPagoProvider();
+
+    // A genuine MP retry: same payment, same status, but a NEW x-request-id
+    // and a NEW signature ts — the two things that vary per delivery.
+    const first = await provider.verifyAndParseWebhook(
+      buildSignedWebhookRequest({
+        dataId: '987654321',
+        ts: '1742505638683',
+        requestId: 'req-original',
+        eventsSecret: cfg.eventsSecret!,
+      }),
+      cfg,
+      mockPaymentLookup({ id: 987654321, status: 'approved' }) as unknown as typeof fetch,
+    );
+    const retry = await provider.verifyAndParseWebhook(
+      buildSignedWebhookRequest({
+        dataId: '987654321',
+        ts: '1742509999999',
+        requestId: 'req-retry',
+        eventsSecret: cfg.eventsSecret!,
+      }),
+      cfg,
+      mockPaymentLookup({ id: 987654321, status: 'approved' }) as unknown as typeof fetch,
+    );
+
+    expect(retry.eventId).toBe(first.eventId);
   });
 });
 

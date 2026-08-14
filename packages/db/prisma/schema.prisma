@@ -425,7 +425,28 @@ model WebhookEvent {
   result      String?
   createdAt   DateTime  @default(now())
 
-  @@unique([provider, eventId])
+  // Tenant-SCOPED idempotency key (widened from `@@unique([provider,
+  // eventId])`, P3 wave-1 security fix 4). The old, global key was wrong for
+  // an explicitly supported deployment shape: two Ventia tenants sharing ONE
+  // gateway merchant account share that account's `eventsSecret`, so the same
+  // signed delivery verifies at EITHER tenant's webhook URL — and `Order.number`
+  // is per-tenant (`@@unique([tenantId, number])` above), so the same
+  // `reference` legitimately exists in both. Under the global key, whichever
+  // tenant's URL was hit SECOND — including the payment's real owner — had its
+  // delivery permanently swallowed by the unique conflict and returned 200
+  // without ever settling. Scoping the key by `tenantId` lets each tenant
+  // process its own copy of a delivery exactly once, while
+  // `webhooks.controller.ts`'s unconditional amount check is what stops the
+  // wrong tenant from acting on it.
+  //
+  // `tenantId` is nullable (some webhook events are genuinely tenant-less, see
+  // the column's own history), and Postgres treats NULLs as DISTINCT in a
+  // unique index — so rows with a null `tenantId` get NO idempotency
+  // protection from this constraint. That is acceptable today because the ONLY
+  // writer of this table (`webhooks.controller.ts`) always passes a real
+  // `tenantId` from the URL path; any future tenant-less writer must bring its
+  // own dedupe.
+  @@unique([provider, tenantId, eventId])
 }
 
 // ---- Agent ----
