@@ -33,7 +33,11 @@ export const STOREFRONT_SCHEME_ENV_VAR = 'STOREFRONT_PUBLIC_SCHEME';
  * Note `.localhost` is a RESERVED special-use TLD (RFC 6761), not a name
  * anyone can register — so treating it as plaintext-http cannot be turned into
  * a downgrade against a real production domain. */
-const LOCAL_HOST_EXACT = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+// `[::1]` (bracketed) is the only form a real `Host` header can carry — RFC
+// 3986 makes brackets mandatory for an IPv6 literal in an authority, so a
+// bare `::1` never arrives here. It's also unmatchable by construction: the
+// port strip below rewrites `::1` to `:` before this Set is consulted.
+const LOCAL_HOST_EXACT = new Set(['localhost', '127.0.0.1', '[::1]']);
 const LOCAL_HOST_SUFFIXES = ['.localhost', '.local', '.test'];
 
 /** Decides `http` vs `https` for a tenant's public storefront URL.

@@ -35,6 +35,35 @@ describe('loadEnv', () => {
     expect(env.S3_PUBLIC_URL).toBe('http://localhost:9000/ventia');
   });
 
+  // A typo here used to pass boot AND the whole test suite, then 500 every
+  // non-`cod` checkout for every tenant — the value is read per-request and
+  // throws inside checkout, so the first signal was a shopper failing to pay.
+  // Declaring it in the schema moves that failure to boot.
+  it('throws on a misspelled STOREFRONT_PUBLIC_SCHEME rather than deferring to payment time', () => {
+    expect(() =>
+      loadEnv({
+        DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+        REDIS_URL: 'redis://localhost:6379',
+        AUTH_SECRET: 'secret',
+        PAYMENTS_ENCRYPTION_KEY: VALID_PAYMENTS_ENCRYPTION_KEY,
+        STOREFRONT_PUBLIC_SCHEME: 'htps',
+      }),
+    ).toThrow(/STOREFRONT_PUBLIC_SCHEME/);
+  });
+
+  it('accepts both valid STOREFRONT_PUBLIC_SCHEME values, and leaves it unset for inference', () => {
+    const base = {
+      DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+      REDIS_URL: 'redis://localhost:6379',
+      AUTH_SECRET: 'secret',
+      PAYMENTS_ENCRYPTION_KEY: VALID_PAYMENTS_ENCRYPTION_KEY,
+    };
+    expect(loadEnv({ ...base, STOREFRONT_PUBLIC_SCHEME: 'http' }).STOREFRONT_PUBLIC_SCHEME).toBe('http');
+    expect(loadEnv({ ...base, STOREFRONT_PUBLIC_SCHEME: 'https' }).STOREFRONT_PUBLIC_SCHEME).toBe('https');
+    // Unset is the normal case — the scheme is then inferred from the domain.
+    expect(loadEnv(base).STOREFRONT_PUBLIC_SCHEME).toBeUndefined();
+  });
+
   it('throws a clear error when PAYMENTS_ENCRYPTION_KEY is missing entirely', () => {
     expect(() =>
       loadEnv({

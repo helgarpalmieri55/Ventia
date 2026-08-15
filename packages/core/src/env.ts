@@ -22,6 +22,16 @@ const envSchema = z.object({
   STOREFRONT_INTERNAL_URL: z.string().url().default('http://localhost:3000'),
   RESEND_API_KEY: z.string().min(1).optional(),
   RESEND_FROM_EMAIL: z.string().email().default(DEFAULT_RESEND_FROM_EMAIL),
+  // Overrides the http/https inference for tenant storefront redirect URLs
+  // (services/api/src/tenants/tenant-public-url.ts). Optional — unset means
+  // "infer from the domain", which is the normal case. Declared here purely
+  // so a TYPO fails loudly at boot rather than at payment time: the value is
+  // read per-request off `process.env`, and an invalid one throws inside
+  // checkout, so without this schema entry `STOREFRONT_PUBLIC_SCHEME=htps`
+  // would pass boot, pass the whole test suite, and then 500 every non-`cod`
+  // checkout for every tenant with no signal until a shopper tried to pay.
+  // Same fail-at-boot posture as PAYMENTS_ENCRYPTION_KEY below.
+  STOREFRONT_PUBLIC_SCHEME: z.enum(['http', 'https']).optional(),
   // AES-256-GCM key for encrypting payment-provider credentials at rest
   // (services/api/src/payments/encryption.ts). Required, no default — an
   // unset/malformed key must fail loudly at boot, not silently produce
