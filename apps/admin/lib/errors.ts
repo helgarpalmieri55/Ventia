@@ -24,6 +24,8 @@ const MESSAGES: Record<string, string> = {
   UNAUTHENTICATED: 'Debes iniciar sesión para continuar.',
   STOCK_BELOW_ZERO: 'El inventario no puede quedar en negativo.',
   INVALID_TRANSITION: 'Esta acción ya no es válida para el estado actual del pedido. Actualiza la página.',
+  ONLINE_PAYMENT_PENDING:
+    'Este pedido se paga en línea y su pago aún no se ha confirmado. Se confirmará automáticamente cuando la pasarela reporte el pago.',
   ORDER_NOT_FOUND: 'No encontramos este pedido.',
   INVALID_UPLOAD: 'El archivo subido no es válido.',
   CSV_TOO_LARGE: 'El archivo CSV supera el tamaño permitido.',

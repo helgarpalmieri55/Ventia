@@ -7,7 +7,12 @@ import {
   sendOrderDeliveredEmail,
   sendOrderShippedEmail,
 } from '../mailer/order-emails';
-import { ACTION_TARGET_STATUS, ALLOWED_ACTIONS, type OrderAction } from './transitions';
+import {
+  ACTION_TARGET_STATUS,
+  ALLOWED_ACTIONS,
+  isBlockedByPendingOnlinePayment,
+  type OrderAction,
+} from './transitions';
 
 export interface ShippedPayload {
   carrier: string;
@@ -155,13 +160,29 @@ interface StockAdjustableItem {
  * STOCK_BELOW_ZERO here rolls back every earlier line's already-applied
  * decrement in the same loop automatically — no hand-rolled compensation
  * needed.
+ *
+ * Exported (was module-private) for Task 5's checkout.service.ts `wompi`
+ * branch, which reuses this exact atomic primitive to reserve stock at
+ * checkout time (P3a design decision 2: an online-payment order actually
+ * decrements stock immediately, using the new `'order_reserved'`
+ * InventoryMovement reason below, rather than a separate reservation
+ * ledger).
+ *
+ * `'order_expired'` (Task 6) is a fourth, distinct reason: a restock caused
+ * by `stock-reservation.worker.ts`'s automatic TTL sweep, not by this
+ * method's own `cancel` branch (which keeps writing `'order_cancelled'`,
+ * even for the widened reserved-PENDING case below) — the InventoryMovement
+ * audit trail should distinguish "a merchant/shopper cancelled this order"
+ * from "nobody ever paid and the 15-minute hold lapsed automatically",
+ * since they're different real-world events even though both restock the
+ * same way.
  */
-async function adjustStockLine(
+export async function adjustStockLine(
   tx: Prisma.TransactionClient,
   tenantId: string,
   item: StockAdjustableItem,
   delta: number,
-  reason: 'order_confirmed' | 'order_cancelled',
+  reason: 'order_confirmed' | 'order_cancelled' | 'order_reserved' | 'order_expired',
   orderId: string,
   actorUserId: string,
 ): Promise<void> {
@@ -343,7 +364,34 @@ export class OrdersService {
         throw new HttpException({ error: 'INVALID_TRANSITION', details: { from: order.status, action } }, 409);
       }
 
-      if (action === 'confirm') {
+      // The COD scoping of `confirm` (P3 wave-2 FIX 2) — see
+      // `isBlockedByPendingOnlinePayment`'s doc comment for the reproduced
+      // damage this prevents. Its own error code rather than a second
+      // `INVALID_TRANSITION`: the status transition IS legal here, it's the
+      // order's payment state that isn't, and the merchant needs to be told
+      // the difference ("this pedido is waiting on its online payment") to
+      // act on it. Same 409 + `{error, details}` envelope as its neighbor,
+      // and checked INSIDE the advisory lock on freshly-read state, so a
+      // webhook confirming payment concurrently can't be raced past it.
+      if (isBlockedByPendingOnlinePayment(action, order)) {
+        throw new HttpException(
+          {
+            error: 'ONLINE_PAYMENT_PENDING',
+            details: { paymentProvider: order.paymentProvider, paymentStatus: order.paymentStatus },
+          },
+          409,
+        );
+      }
+
+      // Stock was already decremented at checkout time for any order still
+      // holding a reservation (`stockReservedUntil !== null` is exactly the
+      // signal `checkout.service.ts` sets for that — the same one the `cancel`
+      // branch below already keys its restock off). Decrementing again here
+      // is the double-decrement FIX 2 is about. The guard above stops the one
+      // reachable route into this state today; this makes the invariant
+      // ("never decrement stock twice for one order") hold structurally,
+      // independent of which precondition some future caller checks.
+      if (action === 'confirm' && order.stockReservedUntil === null) {
         // Decrement each line's stock by exactly its ordered qty. Any
         // line's floor check failing throws STOCK_BELOW_ZERO, which aborts
         // this whole $transaction callback — Prisma rolls back every
@@ -354,11 +402,34 @@ export class OrdersService {
         }
       }
 
-      if (action === 'cancel' && RESTOCKABLE_STATUSES.has(order.status)) {
-        // Stock was decremented at some earlier point (order.status is
-        // CONFIRMED/PREPARING/SHIPPED, never PENDING here) — restock every
-        // line. No floor check is meaningfully at risk for a positive delta;
-        // adjustStockLine's shared shape is used anyway for consistency.
+      // Widened per P3a design decision 4: a COD order in PENDING never had
+      // any stock decremented (RESTOCKABLE_STATUSES alone correctly says
+      // "no restock" for it), but an online-payment (`wompi`) order CAN sit
+      // in PENDING with real, already-decremented stock — checkout.service.ts's
+      // `wompi` branch reserves stock (adjustStockLine(..., -qty,
+      // 'order_reserved', ...)) and stamps `stockReservedUntil` at
+      // order-creation time (Task 5), before any webhook has confirmed
+      // payment. Without this `|| order.stockReservedUntil !== null` clause,
+      // a merchant cancelling that reserved PENDING order (e.g. because the
+      // shopper asked to cancel before paying) would silently skip the
+      // restock — the concrete bug this closes: real stock stays
+      // permanently decremented against a CANCELLED order that was never
+      // paid for. `stockReservedUntil !== null` is exactly the signal
+      // checkout.service.ts already uses to mean "this order actually holds
+      // reserved stock" (null for every COD order and for any order past
+      // the pending/reserved stage), so it's the correct, minimal condition
+      // to add — no new state, no new column.
+      if (action === 'cancel' && (RESTOCKABLE_STATUSES.has(order.status) || order.stockReservedUntil !== null)) {
+        // Stock was decremented at some earlier point — either by an
+        // earlier `confirm` (order.status is CONFIRMED/PREPARING/SHIPPED),
+        // or by checkout's own `wompi` reservation (order.status is still
+        // PENDING but stockReservedUntil is set) — restock every line
+        // either way. This is still a merchant/shopper-initiated CANCEL, not
+        // an automatic expiry, so the InventoryMovement reason stays
+        // 'order_cancelled' (see 'order_expired'`'s doc comment on
+        // adjustStockLine above for why the two are kept distinct). No floor
+        // check is meaningfully at risk for a positive delta; adjustStockLine's
+        // shared shape is used anyway for consistency.
         for (const item of order.items) {
           await adjustStockLine(tx, tenantId, item, item.qty, 'order_cancelled', orderId, actorUserId);
         }
@@ -396,7 +467,35 @@ export class OrdersService {
       }
 
       const targetStatus = ACTION_TARGET_STATUS[action];
-      await tx.order.update({ where: { id: orderId }, data: { status: targetStatus } });
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: targetStatus,
+          // P3 wave-2 FIX 2 widened this from `cancel`-only to EVERY action.
+          // `stockReservedUntil` means "this order is an unpaid online order
+          // still holding a 15-minute stock hold", and that is false the
+          // instant the order leaves `PENDING` by ANY route — yet only
+          // `cancel` cleared it, so a `confirm` left a CONFIRMED order
+          // carrying a live-looking reservation that neither
+          // `expireReservations()` (it filters `status: 'PENDING'`) nor
+          // anything else could ever release. Clearing it on every action is
+          // a no-op for the ones that can't have it set (`preparing`/
+          // `shipped`/`delivered` all come from `CONFIRMED`, where it is
+          // already null; every COD order has it null throughout), so this
+          // adds no new behavior beyond closing that leak.
+          stockReservedUntil: null,
+          // Original (Task 6) reasoning, still the motivating case: a
+          // cancelled reserved-PENDING wompi order's `stockReservedUntil` is
+          // functionally inert once `status` is CANCELLED —
+          // stock-reservation.worker.ts's own sweep query filters on
+          // `status = 'PENDING'` — but a future reader of the Order table (an
+          // admin, a support engineer, a later migration/report) should never
+          // see a CANCELLED order that still *looks* like it is holding an
+          // active 15-minute reservation deadline. Note the happy path for an
+          // online order still clears this in `PaymentsService.markPaid`, not
+          // here (design decision 3); this method is the merchant-driven path.
+        },
+      });
 
       await tx.orderEvent.create({
         data: {

@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { FONT_PAIRS, RADIUS_OPTIONS, type FontPair, type Radius } from '@ventia/core';
-import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Input, Label, Select, Spinner } from '@ventia/ui';
+import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Input, Select, Spinner } from '@ventia/ui';
 import { ApiError, apiFetch } from '../../../lib/api';
 import { errorMessage, fieldErrors } from '../../../lib/errors';
 import { FONT_PAIR_LABELS, RADIUS_LABELS, themeToFormState } from '../../../lib/theme-form';
 import { EnviosTab } from '../../../components/shipping-tab';
+import { PagosTab } from '../../../components/pagos-tab';
 
 interface StoreInfo {
   category?: string;
@@ -27,7 +28,22 @@ export interface SettingsResponse {
   status: string;
   storeInfo: StoreInfo;
   theme: Record<string, unknown>;
-  payments: { codEnabled: boolean };
+  payments: {
+    codEnabled: boolean;
+    // Widened (P3a Task 7) for Wompi credentials, then widened again (P3b
+    // Task 5, matching the server's own P3b Task 4 generalization — see
+    // services/api/src/settings/settings.controller.ts's `maskedProviderView`,
+    // renamed from a Wompi-only `maskedWompiView`) to cover all three
+    // providers with the identical shape. `publicKeyMasked` is null until a
+    // credential set has ever been saved; `connected`/`sandbox` reflect
+    // whatever was last saved via `PATCH /v1/admin/settings/payments`, never
+    // unsaved form input.
+    providers: {
+      wompi: { connected: boolean; publicKeyMasked: string | null; sandbox: boolean };
+      mercadopago: { connected: boolean; publicKeyMasked: string | null; sandbox: boolean };
+      epayco: { connected: boolean; publicKeyMasked: string | null; sandbox: boolean };
+    };
+  };
   shipping: Record<string, unknown>;
 }
 
@@ -428,53 +444,3 @@ function MarcaTab({ settings, onSaved }: TabProps) {
   );
 }
 
-/** Pagos tab: `PATCH /v1/admin/settings/payments` — the P1 launch only
- * supports cash-on-delivery, same single-toggle shape as the onboarding
- * wizard's PaymentsStep. */
-function PagosTab({ settings, onSaved }: TabProps) {
-  const [codEnabled, setCodEnabled] = useState(settings.payments.codEnabled);
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [saved, setSaved] = useState(false);
-
-  async function handleSave() {
-    setError(null);
-    setSaved(false);
-    setSubmitting(true);
-    try {
-      const updated = await apiFetch<SettingsResponse>('/v1/admin/settings/payments', {
-        method: 'PATCH',
-        body: JSON.stringify({ codEnabled }),
-      });
-      onSaved(updated);
-      setSaved(true);
-    } catch (e) {
-      setError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-4">
-      {error ? <Alert variant="error">{error}</Alert> : null}
-      {saved ? <Alert variant="success">Los cambios se guardaron correctamente.</Alert> : null}
-      <div className="flex items-center gap-3 rounded-md border border-border p-3">
-        <input
-          id="pagos-cod-enabled"
-          type="checkbox"
-          className="h-4 w-4"
-          checked={codEnabled}
-          onChange={(event) => {
-            setCodEnabled(event.target.checked);
-            setSaved(false);
-          }}
-        />
-        <Label htmlFor="pagos-cod-enabled">Aceptar pago contraentrega</Label>
-      </div>
-      <Button onClick={() => void handleSave()} disabled={submitting} className="self-start">
-        {submitting ? 'Guardando…' : 'Guardar'}
-      </Button>
-    </div>
-  );
-}

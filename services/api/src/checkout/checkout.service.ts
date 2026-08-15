@@ -1,10 +1,19 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { Prisma, platformDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
 import { DEPARTAMENTOS, type CheckoutAddressInput, type TaxRateValue } from '@ventia/core';
+import type { PaymentProviderId, TenantProviderConfig } from '@ventia/payments';
 import { MAILER, type Mailer } from '../mailer/mailer';
 import { sendOrderEmails, type OrderEmailContext } from '../mailer/order-emails';
+import { adjustStockLine } from '../orders/orders.service';
+import { PaymentsService } from '../payments/payments.service';
+import { getProvider, PAYMENT_PROVIDER_NOT_CONFIGURED } from '../payments/provider-registry';
 import { ShippingService } from './shipping.service';
 import { nextOrderNumber } from './order-number';
+
+// Stock is held for 15 minutes while a non-`cod` order's payment is pending
+// (P3a design doc decision 2) — released by a later BullMQ job (a
+// subsequent task) if it's abandoned. `null` for every `cod` order.
+const STOCK_RESERVATION_MS = 15 * 60_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -45,20 +54,30 @@ export interface CheckoutInput {
   phone: string;
   address: CheckoutAddressInput; // from @ventia/core — already validated by the controller before this service is called
   shippingMethodId: string;
-  paymentMethod: 'cod';
+  paymentMethod: 'cod' | PaymentProviderId;
 }
 
 export interface CheckoutResult {
   orderNumber: number;
   totalCents: number;
+  // Only present for a non-`cod` checkout (design decision 8) — the
+  // storefront redirects the browser here instead of going straight to the
+  // order-confirmation page. Absent entirely (not `undefined`-valued) on
+  // every `cod` response, matching this file's own test suite's exact-
+  // equality assertion on the `cod` response shape.
+  redirectUrl?: string;
 }
 
-// Everything the post-checkout email flow needs, computed once inside the
-// transaction (cheap, since it's all already loaded/derived there) rather
-// than re-queried afterward. `CheckoutResult` (the actual HTTP response
-// shape, asserted verbatim by test/checkout.test.ts) stays exactly
-// `{orderNumber, totalCents}` — this wider shape is internal to this service.
+// Everything the post-checkout email flow (and, for a non-`cod` payment
+// method, the post-commit createCheckoutSession call) needs, computed once
+// inside the transaction
+// (cheap, since it's all already loaded/derived there) rather than re-queried
+// afterward. `CheckoutResult` (the actual HTTP response shape, asserted
+// verbatim by test/checkout.test.ts for the `cod` path) stays exactly
+// `{orderNumber, totalCents}` for `cod` — this wider shape is internal to
+// this service.
 interface CheckoutTransactionResult extends CheckoutResult {
+  orderId: string;
   email: string;
   phone: string;
   items: OrderEmailContext['items'];
@@ -88,9 +107,57 @@ export class CheckoutService {
   constructor(
     @Inject(ShippingService) private readonly shippingService: ShippingService,
     @Inject(MAILER) private readonly mailer: Mailer,
+    @Inject(PaymentsService) private readonly paymentsService: PaymentsService,
   ) {}
 
   async checkout(tenantId: string, cartCookieKey: string, input: CheckoutInput): Promise<CheckoutResult> {
+    // The chosen online provider's tenant-provider-config check happens
+    // FIRST, before this method touches the database at all — deliberately
+    // BEFORE the transaction below, not after it commits. If this ran after
+    // commit (or inside the transaction but after the Order/stock-reservation
+    // writes), a tenant that never configured credentials for the chosen
+    // provider would still get a real Order row created and real stock
+    // decremented, only to then fail on a condition that was knowable up
+    // front with zero side effects. A `cod` checkout never reaches this
+    // branch at all (`onlineProviderConfig` stays `null` and unused for it).
+    let onlineProviderConfig: TenantProviderConfig | null = null;
+    if (input.paymentMethod !== 'cod') {
+      onlineProviderConfig = await this.paymentsService.getTenantProviderConfig(tenantId, input.paymentMethod);
+      if (!onlineProviderConfig) {
+        throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
+      }
+      // Per-provider completeness check, generalized (closing a gap P3b's
+      // phase-7 review found still open): each provider's fields are
+      // OPTIONAL on their own credentials schema (a merchant can save
+      // public/private keys alone), but there is no real checkout for which
+      // they're actually dispensable in practice — a webhook can never be
+      // verified without them, so an order paid for by a checkout that lacks
+      // them would be created successfully now and only fail forever
+      // afterward (at createCheckoutSession, or permanently at the webhook —
+      // `401 WEBHOOK_INVALID_SIGNATURE` on every delivery, stranding the
+      // order at PENDING/PENDING with no merchant-facing signal), after this
+      // transaction has already decremented real stock. Checking this here,
+      // alongside the `!onlineProviderConfig` check above and for the
+      // identical reason, catches that case before any side effect exists at
+      // all. Per-provider, not a blanket `!eventsSecret` check, because the
+      // three providers' real requirements genuinely differ (verified
+      // against each adapter's own `require*` guards, packages/payments/src/
+      // {wompi,mercadopago,epayco}.ts): Wompi needs BOTH `integritySecret`
+      // (signs the outbound checkout redirect) AND `eventsSecret` (verifies
+      // the webhook); Mercado Pago has no `integritySecret` concept at all
+      // and needs only `eventsSecret`; ePayco needs `eventsSecret` (its
+      // `P_KEY`) AND `epaycoCustomerId` (its `P_CUST_ID_CLIENTE`) together.
+      const incomplete =
+        input.paymentMethod === 'wompi'
+          ? !onlineProviderConfig.integritySecret || !onlineProviderConfig.eventsSecret
+          : input.paymentMethod === 'epayco'
+            ? !onlineProviderConfig.eventsSecret || !onlineProviderConfig.epaycoCustomerId
+            : !onlineProviderConfig.eventsSecret; // mercadopago
+      if (incomplete) {
+        throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
+      }
+    }
+
     const result = await platformDb.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
         // Manual RLS transaction escape (same pattern as
@@ -210,9 +277,18 @@ export class CheckoutService {
         // calling them from inside our transaction is safe since they don't
         // need transactional consistency with the order write below, and
         // they never touch Cart/Order/Customer rows themselves.
-        const codAllowed = await this.shippingService.isCodAllowed(tenantId, input.address.departamentoCode);
-        if (!codAllowed) {
-          throw new HttpException({ error: 'SHIPPING_METHOD_UNAVAILABLE' }, 400);
+        //
+        // `isCodAllowed` is a COD-only concept (design doc decision 8) — any
+        // non-COD checkout (wompi, mercadopago, epayco, ...) skips this check
+        // entirely. This is the ONE place the `cod`
+        // branch's own pre-existing 3 lines are now conditionally reached
+        // rather than unconditionally reached; their own content/behavior for
+        // an actual `cod` checkout is unchanged.
+        if (input.paymentMethod === 'cod') {
+          const codAllowed = await this.shippingService.isCodAllowed(tenantId, input.address.departamentoCode);
+          if (!codAllowed) {
+            throw new HttpException({ error: 'SHIPPING_METHOD_UNAVAILABLE' }, 400);
+          }
         }
 
         const shippingCents = await this.shippingService.priceFor(
@@ -256,7 +332,13 @@ export class CheckoutService {
             tenantId,
             number: orderNumber,
             status: 'PENDING',
-            paymentStatus: 'COD',
+            // `cod` keeps its original literal `'COD'`; any non-`cod`
+            // payment method is `'PENDING'` (already the schema default, but
+            // set explicitly per the design doc/brief) — the only other
+            // Order-create fields that differ by paymentMethod
+            // (`paymentProvider`, `stockReservedUntil`) are spread in below,
+            // never present at all for `cod`.
+            paymentStatus: input.paymentMethod !== 'cod' ? 'PENDING' : 'COD',
             customerId: customer.id,
             email: input.email,
             phone: input.phone,
@@ -267,8 +349,60 @@ export class CheckoutService {
             taxCents,
             totalCents,
             source: 'web',
+            ...(input.paymentMethod !== 'cod'
+              ? {
+                  paymentProvider: input.paymentMethod,
+                  stockReservedUntil: new Date(Date.now() + STOCK_RESERVATION_MS),
+                }
+              : {}),
           },
         });
+
+        if (input.paymentMethod !== 'cod') {
+          // Stock reservation (design doc decision 2): an online-payment
+          // order actually decrements Product/ProductVariant.stock right now
+          // (reusing orders.service.ts's own atomic floor-checked
+          // adjustStockLine primitive, same as OrdersService.transition()'s
+          // `confirm` branch does), rather than a separate reservation
+          // ledger. Runs INSIDE this same transaction, after the Order row
+          // above but before OrderItem/OrderEvent/cart-delete below — if any
+          // line's floor check fails, this throws and Prisma rolls back
+          // EVERYTHING this transaction has written so far (the Order row
+          // included), so "reserve stock only if the whole order succeeds"
+          // holds atomically; no compensating action is ever needed.
+          for (const line of lines) {
+            try {
+              await adjustStockLine(tx, tenantId, line, -line.qty, 'order_reserved', order.id, 'system');
+            } catch (err) {
+              // adjustStockLine throws HttpException({error:'STOCK_BELOW_ZERO',
+              // details:{productId}}, 422) on its floor check failing — an
+              // internal error vocabulary from orders.service.ts's own
+              // confirm/cancel flows, never meant to reach a shopper directly.
+              // Deliberately remapped here to the SAME `INSUFFICIENT_STOCK`
+              // 400 shape (`details: {productId, available}`) the `cod`
+              // branch's own per-line stock check above already throws, so a
+              // shopper checking out with either payment method sees one
+              // consistent error vocabulary — never the internal
+              // STOCK_BELOW_ZERO code. `available: 0` is a deliberate
+              // approximation (the exact current stock isn't known here
+              // without an extra read this task doesn't add) — this branch
+              // only fires when the real-time stock has already dropped
+              // below what's needed, so "0 left for you" is directionally
+              // correct even if a nonzero-but-insufficient amount technically
+              // remains.
+              if (
+                err instanceof HttpException &&
+                (err.getResponse() as { error?: string })?.error === 'STOCK_BELOW_ZERO'
+              ) {
+                throw new HttpException(
+                  { error: 'INSUFFICIENT_STOCK', details: { productId: line.productId, available: 0 } },
+                  400,
+                );
+              }
+              throw err;
+            }
+          }
+        }
 
         await Promise.all(
           lines.map((line) =>
@@ -314,6 +448,7 @@ export class CheckoutService {
         }
 
         return {
+          orderId: order.id,
           orderNumber,
           totalCents,
           email: input.email,
@@ -337,20 +472,68 @@ export class CheckoutService {
     // transaction has committed, never awaited by this method, and its own
     // failure is swallowed here (not re-thrown) so a slow/failed email
     // provider can never delay or fail the checkout response itself.
-    const departamentoName = DEPARTAMENTOS.find((d) => d.code === result.departamentoCode)?.name ?? result.departamentoCode;
-    const emailCtx: OrderEmailContext = {
-      orderNumber: result.orderNumber,
-      email: result.email,
-      phone: result.phone,
-      totalCents: result.totalCents,
-      items: result.items,
-      shippingAddress: { departamentoName, municipioName: result.municipioName },
-      merchantContactEmail: result.merchantContactEmail,
-      tenantName: result.tenantName,
-    };
-    sendOrderEmails(this.mailer, emailCtx).catch((err: unknown) => {
-      console.error('[checkout] order email failed', err);
-    });
+    //
+    // `cod`-only: sendOrderEmails' own template (order-emails.ts) explicitly
+    // says "Tu pedido ... se pagará contra entrega" (COD-specific wording) —
+    // sending that to a shopper checking out with any online provider
+    // (wompi, mercadopago, epayco, ...) who hasn't paid yet (they're about to
+    // be redirected to that provider's checkout, and may never come back /
+    // may pay with a different attempt) would be actively misleading. No
+    // equivalent "your order is confirmed" email is sent for an online-
+    // provider checkout at THIS point in the flow — `PaymentsService.markPaid`
+    // (fires from the provider's webhook once payment is actually confirmed)
+    // does not currently send any email either, so that shopper gets no order
+    // email at all until a later task adds one to `markPaid`. Flagged here
+    // deliberately: this is a real, known gap in this task's scope, not an
+    // oversight — sending the wrong (COD-worded) email would be worse than
+    // sending none.
+    if (input.paymentMethod === 'cod') {
+      const departamentoName = DEPARTAMENTOS.find((d) => d.code === result.departamentoCode)?.name ?? result.departamentoCode;
+      const emailCtx: OrderEmailContext = {
+        orderNumber: result.orderNumber,
+        email: result.email,
+        phone: result.phone,
+        totalCents: result.totalCents,
+        items: result.items,
+        shippingAddress: { departamentoName, municipioName: result.municipioName },
+        merchantContactEmail: result.merchantContactEmail,
+        tenantName: result.tenantName,
+      };
+      sendOrderEmails(this.mailer, emailCtx).catch((err: unknown) => {
+        console.error('[checkout] order email failed', err);
+      });
+    }
+
+    if (input.paymentMethod !== 'cod') {
+      // `onlineProviderConfig` is guaranteed non-null here: the only way to
+      // reach this branch is `input.paymentMethod !== 'cod'`, and this method
+      // already threw PAYMENT_PROVIDER_NOT_CONFIGURED and returned before the
+      // transaction ever opened if it were null (see the top of this
+      // method). Unlike the fire-and-forget email above, this call's result
+      // (the redirect URL) IS needed synchronously for this method's own
+      // return value/the HTTP response, so it's awaited, not fire-and-forget
+      // — a real failure here (the provider's API/network) surfaces as a
+      // genuine error to the caller instead of being swallowed, since the
+      // shopper has no usable checkout outcome without a redirect URL.
+      const { redirectUrl } = await getProvider(input.paymentMethod).createCheckoutSession(
+        {
+          orderId: result.orderId,
+          // CRITICAL contract with the webhook handler (Task 4,
+          // webhooks.controller.ts): this MUST be the plain string form of
+          // the Prisma `Int` order number (`String(result.orderNumber)`,
+          // e.g. `"42"`), NEVER the `VNT-`-prefixed display string used in
+          // emails/UI. The webhook handler resolves an incoming event back to
+          // this order via `Number(event.reference)` against `Order.number`
+          // — sending the prefixed form here would silently break webhook
+          // resolution for every real order, on any online provider.
+          orderNumber: String(result.orderNumber),
+          totalCents: result.totalCents,
+          customerEmail: result.email,
+        },
+        onlineProviderConfig!,
+      );
+      return { orderNumber: result.orderNumber, totalCents: result.totalCents, redirectUrl };
+    }
 
     return { orderNumber: result.orderNumber, totalCents: result.totalCents };
   }

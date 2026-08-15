@@ -18,6 +18,17 @@ export interface CheckoutFormState {
   barrio: string;
   notas: string;
   shippingMethodId: string;
+  // Widened for P3b (Task 6): 'mercadopago'/'epayco' join 'wompi' as the
+  // online-payment options, matching `services/api/src/checkout/
+  // checkout.service.ts`'s `'cod' | PaymentProviderId` union. Kept as a
+  // plain hand-rolled literal union here rather than importing
+  // `PaymentProviderId` from `@ventia/payments` — this app has no existing
+  // dependency on that package, and this codebase's established convention
+  // (see e.g. this file's own header comment, `checkout-api.ts`'s
+  // `CheckoutSubmitInput`, and the order-confirmation page's local
+  // `OrderConfirmationDto`) is to keep storefront-local types hand-rolled
+  // rather than share DTOs with the API/packages layer.
+  paymentMethod: 'cod' | 'wompi' | 'mercadopago' | 'epayco' | '';
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -38,7 +49,7 @@ export function municipioOptionsFor(departamentoCode: string): { value: string; 
  * a `{field: message}` map; `{}` means every field relevant to this step is
  * valid. */
 export function validateCheckoutStep(
-  step: 'contact' | 'address' | 'shipping',
+  step: 'contact' | 'address' | 'shipping' | 'payment',
   state: CheckoutFormState,
 ): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -75,6 +86,12 @@ export function validateCheckoutStep(
   if (step === 'shipping') {
     if (!state.shippingMethodId) {
       errors.shippingMethodId = 'Selecciona un método de envío.';
+    }
+  }
+
+  if (step === 'payment') {
+    if (!state.paymentMethod) {
+      errors.paymentMethod = 'Selecciona un método de pago.';
     }
   }
 

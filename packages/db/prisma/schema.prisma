@@ -326,30 +326,79 @@ model Customer {
 }
 
 model Order {
-  id              String        @id @default(uuid()) @db.Uuid
-  tenantId        String        @db.Uuid
-  number          Int
-  status          OrderStatus   @default(PENDING)
-  paymentStatus   PaymentStatus @default(PENDING)
-  paymentProvider String?
-  customerId      String?       @db.Uuid
-  email           String
-  phone           String
-  shippingAddress Json
-  billingFields   Json?
-  shippingMethod  String?
-  shippingCents   Int           @default(0)
-  subtotalCents   Int
-  taxCents        Int
-  totalCents      Int
-  source          CartSource    @default(web)
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer        Customer?     @relation(fields: [customerId], references: [id])
-  items           OrderItem[]
-  events          OrderEvent[]
-  payments        Payment[]
+  id                 String        @id @default(uuid()) @db.Uuid
+  tenantId           String        @db.Uuid
+  number             Int
+  status             OrderStatus   @default(PENDING)
+  paymentStatus      PaymentStatus @default(PENDING)
+  paymentProvider    String?
+  // null = no active stock reservation (every COD order, and any order past
+  // the pending/reserved stage). Set to now()+15min when an online-payment
+  // checkout reserves stock at order-creation time; cleared to null once the
+  // payment webhook confirms (or the reservation expires and is restocked).
+  stockReservedUntil DateTime?
+  // Best-effort gateway transaction/payment reference for THIS order,
+  // written from three sources (P3c design decision 2), none authoritative
+  // on its own: (1) markPaid/markFailed, after a real signature-verified
+  // webhook already ran — LIVE as of this migration; (2) Wompi's
+  // redirect-return `?id=` hint (P3c Task 2 — not yet implemented as of
+  // this migration); (3) ePayco's onResponse hook, if it carries
+  // x_ref_payco (P3c Task 3 — not yet implemented as of this migration).
+  // Never itself proof of payment status — only a hint the reconciliation
+  // job (P3c Task 4) feeds into each gateway's own authenticated
+  // getTransactionStatus/searchByReference call. Null until any
+  // IMPLEMENTED source above fires.
+  providerRef        String?
+  // PROVENANCE of `providerRef` — how the value currently in that column was
+  // established, and therefore how much it may be trusted. Exactly two values
+  // are ever written (kept a plain String, like `paymentProvider`, rather
+  // than a new enum):
+  //
+  //   'verified' — stamped by PaymentsService.markPaid/markFailed. Those are
+  //                only ever reached from a signature-verified webhook, or
+  //                from the reconciliation worker AFTER its mandatory binding
+  //                check against an account-scoped, authenticated gateway
+  //                lookup. Either way the gateway itself vouched for the ref.
+  //   'hint'     — written by the deliberately-unauthenticated
+  //                provider-ref-hint endpoint. Anyone who can guess an order
+  //                number can set this, so it is attacker-controlled by
+  //                assumption.
+  //
+  // Why this distinction is load-bearing (P3 wave-2 FIX 3): Wompi's and
+  // ePayco's transaction-lookup endpoints are NOT merchant-scoped — ePayco's
+  // takes no credential at all, and Wompi's `GET /v1/transactions/{id}` was
+  // empirically observed answering with NO Authorization header and with a
+  // bogus one (404 NOT_FOUND, never 401). So for those two providers a
+  // truthful "this transaction is PAID for reference R and amount A" says
+  // nothing about WHOSE gateway account received the money: an attacker with
+  // their own merchant account can manufacture a transaction carrying the
+  // victim's order number and total, then plant its id here. The
+  // reconciliation worker therefore refuses to settle a by-id lookup from a
+  // 'hint'-sourced ref for any provider whose lookup isn't account-scoped
+  // (see ACCOUNT_SCOPED_LOOKUP_PROVIDERS in reconciliation.worker.ts).
+  //
+  // NULL means "unknown provenance" — pre-migration rows, and any future
+  // writer that forgets to say. Treated exactly like 'hint' (untrusted) by
+  // every consumer: fail closed, never open.
+  providerRefSource  String?
+  customerId         String?       @db.Uuid
+  email              String
+  phone              String
+  shippingAddress    Json
+  billingFields      Json?
+  shippingMethod     String?
+  shippingCents      Int           @default(0)
+  subtotalCents      Int
+  taxCents           Int
+  totalCents         Int
+  source             CartSource    @default(web)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  tenant             Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer           Customer?     @relation(fields: [customerId], references: [id])
+  items              OrderItem[]
+  events             OrderEvent[]
+  payments           Payment[]
 
   @@unique([tenantId, number])
   @@index([tenantId, status])
@@ -408,7 +457,28 @@ model WebhookEvent {
   result      String?
   createdAt   DateTime  @default(now())
 
-  @@unique([provider, eventId])
+  // Tenant-SCOPED idempotency key (widened from `@@unique([provider,
+  // eventId])`, P3 wave-1 security fix 4). The old, global key was wrong for
+  // an explicitly supported deployment shape: two Ventia tenants sharing ONE
+  // gateway merchant account share that account's `eventsSecret`, so the same
+  // signed delivery verifies at EITHER tenant's webhook URL — and `Order.number`
+  // is per-tenant (`@@unique([tenantId, number])` above), so the same
+  // `reference` legitimately exists in both. Under the global key, whichever
+  // tenant's URL was hit SECOND — including the payment's real owner — had its
+  // delivery permanently swallowed by the unique conflict and returned 200
+  // without ever settling. Scoping the key by `tenantId` lets each tenant
+  // process its own copy of a delivery exactly once, while
+  // `webhooks.controller.ts`'s unconditional amount check is what stops the
+  // wrong tenant from acting on it.
+  //
+  // `tenantId` is nullable (some webhook events are genuinely tenant-less, see
+  // the column's own history), and Postgres treats NULLs as DISTINCT in a
+  // unique index — so rows with a null `tenantId` get NO idempotency
+  // protection from this constraint. That is acceptable today because the ONLY
+  // writer of this table (`webhooks.controller.ts`) always passes a real
+  // `tenantId` from the URL path; any future tenant-less writer must bring its
+  // own dedupe.
+  @@unique([provider, tenantId, eventId])
 }
 
 // ---- Agent ----

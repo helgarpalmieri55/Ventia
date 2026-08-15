@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/env.js';
 
+// Deterministic 32-byte test fixture (no need for real randomness in a test
+// constant) — matches the shape loadEncryptionKey()/encrypt()/decrypt() in
+// services/api/src/payments/encryption.ts expect.
+const VALID_PAYMENTS_ENCRYPTION_KEY = Buffer.alloc(32, 1).toString('base64');
+
 describe('loadEnv', () => {
   it('parses a valid environment', () => {
     const env = loadEnv({
@@ -8,6 +13,7 @@ describe('loadEnv', () => {
       REDIS_URL: 'redis://localhost:6379',
       AUTH_SECRET: 'secret',
       PLATFORM_ROOT_DOMAIN: 'ventia.localhost',
+      PAYMENTS_ENCRYPTION_KEY: VALID_PAYMENTS_ENCRYPTION_KEY,
     });
     expect(env.PLATFORM_ROOT_DOMAIN).toBe('ventia.localhost');
     expect(env.API_PORT).toBe(4000); // default
@@ -22,9 +28,57 @@ describe('loadEnv', () => {
       DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
       REDIS_URL: 'redis://localhost:6379',
       AUTH_SECRET: 'secret',
+      PAYMENTS_ENCRYPTION_KEY: VALID_PAYMENTS_ENCRYPTION_KEY,
     });
     expect(env.S3_ENDPOINT).toBe('http://localhost:9000');
     expect(env.S3_BUCKET).toBe('ventia');
     expect(env.S3_PUBLIC_URL).toBe('http://localhost:9000/ventia');
+  });
+
+  it('throws a clear error when PAYMENTS_ENCRYPTION_KEY is missing entirely', () => {
+    expect(() =>
+      loadEnv({
+        DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+        REDIS_URL: 'redis://localhost:6379',
+        AUTH_SECRET: 'secret',
+      }),
+    ).toThrow(/PAYMENTS_ENCRYPTION_KEY/);
+  });
+
+  it('throws a clear error when PAYMENTS_ENCRYPTION_KEY decodes to too few bytes', () => {
+    expect(() =>
+      loadEnv({
+        DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+        REDIS_URL: 'redis://localhost:6379',
+        AUTH_SECRET: 'secret',
+        PAYMENTS_ENCRYPTION_KEY: Buffer.alloc(16, 1).toString('base64'),
+      }),
+    ).toThrow(/PAYMENTS_ENCRYPTION_KEY must base64-decode to exactly 32 bytes/);
+  });
+
+  it('throws a clear error when PAYMENTS_ENCRYPTION_KEY decodes to too many bytes', () => {
+    expect(() =>
+      loadEnv({
+        DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+        REDIS_URL: 'redis://localhost:6379',
+        AUTH_SECRET: 'secret',
+        PAYMENTS_ENCRYPTION_KEY: Buffer.alloc(40, 1).toString('base64'),
+      }),
+    ).toThrow(/PAYMENTS_ENCRYPTION_KEY must base64-decode to exactly 32 bytes/);
+  });
+
+  it('throws a clear error when PAYMENTS_ENCRYPTION_KEY is non-base64 garbage', () => {
+    expect(() =>
+      loadEnv({
+        DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+        REDIS_URL: 'redis://localhost:6379',
+        AUTH_SECRET: 'secret',
+        // Not valid base64 padding/length for 32 raw bytes either way — the
+        // refine still catches it (Buffer.from with invalid base64 chars
+        // just drops them rather than throwing, so the length check is what
+        // actually rejects this, not a caught exception — worth the test).
+        PAYMENTS_ENCRYPTION_KEY: 'not-valid-base64!!!',
+      }),
+    ).toThrow(/PAYMENTS_ENCRYPTION_KEY must base64-decode to exactly 32 bytes/);
   });
 });

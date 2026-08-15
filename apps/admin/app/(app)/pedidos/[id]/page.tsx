@@ -13,6 +13,7 @@ import {
   STATUS_BADGE_VARIANT,
   STATUS_LABEL,
   confirmOrder,
+  isConfirmBlockedByPayment,
   markDelivered,
   markPreparing,
   parseShippingAddress,
@@ -26,6 +27,14 @@ import { ShippedForm } from './_components/shipped-form';
 const EVENT_TYPE_LABEL: Record<string, string> = {
   created: 'Pedido creado',
   status_changed: 'Cambio de estado',
+  reservation_expired: 'Reserva de stock expirada',
+  payment_confirmed: 'Pago confirmado',
+  payment_failed: 'Pago fallido',
+  // Written by the storefront's post-payment bridge page (the unauthenticated
+  // provider-ref-hint endpoint). Shown in the timeline so an unexpected
+  // gateway reference on an order is traceable to that endpoint rather than
+  // being invisible.
+  provider_ref_hint: 'Referencia de pago reportada',
 };
 
 function eventLabel(type: string): string {
@@ -143,7 +152,17 @@ export default function PedidoDetailPage() {
   }
 
   const address = parseShippingAddress(order.shippingAddress);
-  const allowedActions = ALLOWED_ACTIONS[order.status];
+  // "Confirmar pedido" is a COD-only action — an online-payment order is
+  // confirmed by its own payment webhook, and pressing this button on one
+  // double-decremented stock and stranded the order (see
+  // `isConfirmBlockedByPayment`). The button is HIDDEN rather than rendered
+  // disabled, and replaced by an explanatory line below: a disabled button
+  // with no explanation reads as a bug, and there is no action the merchant
+  // could take to enable it — they just have to wait for the gateway.
+  const confirmBlocked = isConfirmBlockedByPayment(order);
+  const allowedActions = ALLOWED_ACTIONS[order.status].filter(
+    (action) => !(action === 'confirm' && confirmBlocked),
+  );
 
   return (
     <div className="flex w-full max-w-3xl flex-col gap-6">
@@ -239,6 +258,13 @@ export default function PedidoDetailPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           {actionError ? <Alert variant="error">{actionError}</Alert> : null}
+
+          {confirmBlocked ? (
+            <p className="text-sm text-muted-foreground">
+              Este pedido se paga en línea ({order.paymentProvider}) y su pago aún no se ha confirmado. Se
+              confirmará automáticamente cuando la pasarela reporte el pago.
+            </p>
+          ) : null}
 
           {allowedActions.length === 0 ? (
             <p className="text-sm text-muted-foreground">Este pedido no tiene acciones disponibles.</p>

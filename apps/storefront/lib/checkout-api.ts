@@ -38,12 +38,25 @@ export interface CheckoutSubmitInput {
     notas?: string;
   };
   shippingMethodId: string;
-  paymentMethod: 'cod';
+  // Widened for P3b (Task 6) to include 'mercadopago'/'epayco' — see
+  // `checkout-form.ts`'s identical widening for why this stays a local,
+  // hand-rolled union rather than importing `PaymentProviderId` from
+  // `@ventia/payments`.
+  paymentMethod: 'cod' | 'wompi' | 'mercadopago' | 'epayco';
 }
 
 export interface CheckoutResult {
   orderNumber: number;
   totalCents: number;
+  // Only present for an online-provider checkout (`wompi`/`mercadopago`/
+  // `epayco`) — see checkout.service.ts's `CheckoutResult` for the full
+  // contract. Absent entirely for `cod`. For `epayco` specifically, this
+  // points at THIS storefront's own `/pago/epayco` bridge page rather than
+  // an epayco.co URL directly (design doc decision 6) — the calling page
+  // doesn't need to know or care about that distinction, since
+  // `window.location.href = redirectUrl` works identically for a
+  // same-origin or cross-origin URL.
+  redirectUrl?: string;
 }
 
 interface ErrorBody {
@@ -104,6 +117,37 @@ export async function fetchShippingQuote(
   );
   if (!res.ok) return parseErrorAndThrow(res);
   return (await res.json()) as ShippingQuoteLine[];
+}
+
+/** Records a gateway transaction id against an order as a RECONCILIATION
+ * HINT (P3c Task 2) — `PATCH /v1/storefront/checkout/:orderNumber/provider-ref-hint`
+ * via this app's own `/api/checkout/*` proxy.
+ *
+ * Called from the Wompi return page (`/pago/wompi-retorno/[orderNumber]`)
+ * with the `?id=` Wompi appends to its redirect. The value is a HINT only —
+ * never proof of payment — and the API endpoint it hits writes
+ * `Order.providerRef` and nothing else. See that endpoint's doc comment in
+ * `services/api/src/checkout/checkout.controller.ts` for why it's safe for
+ * this call to be unauthenticated.
+ *
+ * Throws `CheckoutApiError` on a non-2xx like every other client here: this
+ * module stays honest about failures, and it's the CALLER's job to make the
+ * call non-blocking (the return page fires it without awaiting, with its own
+ * `.catch()`, so a slow or failing hint can never delay the shopper's
+ * redirect). Deliberately NOT swallowing errors in here: a silent-by-default
+ * client would make a genuinely broken hint path invisible in the console. */
+export async function sendProviderRefHint(
+  orderNumber: string,
+  providerRef: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const res = await fetchImpl(`/api/checkout/${encodeURIComponent(orderNumber)}/provider-ref-hint`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ providerRef }),
+    credentials: 'include',
+  });
+  if (!res.ok) return parseErrorAndThrow(res);
 }
 
 export async function submitCheckout(

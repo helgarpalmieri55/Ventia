@@ -5,6 +5,7 @@ import type { INestApplication } from '@nestjs/common';
 import type { PrismaClient as PrismaClientType } from '@ventia/db';
 import { startTestDb } from './helpers';
 import { MAILER, type Mailer, type MailMessage } from '../src/mailer/mailer';
+import type { PaymentsService as PaymentsServiceType } from '../src/payments/payments.service';
 
 const CHECKOUT_TEST_DOMAINS = [
   'checkout-a.ventia.localhost',
@@ -13,12 +14,34 @@ const CHECKOUT_TEST_DOMAINS = [
   'checkout-d.ventia.localhost',
   'checkout-e.ventia.localhost',
   'checkout-f.ventia.localhost',
+  'checkout-g.ventia.localhost',
+  'checkout-h.ventia.localhost',
+  'checkout-i.ventia.localhost',
+  'checkout-j.ventia.localhost',
+  'checkout-k.ventia.localhost',
+  'checkout-l.ventia.localhost',
+  'checkout-m.ventia.localhost',
+  'checkout-n.ventia.localhost',
 ];
+
+// Same fixture shape as payments-service.test.ts/webhooks.test.ts's own
+// FAKE_CREDS — a real (fake but well-formed) Wompi credential set saved
+// through the REAL PaymentsService.saveProviderCredentials/encryption, not
+// mocked, so the `wompi` checkout tests below exercise the actual
+// getTenantProviderConfig lookup checkout.service.ts's new branch calls.
+const FAKE_WOMPI_CREDS = {
+  publicKey: 'pub_test_ABCDEFGHIJKLMNOPQRSTUV',
+  privateKey: 'prv_test_ZYXWVUTSRQPONMLKJIHGFEDCBA0123456789',
+  integritySecret: 'test_integrity_abc123def456',
+  eventsSecret: 'test_events_ghi789jkl012',
+  sandbox: true,
+};
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
 let prisma: PrismaClientType;
 let app: INestApplication;
 let sentMail: MailMessage[];
+let paymentsService: PaymentsServiceType;
 
 // tenantId fixtures, populated in beforeAll.
 let tenantAId: string; // happy path + unconfigured-shipping-method + same-email reuse
@@ -27,6 +50,14 @@ let tenantCId: string; // COD-restricted departamento
 let tenantDId: string; // no cart cookie at all
 let tenantEId: string; // concurrency
 let tenantFId: string; // product archived after being added to cart
+let tenantGId: string; // wompi happy path
+let tenantHId: string; // wompi insufficient stock (wompi credentials configured)
+let tenantIId: string; // wompi checkout, tenant never configured wompi credentials
+let tenantJId: string; // wompi concurrent-checkout stock-reservation race (STOCK_BELOW_ZERO -> INSUFFICIENT_STOCK remap)
+let tenantKId: string; // wompi checkout, credentials saved but missing integritySecret/eventsSecret
+let tenantLId: string; // mercadopago checkout, tenant never configured mercadopago credentials — no real adapter exists yet (P3b Task 1)
+let tenantMId: string; // mercadopago checkout, credentials saved but missing eventsSecret (phase-7 review gap)
+let tenantNId: string; // epayco checkout, credentials saved but missing epaycoCustomerId (phase-7 review gap)
 
 // Product fixture ids, populated in beforeAll.
 let productXId: string; // tenant A — 45900 cents
@@ -36,6 +67,14 @@ let stockShortProductId: string; // tenant B — insufficient stock
 let codProductId: string; // tenant C
 let concurrencyProductId: string; // tenant E — plenty of stock
 let archivableProductId: string; // tenant F — active at add-to-cart time, archived before checkout
+let wompiHappyProductId: string; // tenant G — enough stock, wompi checkout
+let wompiStockShortProductId: string; // tenant H — insufficient stock, wompi checkout
+let wompiUnconfiguredProductId: string; // tenant I — wompi checkout, no provider credentials saved
+let wompiRaceProductId: string; // tenant J — stock 1, two concurrent wompi checkouts race for it
+let wompiIncompleteCredsProductId: string; // tenant K — wompi credentials missing integritySecret/eventsSecret
+let mercadopagoUnconfiguredProductId: string; // tenant L — mercadopago checkout, no provider credentials saved
+let mercadopagoIncompleteCredsProductId: string; // tenant M — mercadopago credentials missing eventsSecret
+let epaycoIncompleteCredsProductId: string; // tenant N — epayco credentials missing epaycoCustomerId
 
 const BOGOTA_ADDRESS = {
   nombreCompleto: 'Ana Ejemplo',
@@ -72,6 +111,11 @@ beforeAll(async () => {
   // same pattern.
   process.env.DATABASE_URL = db.url;
   process.env.REDIS_URL = 'redis://localhost:6379';
+  // A real, valid 32-byte base64 key — the `wompi` tests below exercise REAL
+  // encrypt/decrypt through PaymentsService.saveProviderCredentials /
+  // getTenantProviderConfig, never mocked (same posture as
+  // payments-service.test.ts / webhooks.test.ts).
+  process.env.PAYMENTS_ENCRYPTION_KEY = Buffer.alloc(32, 13).toString('base64');
 
   // DomainResolver caches resolved tenants by domain in the shared dev Redis
   // for 60s (see cart.test.ts's identical comment) — flush this file's fixed
@@ -210,9 +254,230 @@ beforeAll(async () => {
   });
   archivableProductId = archivableProduct.id;
 
+  // Tenant G: `wompi` happy path — plenty of stock, Wompi credentials saved
+  // below (once `paymentsService` exists).
+  const tenantG = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-g',
+      name: 'Checkout G',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantGId = tenantG.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantGId, domain: 'checkout-g.ventia.localhost', isPrimary: true } });
+  const wompiHappyProduct = await prisma.product.create({
+    data: { tenantId: tenantGId, name: 'Producto Wompi', slug: 'producto-wompi', priceCents: 35000, status: 'active', stock: 10 },
+  });
+  wompiHappyProductId = wompiHappyProduct.id;
+
+  // Tenant H: `wompi` checkout, insufficient stock — same shape/setup as
+  // tenant B's cod insufficient-stock fixture, but with Wompi credentials
+  // saved so the request reaches CheckoutService's `wompi` branch at all.
+  const tenantH = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-h',
+      name: 'Checkout H',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantHId = tenantH.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantHId, domain: 'checkout-h.ventia.localhost', isPrimary: true } });
+  const wompiStockShortProduct = await prisma.product.create({
+    data: { tenantId: tenantHId, name: 'Pantalón Escaso Wompi', slug: 'pantalon-escaso-wompi', priceCents: 40000, status: 'active', stock: 1 },
+  });
+  wompiStockShortProductId = wompiStockShortProduct.id;
+
+  // Tenant I: `wompi` checkout for a tenant that NEVER configured Wompi
+  // credentials — deliberately no saveProviderCredentials call for this one.
+  const tenantI = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-i',
+      name: 'Checkout I',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantIId = tenantI.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantIId, domain: 'checkout-i.ventia.localhost', isPrimary: true } });
+  const wompiUnconfiguredProduct = await prisma.product.create({
+    data: { tenantId: tenantIId, name: 'Producto Sin Wompi', slug: 'producto-sin-wompi', priceCents: 22000, status: 'active', stock: 10 },
+  });
+  wompiUnconfiguredProductId = wompiUnconfiguredProduct.id;
+
+  // Tenant J: two concurrent `wompi` checkouts racing for the SAME single
+  // unit of stock — exercises adjustStockLine's atomic floor check actually
+  // failing for one of the two (both pass the shared per-line
+  // `stock < item.qty` check on their own tx's initial read, since neither
+  // has committed yet; the loser's reservation UPDATE then re-evaluates
+  // against the winner's already-committed decrement and fails), and
+  // CheckoutService's STOCK_BELOW_ZERO -> INSUFFICIENT_STOCK remap.
+  const tenantJ = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-j',
+      name: 'Checkout J',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantJId = tenantJ.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantJId, domain: 'checkout-j.ventia.localhost', isPrimary: true } });
+  const wompiRaceProduct = await prisma.product.create({
+    data: { tenantId: tenantJId, name: 'Producto Race Wompi', slug: 'producto-race-wompi', priceCents: 10000, status: 'active', stock: 1 },
+  });
+  wompiRaceProductId = wompiRaceProduct.id;
+
+  // Tenant K: `wompi` credentials saved with ONLY publicKey/privateKey — no
+  // integritySecret/eventsSecret (both optional on wompiCredentialsSchema,
+  // since a merchant technically can save partial credentials via the admin
+  // UI). Reviewer-found gap: checkout used to only check `!wompiConfig`
+  // here, not that these two fields were actually present, so a checkout
+  // would commit a real Order + decrement real stock before later failing
+  // post-commit in WompiProvider.createCheckoutSession (which needs
+  // integritySecret to sign the redirect) with no way back for the shopper.
+  const tenantK = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-k',
+      name: 'Checkout K',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantKId = tenantK.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantKId, domain: 'checkout-k.ventia.localhost', isPrimary: true } });
+  const wompiIncompleteCredsProduct = await prisma.product.create({
+    data: { tenantId: tenantKId, name: 'Producto Wompi Incompleto', slug: 'producto-wompi-incompleto', priceCents: 18000, status: 'active', stock: 10 },
+  });
+  wompiIncompleteCredsProductId = wompiIncompleteCredsProduct.id;
+
+  // Tenant L: `mercadopago` checkout — no adapter exists yet (P3b Task 1 ships
+  // deliberately before Tasks 2-4 add one), and this tenant never saved
+  // mercadopago credentials either. Exercises the widened validation layer
+  // (`mercadopago` is now an accepted `paymentMethod`) + the generalized
+  // credential check (`input.paymentMethod !== 'cod'`) end-to-end, proving
+  // the whole generalized chain still cleanly 400s — never a raw 500 —
+  // for a `PaymentProviderId` with zero adapter code behind it.
+  const tenantL = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-l',
+      name: 'Checkout L',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantLId = tenantL.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantLId, domain: 'checkout-l.ventia.localhost', isPrimary: true } });
+  const mercadopagoUnconfiguredProduct = await prisma.product.create({
+    data: { tenantId: tenantLId, name: 'Producto Sin Mercado Pago', slug: 'producto-sin-mercadopago', priceCents: 22000, status: 'active', stock: 10 },
+  });
+  mercadopagoUnconfiguredProductId = mercadopagoUnconfiguredProduct.id;
+
+  // Tenant M: `mercadopago` checkout, credentials saved but missing
+  // eventsSecret — a phase-7 review finding: checkout.service.ts's
+  // credential-completeness guard was hardcoded to wompi only, so this
+  // exact case (present-but-incomplete mercadopago config) would have
+  // sailed past it, created a real Order, decremented real stock, and only
+  // failed forever afterward at every real webhook delivery.
+  const tenantM = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-m',
+      name: 'Checkout M',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantMId = tenantM.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantMId, domain: 'checkout-m.ventia.localhost', isPrimary: true } });
+  const mercadopagoIncompleteCredsProduct = await prisma.product.create({
+    data: { tenantId: tenantMId, name: 'Producto Mercado Pago Incompleto', slug: 'producto-mercadopago-incompleto', priceCents: 19000, status: 'active', stock: 10 },
+  });
+  mercadopagoIncompleteCredsProductId = mercadopagoIncompleteCredsProduct.id;
+
+  // Tenant N: `epayco` checkout, credentials saved but missing
+  // epaycoCustomerId — same phase-7 review finding as tenant M, for
+  // ePayco's own two-field completeness requirement (eventsSecret AND
+  // epaycoCustomerId together).
+  const tenantN = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-n',
+      name: 'Checkout N',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantNId = tenantN.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantNId, domain: 'checkout-n.ventia.localhost', isPrimary: true } });
+  const epaycoIncompleteCredsProduct = await prisma.product.create({
+    data: { tenantId: tenantNId, name: 'Producto ePayco Incompleto', slug: 'producto-epayco-incompleto', priceCents: 21000, status: 'active', stock: 10 },
+  });
+  epaycoIncompleteCredsProductId = epaycoIncompleteCredsProduct.id;
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
+
+  // Real PaymentsService instance (same app graph CheckoutService's own
+  // constructor-injected instance comes from) — used here only to SEED
+  // credentials via the real saveProviderCredentials/encryption path, same
+  // convention as payments-service.test.ts/webhooks.test.ts.
+  const { PaymentsService } = await import('../src/payments/payments.service');
+  paymentsService = app.get(PaymentsService);
+  await paymentsService.saveProviderCredentials(tenantGId, 'wompi', FAKE_WOMPI_CREDS);
+  await paymentsService.saveProviderCredentials(tenantHId, 'wompi', FAKE_WOMPI_CREDS);
+  await paymentsService.saveProviderCredentials(tenantJId, 'wompi', FAKE_WOMPI_CREDS);
+  // Tenant I deliberately gets NO saved credentials.
+  await paymentsService.saveProviderCredentials(tenantKId, 'wompi', {
+    publicKey: FAKE_WOMPI_CREDS.publicKey,
+    privateKey: FAKE_WOMPI_CREDS.privateKey,
+    sandbox: true,
+    // integritySecret/eventsSecret deliberately omitted.
+  });
+  await paymentsService.saveProviderCredentials(tenantMId, 'mercadopago', {
+    publicKey: 'APP_USR-fake-pub-key',
+    privateKey: 'APP_USR-fake-priv-key',
+    sandbox: true,
+    // eventsSecret deliberately omitted.
+  });
+  await paymentsService.saveProviderCredentials(tenantNId, 'epayco', {
+    publicKey: 'fake-epayco-pub-key',
+    privateKey: 'fake-epayco-priv-key',
+    eventsSecret: 'fake-P_KEY',
+    sandbox: true,
+    // epaycoCustomerId (P_CUST_ID_CLIENTE) deliberately omitted.
+  });
 
   // RESEND_API_KEY is unset in this test environment, so MailerModule's
   // factory (see src/mailer/mailer.module.ts) wires MAILER to a ConsoleMailer
@@ -623,5 +888,373 @@ describe('POST /v1/storefront/checkout — repeat customer', () => {
     const after = await prisma.customer.findFirst({ where: { tenantId: tenantAId, email: 'ana@example.com' } });
     expect(after?.ordersCount).toBe(2);
     expect(after?.totalSpentCents).toBe((before?.totalSpentCents ?? 0) + res.body.totalCents);
+  });
+});
+
+describe('POST /v1/storefront/checkout — wompi happy path', () => {
+  it('201 with a redirectUrl string; Order is PENDING/PENDING with paymentProvider wompi and stockReservedUntil ~15min out; stock IS decremented immediately', async () => {
+    const cookieValue = await newCartWithItem('checkout-g.ventia.localhost', wompiHappyProductId, 2);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: wompiHappyProductId } });
+    expect(stockBefore.stock).toBe(10);
+
+    const beforeCall = Date.now();
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-g.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'wompi-happy@example.com',
+        phone: '3009990001',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'wompi',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.orderNumber).toBe(1);
+    expect(typeof res.body.totalCents).toBe('number');
+    // The one field a `cod` response never has — checkout.service.ts's
+    // `wompi` branch calls WompiProvider.createCheckoutSession and returns
+    // its redirectUrl for the storefront to redirect the browser to.
+    expect(typeof res.body.redirectUrl).toBe('string');
+    expect(res.body.redirectUrl).toContain('https://checkout.wompi.co/');
+
+    const order = await prisma.order.findFirstOrThrow({ where: { tenantId: tenantGId, number: 1 } });
+    expect(order.status).toBe('PENDING');
+    expect(order.paymentStatus).toBe('PENDING');
+    expect(order.paymentProvider).toBe('wompi');
+    expect(order.stockReservedUntil).not.toBeNull();
+    // ~15 minutes out — asserted as a reasonable range (14–16 minutes from
+    // the moment the request was issued), not an exact millisecond match,
+    // since real wall-clock time elapses between `beforeCall` and the
+    // transaction's own `new Date(Date.now() + 15*60_000)` write.
+    const reservedUntilMs = order.stockReservedUntil!.getTime();
+    expect(reservedUntilMs).toBeGreaterThan(beforeCall + 14 * 60_000);
+    expect(reservedUntilMs).toBeLessThan(beforeCall + 16 * 60_000);
+
+    // THE one behavioral difference from every `cod` test in this file:
+    // stock is decremented immediately at checkout time (design decision 2 —
+    // "reserved" IS the decrement), not left untouched the way a `cod`
+    // order's stock is (see the happy-path `cod` test above, which never
+    // asserts a stock delta because there isn't one).
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: wompiHappyProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock - 2);
+
+    const movement = await prisma.inventoryMovement.findFirst({
+      where: { productId: wompiHappyProductId, orderId: order.id },
+    });
+    expect(movement).toMatchObject({ delta: -2, reason: 'order_reserved' });
+
+    // Success response must still clear the cart cookie, same as `cod`.
+    const setCookie = res.headers['set-cookie'] as unknown as string[] | undefined;
+    expect(setCookie?.some((c) => c.includes('ventia_cart=;'))).toBe(true);
+
+    // No order-creation email is sent for `wompi` at this stage (see
+    // checkout.service.ts's doc comment on this deliberate decision) — the
+    // shopper hasn't paid yet, and sendOrderEmails' own COD-specific wording
+    // would be actively misleading here.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const wompiMail = sentMail.filter((m) => m.to === 'wompi-happy@example.com');
+    expect(wompiMail).toHaveLength(0);
+  });
+});
+
+describe('POST /v1/storefront/checkout — wompi insufficient stock rejects the whole order', () => {
+  it('400 INSUFFICIENT_STOCK with the EXACT SAME shape as the cod insufficient-stock test; zero side effects', async () => {
+    const cookieValue = await newCartWithItem('checkout-h.ventia.localhost', wompiStockShortProductId, 5);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-h.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'wompi-stockfail@example.com',
+        phone: '3009990002',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'wompi',
+      });
+
+    // Side-by-side with the cod insufficient-stock test above: same error
+    // code, same `details` shape (`{productId, available}`), same 400 status.
+    // This is the SHARED per-line stock check both branches run before ever
+    // branching on paymentMethod — not the wompi-only STOCK_BELOW_ZERO remap
+    // (see this file's wompi-race test below for that).
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('INSUFFICIENT_STOCK');
+    expect(res.body.details).toMatchObject({ productId: wompiStockShortProductId, available: 1 });
+
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantHId } });
+    expect(orderCount).toBe(0);
+
+    const product = await prisma.product.findUniqueOrThrow({ where: { id: wompiStockShortProductId } });
+    expect(product.stock).toBe(1); // untouched — the whole transaction rolled back
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantHId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — wompi checkout for a tenant with no Wompi credentials configured', () => {
+  it('400 PAYMENT_PROVIDER_NOT_CONFIGURED, with ZERO DB side effects (no Order, no stock decrement) — the check runs before the transaction opens', async () => {
+    const cookieValue = await newCartWithItem('checkout-i.ventia.localhost', wompiUnconfiguredProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: wompiUnconfiguredProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-i.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'wompi-unconfigured@example.com',
+        phone: '3009990003',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'wompi',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    // No Order, no OrderItem, no stock touched — this config check happens
+    // BEFORE checkout.service.ts even opens its platformDb.$transaction, so
+    // there is genuinely nothing to roll back, not merely "the transaction
+    // rolled back".
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantIId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: wompiUnconfiguredProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    // The cart must also survive, exactly like any other pre-transaction
+    // rejection in this file (e.g. the "no cart cookie" test).
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantIId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — wompi credentials saved but missing integritySecret/eventsSecret', () => {
+  it('400 PAYMENT_PROVIDER_NOT_CONFIGURED, with ZERO DB side effects — reviewer-found gap: a present-but-incomplete config must fail BEFORE the transaction, same as a wholly-absent one', async () => {
+    const cookieValue = await newCartWithItem('checkout-k.ventia.localhost', wompiIncompleteCredsProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: wompiIncompleteCredsProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-k.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'wompi-incomplete@example.com',
+        phone: '3009990004',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'wompi',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    // Before this fix, this check only looked at `!wompiConfig` — a present
+    // config missing integritySecret/eventsSecret would sail past it, open
+    // the transaction, create a real Order, and decrement real stock, only
+    // to fail later in WompiProvider.createCheckoutSession (post-commit,
+    // with no way to undo it from the shopper's side). Asserting zero
+    // side effects here is the actual regression test for that gap.
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantKId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: wompiIncompleteCredsProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantKId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — mercadopago credentials saved but missing eventsSecret', () => {
+  it('400 PAYMENT_PROVIDER_NOT_CONFIGURED, with ZERO DB side effects — phase-7 review gap: the completeness guard was hardcoded to wompi only', async () => {
+    const cookieValue = await newCartWithItem('checkout-m.ventia.localhost', mercadopagoIncompleteCredsProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: mercadopagoIncompleteCredsProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-m.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'mercadopago-incomplete@example.com',
+        phone: '3009990005',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'mercadopago',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    // Before this fix, a present-but-incomplete mercadopago config would
+    // sail past the check (hardcoded to `=== 'wompi'`), open the
+    // transaction, create a real Order, and decrement real stock, only to
+    // fail FOREVER at every real webhook delivery afterward (no way back).
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantMId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: mercadopagoIncompleteCredsProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantMId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — epayco credentials saved but missing epaycoCustomerId', () => {
+  it('400 PAYMENT_PROVIDER_NOT_CONFIGURED, with ZERO DB side effects — same phase-7 review gap, for ePayco\'s own two-field requirement', async () => {
+    const cookieValue = await newCartWithItem('checkout-n.ventia.localhost', epaycoIncompleteCredsProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: epaycoIncompleteCredsProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-n.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'epayco-incomplete@example.com',
+        phone: '3009990006',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'epayco',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantNId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: epaycoIncompleteCredsProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantNId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+  });
+});
+
+describe('POST /v1/storefront/checkout — invalid paymentMethod', () => {
+  it("400 VALIDATION_FAILED for a paymentMethod that is neither 'cod' nor 'wompi'", async () => {
+    const cookieValue = await newCartWithItem('checkout-a.ventia.localhost', productXId, 1);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'badmethod@example.com',
+        phone: '3009990004',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'paypal',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+    expect(res.body.details).toHaveProperty('paymentMethod');
+
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantAId } });
+    // No new order for tenant A beyond whatever earlier tests in this file
+    // already created — this request never reaches CheckoutService at all
+    // (parseCheckoutBody throws before that).
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantAId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
+    expect(orderCount).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('POST /v1/storefront/checkout — wompi concurrent reservation race (adjustStockLine STOCK_BELOW_ZERO -> INSUFFICIENT_STOCK remap)', () => {
+  it('one wompi checkout succeeds (201, stock -> 0), the other gets a clean 400 INSUFFICIENT_STOCK (not a raw STOCK_BELOW_ZERO/500)', async () => {
+    // Both carts pass the SHARED per-line stock check (each transaction's own
+    // read sees stock=1, qty=1, 1 >= 1) since neither has committed yet —
+    // this specifically exercises adjustStockLine's OWN atomic floor check
+    // (the one keyed on the row's actually-committed value at UPDATE time),
+    // not the earlier shared snapshot check the wompi-insufficient-stock test
+    // above exercises.
+    const cookie1 = await newCartWithItem('checkout-j.ventia.localhost', wompiRaceProductId, 1);
+    const cookie2 = await newCartWithItem('checkout-j.ventia.localhost', wompiRaceProductId, 1);
+    expect(cookie1).not.toBe(cookie2);
+
+    const [res1, res2] = await Promise.all([
+      request(app.getHttpServer())
+        .post('/v1/storefront/checkout')
+        .set('x-tenant-domain', 'checkout-j.ventia.localhost')
+        .set('Cookie', `ventia_cart=${cookie1}`)
+        .send({
+          email: 'wompi-race1@example.com',
+          phone: '3009990005',
+          address: BOGOTA_ADDRESS,
+          shippingMethodId: 'flat-1',
+          paymentMethod: 'wompi',
+        }),
+      request(app.getHttpServer())
+        .post('/v1/storefront/checkout')
+        .set('x-tenant-domain', 'checkout-j.ventia.localhost')
+        .set('Cookie', `ventia_cart=${cookie2}`)
+        .send({
+          email: 'wompi-race2@example.com',
+          phone: '3009990006',
+          address: BOGOTA_ADDRESS,
+          shippingMethodId: 'flat-1',
+          paymentMethod: 'wompi',
+        }),
+    ]);
+
+    const statuses = [res1.status, res2.status].sort();
+    expect(statuses).toEqual([201, 400]);
+
+    const failed = res1.status === 400 ? res1 : res2;
+    // The critical assertion: the shopper-facing error is the SAME
+    // INSUFFICIENT_STOCK shape as every other stock rejection in this file —
+    // never the internal STOCK_BELOW_ZERO code adjustStockLine itself throws.
+    expect(failed.body.error).toBe('INSUFFICIENT_STOCK');
+    expect(failed.body.details).toMatchObject({ productId: wompiRaceProductId, available: 0 });
+
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantJId } });
+    expect(orderCount).toBe(1);
+
+    const product = await prisma.product.findUniqueOrThrow({ where: { id: wompiRaceProductId } });
+    expect(product.stock).toBe(0); // decremented exactly once, by the winner only
+  });
+});
+
+describe('POST /v1/storefront/checkout — mercadopago checkout, no adapter/credentials configured yet (P3b Task 1)', () => {
+  it("400 PAYMENT_PROVIDER_NOT_CONFIGURED for paymentMethod 'mercadopago', with ZERO DB side effects — the widened validation layer + generalized credential check reject this cleanly even though no mercadopago adapter exists yet", async () => {
+    const cookieValue = await newCartWithItem('checkout-l.ventia.localhost', mercadopagoUnconfiguredProductId, 1);
+
+    const stockBefore = await prisma.product.findUniqueOrThrow({ where: { id: mercadopagoUnconfiguredProductId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-l.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'mercadopago-unconfigured@example.com',
+        phone: '3009990007',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'mercadopago',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('PAYMENT_PROVIDER_NOT_CONFIGURED');
+
+    // Same "zero side effects" shape as the wompi-unconfigured test above —
+    // this check runs before checkout.service.ts ever opens its transaction.
+    const orderCount = await prisma.order.count({ where: { tenantId: tenantLId } });
+    expect(orderCount).toBe(0);
+
+    const stockAfter = await prisma.product.findUniqueOrThrow({ where: { id: mercadopagoUnconfiguredProductId } });
+    expect(stockAfter.stock).toBe(stockBefore.stock);
+
+    const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantLId, cookieKey: cookieValue } });
+    expect(cartStillThere).not.toBeNull();
   });
 });

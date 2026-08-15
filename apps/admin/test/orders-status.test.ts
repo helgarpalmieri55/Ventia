@@ -3,6 +3,7 @@ import {
   ACTION_LABEL,
   ALLOWED_ACTIONS,
   STATUS_LABEL,
+  isConfirmBlockedByPayment,
   type OrderAction,
   type OrderStatus,
 } from '../lib/orders-api';
@@ -76,5 +77,27 @@ describe('ACTION_LABEL', () => {
 
   it('has no extra keys beyond the 5 real actions', () => {
     expect(Object.keys(ACTION_LABEL).sort()).toEqual([...ALL_ACTIONS].sort());
+  });
+});
+
+describe('isConfirmBlockedByPayment (client-side mirror of the server COD-only confirm gate)', () => {
+  it('blocks confirm for an online-payment order whose payment is still PENDING', () => {
+    for (const provider of ['wompi', 'mercadopago', 'epayco']) {
+      expect(isConfirmBlockedByPayment({ paymentStatus: 'PENDING', paymentProvider: provider })).toBe(true);
+    }
+  });
+
+  it('does NOT block a COD order (no provider, paymentStatus COD)', () => {
+    expect(isConfirmBlockedByPayment({ paymentStatus: 'COD', paymentProvider: null })).toBe(false);
+  });
+
+  it('does NOT block once the payment has resolved, either way', () => {
+    expect(isConfirmBlockedByPayment({ paymentStatus: 'PAID', paymentProvider: 'wompi' })).toBe(false);
+    expect(isConfirmBlockedByPayment({ paymentStatus: 'FAILED', paymentProvider: 'wompi' })).toBe(false);
+    expect(isConfirmBlockedByPayment({ paymentStatus: 'EXPIRED', paymentProvider: 'wompi' })).toBe(false);
+  });
+
+  it('does NOT block a PENDING order with no provider at all (a legacy/COD-shaped row)', () => {
+    expect(isConfirmBlockedByPayment({ paymentStatus: 'PENDING', paymentProvider: null })).toBe(false);
   });
 });

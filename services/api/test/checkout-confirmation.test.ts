@@ -267,3 +267,77 @@ describe('GET /v1/storefront/checkout/confirmacion/:orderNumber — DTO never le
     );
   });
 });
+
+describe('GET /v1/storefront/checkout/confirmacion/:orderNumber — FIX 6: int4 upper bound', () => {
+  // Verified live before the fix: `/confirmacion/99999999999` returned a 500.
+  // `Order.number` is a Postgres `int4`, and Prisma REJECTS an out-of-range
+  // value for an `Int` filter by THROWING — exactly like the `NaN` the
+  // neighbouring guard was written for, in exactly the same place. Wave 1 put
+  // this same bound on the webhook route's reference parse; these two
+  // storefront routes were the ones it did not reach.
+  it.each(['99999999999', '2147483648', '9007199254740993'])(
+    '404s (not 500) for the out-of-int4-range order number %s',
+    async (orderNumber) => {
+      const res = await request(app.getHttpServer())
+        .get(`/v1/storefront/checkout/confirmacion/${orderNumber}`)
+        .set('x-tenant-domain', 'confirm-a.ventia.localhost');
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('ORDER_NOT_FOUND');
+    },
+  );
+
+  it('still accepts the largest in-range value (the bound is inclusive, not off by one)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/checkout/confirmacion/2147483647')
+      .set('x-tenant-domain', 'confirm-a.ventia.localhost');
+
+    // No such order exists, so still a 404 — but it reached Prisma and came
+    // back cleanly rather than being rejected by the guard.
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('ORDER_NOT_FOUND');
+  });
+});
+
+describe('GET /v1/storefront/checkout/confirmacion/:orderNumber — the parse is STRICT, not coercing', () => {
+  // `parseOrderNumberParam` used `parseInt`, which stops at the first
+  // non-digit and returns whatever prefix it managed to read: `/confirmacion/1abc`
+  // returned a 200 carrying order 1's data. Harmless in isolation (the route is
+  // read-only and the response is the same order the shopper could have asked
+  // for by its plain number), but it is exactly the coercion class wave 1
+  // deliberately rejected on the webhook route with `/^\d+$/` — where one order
+  // reachable under several spellings meant an idempotency key that saw them as
+  // distinct events. The two guards now agree.
+  it.each([
+    '1abc',
+    // Percent-encoded rather than a literal trailing space: superagent trims a
+    // trailing space off the URL string before sending, so a literal one never
+    // reaches the route at all. `%20` arrives decoded as `'1 '`, which is the
+    // spelling `Number('1 ')`/`parseInt('1 ', 10)` would both have folded onto
+    // order 1.
+    '1%20',
+    ' 1',
+    '+1',
+    '1.0',
+    '1e0',
+    '0x1',
+    '1,000',
+    '1%00',
+  ])('404s (never 200 with another order\'s data) for the non-plain-digits param %j', async (orderNumber) => {
+    const res = await request(app.getHttpServer())
+      .get(`/v1/storefront/checkout/confirmacion/${orderNumber}`)
+      .set('x-tenant-domain', 'confirm-a.ventia.localhost');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('ORDER_NOT_FOUND');
+  });
+
+  it('a plain-digits param still resolves the order (the strictness costs nothing real)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/checkout/confirmacion/1')
+      .set('x-tenant-domain', 'confirm-a.ventia.localhost');
+
+    expect(res.status).toBe(200);
+    expect(res.body.orderNumber).toBe(1);
+  });
+});

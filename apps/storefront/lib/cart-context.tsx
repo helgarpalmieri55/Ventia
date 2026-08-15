@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import { addCartItem, fetchCart, removeCartItem, updateCartItem, type Cart } from './cart-api';
+import { createMutationQueue } from './mutation-queue';
 
 export interface CartContextValue {
   cart: Cart | null;
@@ -36,27 +37,16 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = React.useState(true);
   const [isOpen, setIsOpen] = React.useState(false);
 
-  // Serializes every mutation below through one promise chain: a shopper can
-  // fire a second update (e.g. another qty change) before the first one's
-  // request has even reached the server, and two concurrent PATCHes give no
-  // guarantee they're processed in the order they were sent — a reviewer of
-  // this task reproduced exactly that: a slower request's response arrived
-  // second and overwrote a faster, later request's result, in both the
-  // displayed cart AND the persisted DB row. Queuing mutations so only one
-  // is ever in flight at a time removes the race entirely (nothing left to
-  // reorder, client-side or server-side) rather than just picking which
-  // response wins client-side, which would still leave the wrong value
-  // persisted.
-  const mutationQueue = React.useRef<Promise<unknown>>(Promise.resolve());
-
-  const enqueue = React.useCallback(<T,>(run: () => Promise<T>): Promise<T> => {
-    const result = mutationQueue.current.then(run, run);
-    // Swallow here so one failed mutation doesn't permanently poison the
-    // queue for every mutation after it — the actual error still propagates
-    // to this call's own caller via the returned (un-caught) `result`.
-    mutationQueue.current = result.catch(() => undefined);
-    return result;
-  }, []);
+  // Serializes every mutation below so only one is ever in flight at a time:
+  // a shopper can fire a second update (e.g. another qty change) before the
+  // first one's request has even reached the server, and two concurrent
+  // PATCHes give no guarantee they're processed in the order they were sent
+  // — a reviewer of this task reproduced exactly that, a slower request's
+  // response arriving second and overwriting a faster, later request's
+  // result in both the displayed cart AND the persisted DB row. See
+  // lib/mutation-queue.ts for the queue itself and why it's a separate,
+  // directly-testable module rather than inlined here.
+  const enqueue = React.useMemo(() => createMutationQueue(), []);
 
   React.useEffect(() => {
     let cancelled = false;

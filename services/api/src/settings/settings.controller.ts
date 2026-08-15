@@ -1,16 +1,75 @@
-import { Body, Controller, Get, Patch, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import { Prisma, tenantDb } from '@ventia/db';
+import type { PaymentProviderId } from '@ventia/payments';
 import { paymentsSettingsSchema, shippingSettingsSchema, storeSettingsSchema, themeSchema } from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from '../catalog/parse';
 import { writeAudit } from '../catalog/audit';
+import { PaymentsService } from '../payments/payments.service';
 
 type JsonRecord = Record<string, unknown>;
 
 function asRecord(value: Prisma.JsonValue | null | undefined): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
+
+/** Masks a public key for display: keeps the last 4 characters, replaces
+ * everything else with `*`. `publicKey` is not secret (design decision 6 —
+ * it's meant to appear in client-side checkout URLs), so this is purely a
+ * "confirm which key is saved without echoing the whole thing back"
+ * affordance, not a real confidentiality boundary the way `privateKey`'s
+ * encryption is. */
+function maskPublicKey(publicKey: string): string {
+  const visible = publicKey.slice(-4);
+  const hidden = '*'.repeat(Math.max(publicKey.length - 4, 0));
+  return `${hidden}${visible}`;
+}
+
+/** Builds the masked `providers.<provider>` view for `GET
+ * /v1/admin/settings` / the PATCH response, reading DIRECTLY off the stored
+ * settings JSON — deliberately NOT calling
+ * `PaymentsService.getTenantProviderConfig` (which decrypts
+ * `privateKey`/`integritySecret`/`eventsSecret`/`epaycoCustomerId`).
+ * Answering "is this provider connected" + "what's the masked public key"
+ * never needs the plaintext secrets, only the cleartext `publicKey` and the
+ * presence of the encrypted-private-key blob — both already sitting in
+ * `payments.providers.<provider>` as saved by
+ * `PaymentsService.saveProviderCredentials`. This keeps `toResponse`
+ * synchronous (no encryption-key/async round trip just to render a settings
+ * page) and, more importantly, makes it structurally impossible for this
+ * code path to ever touch — let alone leak — a decrypted secret.
+ *
+ * Generalized (P3b Task 4) from a Wompi-only `maskedWompiView` to a shared
+ * helper parameterized by `provider` — this was a plan gap: the plan's
+ * stated Task 4 file list didn't mention this controller at all, but leaving
+ * it hardcoded to `wompi` would have made the new
+ * `mercadopago`/`epayco` schemas unreachable in practice (a PATCH could still
+ * save mercadopago/epayco credentials, but `GET`/every PATCH response would
+ * never show their connection status, matching neither `wompi`'s existing UX
+ * nor Task 5's admin UI needs). Same generalization discipline as this
+ * phase's Task 1 `checkout.service.ts` `!== 'cod'` refactor. */
+function maskedProviderView(
+  payments: JsonRecord,
+  provider: PaymentProviderId,
+): { connected: boolean; publicKeyMasked: string | null; sandbox: boolean } {
+  const providers = asRecord(payments.providers as Prisma.JsonValue | undefined);
+  const stored = asRecord(providers[provider] as Prisma.JsonValue | undefined);
+  const publicKey = typeof stored.publicKey === 'string' ? stored.publicKey : null;
+  const connected = typeof stored.privateKeyEncrypted === 'string';
+  const sandbox = stored.sandbox === true;
+  return {
+    connected,
+    publicKeyMasked: publicKey ? maskPublicKey(publicKey) : null,
+    sandbox,
+  };
+}
+
+/** Every `PaymentProviderId` with a real schema/UI slot — used to loop over
+ * `input.providers` generically in `updatePayments` and to build the full
+ * `providers` view in `toResponse`, rather than hand-enumerating `wompi`/
+ * `mercadopago`/`epayco` at each call site. */
+const ALL_PROVIDER_IDS: readonly PaymentProviderId[] = ['wompi', 'mercadopago', 'epayco'];
 
 /**
  * Owner-only: every route here is behind both AdminSessionGuard (requires a
@@ -22,6 +81,13 @@ function asRecord(value: Prisma.JsonValue | null | undefined): JsonRecord {
 @UseGuards(AdminSessionGuard)
 @Roles('owner')
 export class SettingsController {
+  // Explicit @Inject: esbuild (vitest's default TS transform) does not emit
+  // TypeScript's `design:paramtypes` decorator metadata, so Nest's implicit
+  // constructor-injection cannot resolve PaymentsService by type alone (same
+  // caution as every other controller in this codebase — see orders.
+  // controller.ts's identical comment).
+  constructor(@Inject(PaymentsService) private readonly paymentsService: PaymentsService) {}
+
   @Get()
   async get(@AdminSession() session: AdminSessionContext) {
     const tenant = await tenantDb(session.tenantId).tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
@@ -75,23 +141,90 @@ export class SettingsController {
     return this.toResponse(updated.name, updated.slug, updated.status, updated.settings, updated.theme);
   }
 
+  /**
+   * Extended (P3a Task 3) to accept an optional nested `providers.wompi`
+   * object alongside the pre-existing `codEnabled` toggle, and further
+   * widened (P3b Task 4, a plan gap — the plan's stated file list for this
+   * task never mentioned this controller, but leaving it hardcoded to
+   * `wompi` would leave the new `mercadopago`/`epayco` schemas unreachable
+   * through this endpoint) to loop over EVERY `PaymentProviderId` present in
+   * `input.providers`. All of `codEnabled` and each configured provider are
+   * merge-in-place, INDEPENDENTLY of each other and of one another — a PATCH
+   * sending only one must never clobber any of the others (design decision
+   * 8's explicit regression risk callout, now generalized to 3 providers +
+   * codEnabled = 4 independently-mergeable pieces). Deliberately does NOT
+   * spread `input` directly into `settings.payments` the way the pre-P3a
+   * version did: `input.providers.<id>`, if present, carries PLAINTEXT
+   * `privateKey`/`integritySecret`/`eventsSecret`/`epaycoCustomerId` — those
+   * must go through `PaymentsService.saveProviderCredentials` (which encrypts
+   * before persisting), never written to `settings` as-is.
+   */
   @Patch('payments')
   async updatePayments(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
     const input = parseOr400(paymentsSettingsSchema, body);
-    const db = tenantDb(session.tenantId);
 
-    const tenant = await db.tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
-    const settings = { ...asRecord(tenant.settings) };
-    settings.payments = { ...asRecord(settings.payments as Prisma.JsonValue | undefined), ...input };
+    for (const providerId of ALL_PROVIDER_IDS) {
+      const creds = input.providers?.[providerId];
+      if (creds) {
+        await this.paymentsService.saveProviderCredentials(session.tenantId, providerId, creds);
+      }
+    }
 
-    const updated = await db.tenant.update({
-      where: { id: session.tenantId },
-      data: { settings: settings as Prisma.InputJsonValue },
+    if (input.codEnabled !== undefined) {
+      const db = tenantDb(session.tenantId);
+      // Re-read fresh (rather than reusing an earlier read) so this merge
+      // sees whatever `saveProviderCredentials` just wrote above when both
+      // are present in the same PATCH — otherwise this write would overwrite
+      // `settings` with a stale pre-providers-write snapshot.
+      const tenant = await db.tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
+      const settings = { ...asRecord(tenant.settings) };
+      settings.payments = {
+        ...asRecord(settings.payments as Prisma.JsonValue | undefined),
+        codEnabled: input.codEnabled,
+      };
+      await db.tenant.update({
+        where: { id: session.tenantId },
+        data: { settings: settings as Prisma.InputJsonValue },
+      });
+    }
+
+    // Audit log: NEVER pass `input` verbatim — `input.providers.<id>` carries
+    // plaintext secrets, and `writeAudit` persists `data` as-is into
+    // `AuditLog.data` (a real, separate leak vector from the API response
+    // one this task's tests focus on). Only non-secret shape is recorded,
+    // for whichever provider(s) were actually present in this PATCH.
+    const auditedProviders: Record<string, { publicKey: string; sandbox: boolean }> = {};
+    for (const providerId of ALL_PROVIDER_IDS) {
+      const creds = input.providers?.[providerId];
+      if (creds) {
+        auditedProviders[providerId] = { publicKey: creds.publicKey, sandbox: creds.sandbox };
+      }
+    }
+    await writeAudit(session, 'settings.payments', 'Tenant', session.tenantId, {
+      ...(input.codEnabled !== undefined ? { codEnabled: input.codEnabled } : {}),
+      ...(Object.keys(auditedProviders).length > 0 ? { providers: auditedProviders } : {}),
     });
 
-    await writeAudit(session, 'settings.payments', 'Tenant', session.tenantId, input);
+    const tenant = await tenantDb(session.tenantId).tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
+    return this.toResponse(tenant.name, tenant.slug, tenant.status, tenant.settings, tenant.theme);
+  }
 
-    return this.toResponse(updated.name, updated.slug, updated.status, updated.settings, updated.theme);
+  /**
+   * Owner-only connectivity check (same guards as every route on this
+   * controller). No request body: the provider comes entirely from the URL
+   * param, and there's nothing else for the caller to supply — the tenant's
+   * already-saved credentials (from `updatePayments` above) are what gets
+   * tested. Always 200 — `{ok: false}` is a successful API call reporting a
+   * failed check, not an HTTP error (`PaymentsService.testConnection` itself
+   * guarantees it never throws).
+   */
+  @Post('payments/:provider/test-connection')
+  @HttpCode(200)
+  async testConnection(
+    @AdminSession() session: AdminSessionContext,
+    @Param('provider') provider: PaymentProviderId,
+  ) {
+    return this.paymentsService.testConnection(session.tenantId, provider);
   }
 
   @Patch('shipping')
@@ -136,7 +269,19 @@ export class SettingsController {
       status,
       storeInfo,
       theme,
-      payments: { codEnabled: payments.codEnabled === true },
+      payments: {
+        codEnabled: payments.codEnabled === true,
+        // Generalized (P3b Task 4) from a wompi-only view to all 3
+        // providers, so `GET /v1/admin/settings` and every PATCH response
+        // consistently show connection status for wompi/mercadopago/epayco
+        // going forward — see `maskedProviderView`'s doc comment for why
+        // this generalization was necessary, not optional.
+        providers: {
+          wompi: maskedProviderView(payments, 'wompi'),
+          mercadopago: maskedProviderView(payments, 'mercadopago'),
+          epayco: maskedProviderView(payments, 'epayco'),
+        },
+      },
       // Defaults to `{}` when unset — the admin UI (a later task) handles
       // defaulting this to `{ methods: [] }` client-side.
       shipping,
