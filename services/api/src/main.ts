@@ -3,9 +3,11 @@ import { NestFactory } from '@nestjs/core';
 import type { INestApplication } from '@nestjs/common';
 import express from 'express';
 import cookieParser from 'cookie-parser';
+import type Redis from 'ioredis';
 import { toNodeHandler } from 'better-auth/node';
-import { AppModule } from './app.module';
+import { AppModule, REDIS_CLIENT } from './app.module';
 import { AUTH_INSTANCE, type AuthInstance } from './admin/auth-instance';
+import { clientIp, createRateLimiter, RATE_LIMITS } from './common/rate-limit';
 import { ReconciliationWorker } from './payments/reconciliation.worker';
 import { StockReservationWorker } from './payments/stock-reservation.worker';
 
@@ -24,6 +26,83 @@ export async function createApp(): Promise<INestApplication> {
   // interaction with the body-parser ordering below; mounted early in the
   // middleware chain since cookie parsing is cheap and side-effect-free.
   httpAdapter.use(cookieParser());
+
+  // Rate limiting (docs/SPEC.md §9). Mounted here, on the Express adapter,
+  // rather than as Nest guards — `/v1/auth/*` below is handled by better-auth
+  // before Nest routing ever sees it, and those are the endpoints that most
+  // need limiting.
+  //
+  // `trust proxy` is what makes IP-based limiting meaningful at all: the API
+  // runs behind Caddy (docker/Caddyfile), so without it every request carries
+  // the proxy's address and one abusive client would spend everybody's budget.
+  // Set to 1 — trust exactly one hop — rather than `true`: `true` takes the
+  // left-most X-Forwarded-For entry, which the CLIENT supplies and can forge,
+  // letting an attacker mint a fresh identity per request and bypass the limit
+  // entirely. One hop means the address comes from Caddy's own appended entry.
+  // A deployment that adds another proxy in front must raise this to match, or
+  // limiting silently keys on the wrong address again.
+  httpAdapter.set('trust proxy', 1);
+  const redis = app.get<Redis>(REDIS_CLIENT);
+
+  // Auth: the credential-stuffing / signup-spam / verification-email-flood
+  // surface. Keyed by IP alone — not IP+email — so that trying 200 different
+  // emails from one address costs the same budget as retrying one, which is
+  // the attack that actually matters here.
+  httpAdapter.use(
+    '/v1/auth',
+    createRateLimiter(redis, {
+      name: 'auth',
+      limit: RATE_LIMITS.auth(),
+      windowSeconds: 60,
+      key: clientIp,
+      errorCode: 'TOO_MANY_REQUESTS',
+    }),
+  );
+
+  // Checkout: order-creation spam. Each accepted request decrements stock and
+  // holds a reservation for 15 minutes, so a flood here is not merely load —
+  // it can empty a merchant's sellable inventory without a single payment.
+  // Keyed by IP; the limit is generous enough that a shopper retrying a
+  // declined card, or several shoppers behind one NAT, never sees it.
+  httpAdapter.use(
+    '/v1/storefront/checkout',
+    createRateLimiter(redis, {
+      name: 'checkout',
+      limit: RATE_LIMITS.checkout(),
+      windowSeconds: 60,
+      key: clientIp,
+      errorCode: 'TOO_MANY_REQUESTS',
+    }),
+  );
+
+  // Webhooks: limited LAST and most cautiously, because the failure mode here
+  // is not a slow attacker, it is a dropped payment. A 429 to a gateway is a
+  // delivery we refused; gateways retry, but a settle delayed is a shopper
+  // charged with no order until the retry lands.
+  //
+  // So: keyed per TENANT rather than per IP (gateway callbacks all originate
+  // from a handful of the gateway's own addresses, so an IP key would put
+  // every merchant in one bucket and let one busy store throttle the rest),
+  // with a limit far above any plausible legitimate rate for a single store.
+  // The tenant comes from the URL path this endpoint already routes on. A
+  // request whose path does not carry one is not limited at all rather than
+  // being lumped into a shared bucket — see the `key` contract.
+  httpAdapter.use(
+    '/webhooks',
+    createRateLimiter(redis, {
+      name: 'webhooks',
+      limit: RATE_LIMITS.webhooks(),
+      windowSeconds: 60,
+      key: (req) => {
+        // `/webhooks/payments/:provider/:tenantId` — this middleware is mounted
+        // on '/webhooks', so req.path is the remainder.
+        const parts = req.path.split('/').filter(Boolean);
+        return parts.length >= 3 && parts[0] === 'payments' ? `${parts[1]}:${parts[2]}` : null;
+      },
+      errorCode: 'TOO_MANY_REQUESTS',
+    }),
+  );
+
   httpAdapter.all('/v1/auth/*', toNodeHandler(auth));
   // Path-scoped '10mb' limit ONLY for the CSV import routes (Task 8's
   // POST /v1/admin/import/*, whose own 2 MB cap is enforced in
