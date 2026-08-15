@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { navItems } from '../../lib/nav';
 import { getMe } from '../../lib/session';
 import { LogoutButton } from './_components/logout-button';
+import { PaymentAlertsBanner } from './_components/payment-alerts-banner';
 
 /**
  * Route-group structure (documented per the task contract):
@@ -53,7 +54,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <LogoutButton />
         </div>
       </aside>
-      <main className="flex-1 p-6">{children}</main>
+      <main className="flex-1 p-6">
+        {/* Above `children`, in the layout rather than on any single page:
+            a payment that was taken but never became an order is the one
+            thing in this admin app that must be seen from wherever the
+            merchant happens to be. Renders nothing at all when there is
+            nothing to report — see the component's doc comment. */}
+        <PaymentAlertsBanner />
+        {children}
+      </main>
     </div>
   );
 }

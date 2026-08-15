@@ -479,6 +479,14 @@ model WebhookEvent {
   // `tenantId` from the URL path; any future tenant-less writer must bring its
   // own dedupe.
   @@unique([provider, tenantId, eventId])
+  // Backs the admin "pagos por revisar" list
+  // (services/api/src/payment-alerts/payment-alerts.service.ts), whose
+  // predicate + ordering are exactly `("tenantId", result)` filtered,
+  // `processedAt` descending. Added in
+  // 20260815120000_webhook_event_tenant_read alongside this table's SELECT
+  // grant + RLS policy for `ventia_app`; see that migration for why a tenant
+  // can now read (and only read) its own rows here.
+  @@index([tenantId, result, processedAt(sort: Desc)])
 }
 
 // ---- Agent ----
