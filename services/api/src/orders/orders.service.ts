@@ -471,6 +471,43 @@ export class OrdersService {
         where: { id: orderId },
         data: {
           status: targetStatus,
+          // A cancel must also record that the payment is not coming.
+          //
+          // Until now `transition()` never wrote `paymentStatus` at all, so a
+          // merchant cancelling an unpaid online order left it
+          // CANCELLED/PENDING — while the automatic 15-minute expiry of the
+          // very same order writes CANCELLED/EXPIRED
+          // (stock-reservation.worker.ts). Two representations of one
+          // real-world end state: cancelled, no money arrived. The merchant's
+          // own order list reads the second of those as "still waiting on
+          // payment", on an order they just cancelled.
+          //
+          // EXPIRED rather than a new enum value, because `paymentStatus`
+          // answers only "what happened to the money", and the answer here is
+          // identical to the expiry worker's: the window closed and nothing
+          // arrived. WHO closed it and WHY is already recorded, distinctly, in
+          // two other places — the `OrderEvent` (`'status_changed'` by
+          // `'staff'` here vs `'reservation_expired'` by `'system'` there) and
+          // the `InventoryMovement` reason (`'order_cancelled'` vs
+          // `'order_expired'`). Encoding it a third time in `paymentStatus`
+          // would duplicate what those already say and give a reader two
+          // fields that could disagree.
+          //
+          // Narrowed to PENDING/FAILED, which is what makes this safe:
+          //  - PAID is never touched. A cancel after payment is a refund
+          //    situation, and the money DID arrive — overwriting that would be
+          //    the same class of lie `markFailed`'s precondition exists to
+          //    prevent (see payments.service.ts).
+          //  - COD is never touched. A cash order's payment state is not a
+          //    gateway outcome and means nothing about a window closing.
+          //  - FAILED IS mapped, matching the expiry worker, which overwrites
+          //    it the same way (its sweep filters on `status`/
+          //    `stockReservedUntil` only, never on `paymentStatus`). "An
+          //    attempt was declined" stays on the record as the OrderEvent
+          //    history; the current-state field says where it ended up.
+          ...(action === 'cancel' && (order.paymentStatus === 'PENDING' || order.paymentStatus === 'FAILED')
+            ? { paymentStatus: 'EXPIRED' as const }
+            : {}),
           // P3 wave-2 FIX 2 widened this from `cancel`-only to EVERY action.
           // `stockReservedUntil` means "this order is an unpaid online order
           // still holding a 15-minute stock hold", and that is false the

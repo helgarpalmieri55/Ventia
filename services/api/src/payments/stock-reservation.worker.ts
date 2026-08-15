@@ -68,6 +68,29 @@ const REPEAT_JOB_ID = 'stock-reservation-sweep';
  * clause) and about serializing against a concurrent transition on the same
  * order, exactly like `transition()`/`markPaid` already do.
  */
+/**
+ * Most orders this sweep may process in one run, platform-wide.
+ *
+ * The query was previously unbounded, on the reasoning that expired
+ * reservations are rare. That holds in steady state and stops holding in
+ * exactly the situation this worker exists for: if the worker is down, or
+ * Redis/BullMQ stalls, or a promotion drives a burst of abandoned checkouts,
+ * the backlog is however many orders accumulated over that window — and the
+ * first run back reads every one of them into memory and then processes them
+ * one at a time, each in its own transaction with an advisory lock. That is
+ * the run most likely to be slow, and it was the one with no bound at all.
+ *
+ * Matches `RECONCILE_BATCH_LIMIT` in reconciliation.worker.ts, and for the same
+ * reason: nothing is dropped, only deferred. The sweep runs on a repeating
+ * schedule, so a truncated run's remainder is picked up by the next one.
+ *
+ * Ordered oldest-first so a truncated run always drains the FRONT of the
+ * backlog. Without an explicit order, a bounded query may return an arbitrary
+ * page each time and re-read the same rows forever while the oldest — the ones
+ * whose stock has been held wrongly the longest — are never reached.
+ */
+const EXPIRE_BATCH_LIMIT = 500;
+
 export async function expireReservations(): Promise<number> {
   const now = new Date();
 
@@ -77,7 +100,18 @@ export async function expireReservations(): Promise<number> {
       status: 'PENDING',
     },
     select: { id: true, tenantId: true },
+    orderBy: { stockReservedUntil: 'asc' },
+    take: EXPIRE_BATCH_LIMIT,
   });
+
+  if (candidates.length === EXPIRE_BATCH_LIMIT) {
+    // Never truncate silently: a run that hits the cap means stock is being
+    // held past its deadline somewhere in the remainder, and the only way to
+    // tell a healthy sweep from a persistently-saturated one is to say so.
+    console.warn('[stock-reservation] sweep hit its batch limit — remainder deferred to the next run', {
+      limit: EXPIRE_BATCH_LIMIT,
+    });
+  }
 
   let processedCount = 0;
   for (const { id: orderId, tenantId } of candidates) {

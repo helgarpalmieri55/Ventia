@@ -963,3 +963,108 @@ describe('order status transitions — FIX 2: confirm is rejected for an online 
     expect(after.stockReservedUntil).toBeNull();
   });
 });
+
+describe('cancel — paymentStatus', () => {
+  it('records EXPIRED on an unpaid online order, matching the automatic expiry', async () => {
+    // The inconsistency this closes: the 15-minute expiry sweep writes
+    // CANCELLED/EXPIRED for this exact order shape, while a merchant pressing
+    // "Cancelar" used to leave CANCELLED/PENDING — so the merchant's own list
+    // said "waiting on payment" about an order they had just cancelled.
+    const { cookie, tenantId } = await signUpWithTenant('orders-cancel-paystatus@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 1 }]);
+    await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        paymentStatus: 'PENDING',
+        paymentProvider: 'wompi',
+        stockReservedUntil: new Date(Date.now() + 15 * 60_000),
+      },
+    });
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/cancel`)
+      .set('cookie', cookie)
+      .send({ reason: 'Cliente canceló antes de pagar' });
+
+    expect(res.status).toBe(200);
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(order?.status).toBe('CANCELLED');
+    expect(order?.paymentStatus).toBe('EXPIRED');
+  });
+
+  it('maps a declined (FAILED) attempt too, exactly as the expiry sweep does', async () => {
+    // The expiry sweep filters on status/stockReservedUntil only, never on
+    // paymentStatus, so it overwrites FAILED with EXPIRED. Cancel matches it —
+    // "an attempt was declined" survives as the OrderEvent history, while the
+    // current-state field says where the order ended up.
+    const { cookie, tenantId } = await signUpWithTenant('orders-cancel-failed@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 1 }]);
+    await prisma.order.update({
+      where: { id: orderId },
+      data: { paymentStatus: 'FAILED', paymentProvider: 'wompi', stockReservedUntil: new Date(Date.now() + 60_000) },
+    });
+
+    await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/cancel`)
+      .set('cookie', cookie)
+      .send({ reason: 'Pago rechazado' });
+
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(order?.paymentStatus).toBe('EXPIRED');
+  });
+
+  it('NEVER overwrites PAID — a cancel after payment is a refund, and the money did arrive', async () => {
+    // The safety property. Downgrading PAID here would be the same class of
+    // lie markFailed's precondition exists to prevent: the order's own record
+    // would stop saying a shopper was charged.
+    const { cookie, tenantId } = await signUpWithTenant('orders-cancel-paid@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'CONFIRMED', [{ productId: product.id, qty: 1 }]);
+    await prisma.order.update({
+      where: { id: orderId },
+      data: { paymentStatus: 'PAID', paymentProvider: 'wompi' },
+    });
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/cancel`)
+      .set('cookie', cookie)
+      .send({ reason: 'Cliente pidió reembolso' });
+
+    expect(res.status).toBe(200);
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(order?.status).toBe('CANCELLED');
+    expect(order?.paymentStatus).toBe('PAID');
+  });
+
+  it('NEVER overwrites COD — a cash order has no gateway window to close', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-cancel-cod@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 1 }]);
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/cancel`)
+      .set('cookie', cookie)
+      .send({ reason: 'Cliente canceló' });
+
+    expect(res.status).toBe(200);
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(order?.status).toBe('CANCELLED');
+    // seedOrder's default paymentStatus is 'COD'.
+    expect(order?.paymentStatus).toBe('COD');
+  });
+
+  it('leaves paymentStatus alone on every non-cancel transition', async () => {
+    // Guards the narrowness of the change: only `cancel` writes this field.
+    const { cookie, tenantId } = await signUpWithTenant('orders-confirm-paystatus@demo.co', 'owner');
+    const product = await seedProduct(tenantId, 10);
+    const orderId = await seedOrder(tenantId, 'PENDING', [{ productId: product.id, qty: 1 }]);
+
+    await request(app.getHttpServer()).patch(`/v1/admin/orders/${orderId}/confirm`).set('cookie', cookie).send({});
+
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(order?.status).toBe('CONFIRMED');
+    expect(order?.paymentStatus).toBe('COD');
+  });
+});
