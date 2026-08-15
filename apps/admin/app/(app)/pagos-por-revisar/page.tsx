@@ -330,18 +330,13 @@ function AlertRow({
         ) : (
           <>
             <span className="text-muted-foreground">No identificado</span>
-            {/* A previous version printed the payload's claimed order number
-                here as if it were one of the merchant's orders, so a row
-                could read "VNT-88888" and "no pudimos identificar el pedido"
-                at the same time. The claim is still useful as a lead, so it
-                stays — but labelled as what it is: something the gateway
-                said, not an order in this store. */}
-            {alert.referencedOrderNumber !== null ? (
-              <span className="block text-xs text-muted-foreground">
-                La pasarela mencionó el número {alert.referencedOrderNumber}, pero no coincide con ningún pedido
-                tuyo.
-              </span>
-            ) : null}
+            {/* Reachable only for an alert recorded before the API stored the
+                order link (`WebhookEvent.orderId`). Every alert written since
+                resolves to the order the webhook handler itself matched, so
+                this branch does not appear for new ones — but it must keep
+                rendering, because the alternative is hiding a row about money
+                a shopper was charged. The gateway's event id in the next
+                column is what makes such a row actionable. */}
           </>
         )}
       </Td>

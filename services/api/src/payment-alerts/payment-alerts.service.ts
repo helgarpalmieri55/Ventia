@@ -1,6 +1,5 @@
 import { HttpException, Injectable } from '@nestjs/common';
 import { tenantDb, type OrderStatus, type PaymentStatus, type WebhookEventReviewAction } from '@ventia/db';
-import { projectWebhookLinks } from './webhook-links';
 
 /**
  * The one `WebhookEvent.result` value that means a human must intervene:
@@ -53,20 +52,12 @@ export interface PaymentAlertDTO {
    * the (unreachable for this result) unprocessed case. */
   occurredAt: Date;
   /** The number of a REAL order of this merchant's that the event resolved
-   * to, or `null` when it resolved to none. Never the payload's unmatched
-   * claim — that is `referencedOrderNumber`. */
+   * to, or `null` when it resolved to none. */
   orderNumber: number | null;
-  /** The order number the GATEWAY's payload named, whether or not it matched
-   * anything. `null` when the payload carries no usable reference for this
-   * provider (always the case for Mercado Pago) — see webhook-links.ts.
-   *
-   * Displayed only as the gateway's own reference, never as one of the
-   * merchant's orders: an unmatched number is a true statement about what the
-   * gateway was told, and a false one about this merchant's order book. */
-  referencedOrderNumber: number | null;
   /**
    * The amount the shopper was charged, in cents — taken from the resolved
-   * ORDER's `totalCents`, not from the payload.
+   * ORDER's `totalCents`, not from the payload. `null` for a legacy row
+   * written before `WebhookEvent.orderId` existed, which resolves to no order.
    *
    * That is not a shortcut, it is the more truthful number. This event is
    * only ever recorded AFTER webhooks.controller.ts's unconditional amount
@@ -136,18 +127,6 @@ export interface PaymentAlertReviewResult {
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
 
-/**
- * The one `providerRefSource` value this module will resolve an order
- * through. Mirrors `isGatewayVerifiedRef` in
- * services/api/src/payments/reconciliation.worker.ts, deliberately:
- * schema.prisma states that `'hint'` is written by the unauthenticated hint
- * endpoint and is "attacker-controlled by assumption", and that NULL is
- * "treated exactly like 'hint' (untrusted) by every consumer: fail closed,
- * never open". Comparing against this constant rather than `!== 'hint'` is
- * what makes NULL — and any future third value — fail closed by default.
- */
-const VERIFIED_REF_SOURCE = 'verified';
-
 /** The review actions that mean "handled". Everything except the undo. */
 function isReviewedAction(action: WebhookEventReviewAction): boolean {
   return action !== 'reopened';
@@ -179,10 +158,10 @@ export class PaymentAlertsService {
    *
    * ## Query shape
    *
-   * Two batched `findMany`s after the page is fetched — never one lookup per
-   * row. The alert list is inherently tiny (this event requires a paid
-   * webhook to land after an expiry), but a per-row join would still be N+1
-   * against a table read on every admin page load via the shell banner.
+   * One batched `findMany` by primary key after the page is fetched — never
+   * one lookup per row. The alert list is inherently tiny (this event requires
+   * a paid webhook to land after an expiry), but a per-row join would still be
+   * N+1 against a table read on every admin page load via the shell banner.
    *
    * ## Pending vs reviewed
    *
@@ -240,103 +219,67 @@ export class PaymentAlertsService {
         // must never leave this service. Selecting fields explicitly means a
         // future column added to this model is opt-in rather than silently
         // published to the admin app.
-        select: { id: true, provider: true, eventId: true, payload: true, processedAt: true, createdAt: true },
+        //
+        // `payload` is no longer selected at all. It used to be read here to
+        // re-derive the order link; `orderId` now carries that link directly,
+        // so the raw gateway body never enters this process's memory on this
+        // path — the strongest possible version of "it must never leave this
+        // service".
+        select: { id: true, provider: true, eventId: true, orderId: true, processedAt: true, createdAt: true },
       }),
       db.webhookEvent.count({ where }),
     ]);
 
-    // `payload` IS selected above — it is the only place the order link lives
-    // (see webhook-links.ts) — but it is consumed here and never escapes into
-    // a DTO. `projectWebhookLinks` returns two scalars and nothing else.
-    const links = events.map((event) => ({ event, ...projectWebhookLinks(event.provider, event.payload) }));
+    // One batched lookup by primary key, replacing the previous pair of
+    // lookups (by `Order.number` re-parsed from the payload, then by
+    // `Order.providerRef` as a fallback).
+    //
+    // Everything that made those two lookups delicate is gone with them:
+    //
+    //  - There is no ambiguity to resolve. `providerRef` carries no uniqueness
+    //    constraint, so the old ref path had to detect two orders sharing one
+    //    ref and deliberately resolve to NOTHING. `id` is the primary key.
+    //  - There is no trust gate to apply. The old ref path had to require
+    //    `providerRefSource = 'verified'`, because `providerRef` is written by
+    //    an unauthenticated hint endpoint that schema.prisma calls
+    //    "attacker-controlled by assumption" — and since the per-row guidance
+    //    is derived from the resolved order's own status, whoever controlled
+    //    the link controlled the instruction the merchant read. `orderId` is
+    //    written only by the webhook handler, from its own authenticated
+    //    lookup, so there is no untrusted writer to gate against.
+    //  - Mercado Pago is no longer a partial case. Its notification body
+    //    carries no order reference, so it could only ever be resolved through
+    //    that gated ref path, and most MP alerts consequently showed no order
+    //    at all. The handler knew the order the whole time; now it says so.
+    //
+    // Still tenant-scoped twice over (tenantDb's AND-scoping plus RLS), so an
+    // `orderId` that somehow named another tenant's order would resolve to
+    // nothing rather than across the boundary.
+    const orderIds = [...new Set(events.map((e) => e.orderId).filter((id): id is string => id !== null))];
 
-    const numbers = [...new Set(links.map((l) => l.orderNumber).filter((n): n is number => n !== null))];
-    const providerRefs = [...new Set(links.map((l) => l.providerRef).filter((r): r is string => r !== null))];
-
-    const orderSelect = {
-      id: true,
-      number: true,
-      status: true,
-      paymentStatus: true,
-      totalCents: true,
-      createdAt: true,
-      email: true,
-      providerRef: true,
-    } as const;
-
-    const [byNumberRows, byRefRows] = await Promise.all([
-      numbers.length > 0
-        ? db.order.findMany({ where: { number: { in: numbers } }, select: orderSelect })
-        : Promise.resolve([]),
-      providerRefs.length > 0
-        ? db.order.findMany({
-            where: {
-              providerRef: { in: providerRefs },
-              // ONLY refs the gateway itself vouched for (P3 wave-3 FIX 4).
-              //
-              // `Order.providerRef` is written from three sources and
-              // schema.prisma is explicit that one of them — the deliberately
-              // unauthenticated provider-ref-hint endpoint — is
-              // "attacker-controlled by assumption", and that a NULL source is
-              // "treated exactly like 'hint' (untrusted) by every consumer:
-              // fail closed, never open". `reconciliation.worker.ts` already
-              // honours that gate before it will settle money; this list must
-              // honour it before it shows money.
-              //
-              // What it protects, concretely: the resolved order's
-              // `totalCents` is presented to the merchant as "Monto cobrado" —
-              // the amount they are told a shopper was charged — and, since
-              // the per-row guidance is derived from the resolved order's
-              // OWN status, an attacker who could choose which order an alert
-              // resolves to could also choose which instruction the merchant
-              // reads. Planting a hint ref onto a DELIVERED/PAID order would
-              // render "this customer was probably charged twice — refund the
-              // duplicate" against a legitimate, single payment. That is a
-              // money-losing instruction assembled from an untrusted link, so
-              // an unverified ref must resolve to NOTHING rather than to
-              // something with the amount merely suppressed.
-              //
-              // The cost is real and accepted: Mercado Pago is the only
-              // provider resolved this way (its notification body carries no
-              // order reference at all), and for MP alerts a ref is only
-              // 'verified' when markPaid/markFailed already stamped it on an
-              // earlier attempt for this same payment. Every other MP alert
-              // now lists with a null order — which is honest, still carries
-              // the gateway's own event id to search the dashboard with, and
-              // is exactly what this page already renders for an unresolvable
-              // event. The order-NUMBER path (Wompi/ePayco, the dominant
-              // cases) never consults `providerRef` and is untouched.
-              providerRefSource: VERIFIED_REF_SOURCE,
+    const orderRows =
+      orderIds.length > 0
+        ? await db.order.findMany({
+            where: { id: { in: orderIds } },
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              paymentStatus: true,
+              totalCents: true,
+              createdAt: true,
+              email: true,
             },
-            select: orderSelect,
           })
-        : Promise.resolve([]),
-    ]);
+        : [];
 
-    // `Order.number` is unique per tenant, so this map is unambiguous.
-    const byNumber = new Map(byNumberRows.map((o) => [o.number, o]));
+    const byId = new Map(orderRows.map((o) => [o.id, o]));
 
-    // `Order.providerRef` carries NO uniqueness constraint (three
-    // independent sources write it — see the column's doc comment), so two
-    // orders can legitimately share one. An ambiguous ref therefore resolves
-    // to NOTHING rather than to an arbitrary winner: naming the wrong order
-    // on an alert about money already taken is worse than naming none, and
-    // the merchant still gets the gateway event id to look it up with.
-    const byRef = new Map<string, (typeof byRefRows)[number] | 'ambiguous'>();
-    for (const row of byRefRows) {
-      const ref = row.providerRef;
-      if (ref === null) continue;
-      byRef.set(ref, byRef.has(ref) ? 'ambiguous' : row);
-    }
-
-    const items: PaymentAlertDTO[] = links.map(({ event, orderNumber, providerRef }) => {
-      const resolvedByNumber = orderNumber !== null ? (byNumber.get(orderNumber) ?? null) : null;
-      let resolvedByRef: (typeof byRefRows)[number] | null = null;
-      if (resolvedByNumber === null && providerRef !== null) {
-        const candidate = byRef.get(providerRef);
-        resolvedByRef = candidate !== undefined && candidate !== 'ambiguous' ? candidate : null;
-      }
-      const order = resolvedByNumber ?? resolvedByRef;
+    const items: PaymentAlertDTO[] = events.map((event) => {
+      // `null` for a row written before this column existed, and for the
+      // (unreachable for this result) case where the named order has since
+      // been deleted. Both render as "no pudimos identificar el pedido".
+      const order = event.orderId !== null ? (byId.get(event.orderId) ?? null) : null;
 
       const review = currentReviews.get(event.id) ?? null;
 
@@ -345,20 +288,8 @@ export class PaymentAlertsService {
         provider: event.provider,
         eventId: event.eventId,
         occurredAt: event.processedAt ?? event.createdAt,
-        // ONLY a real, resolved order of this merchant's — never the payload's
-        // unmatched claim. Previously this fell back to the claimed number,
-        // which let one row say "VNT-88888" and "no pudimos identificar el
-        // pedido" at the same time, i.e. show a merchant an order number that
-        // is not one of their orders. The claim itself is still available, and
-        // still useful, as `referencedOrderNumber` below — but under a name
-        // that says where it came from.
+        // ONLY a real, resolved order of this merchant's.
         orderNumber: order?.number ?? null,
-        // What the GATEWAY's payload named, resolved or not. Kept because it
-        // is a genuine lead when the lookup fails (Wompi's `reference` is
-        // signature-covered, so an unmatched one is still a true statement
-        // about what the gateway was told), and kept SEPARATE because it is
-        // the gateway's word rather than this merchant's order book.
-        referencedOrderNumber: orderNumber,
         amountCents: order?.totalCents ?? null,
         order: order
           ? {

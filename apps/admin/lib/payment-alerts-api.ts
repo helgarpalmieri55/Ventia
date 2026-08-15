@@ -36,12 +36,11 @@ export interface PaymentAlert {
   provider: string;
   eventId: string;
   occurredAt: string;
-  /** A REAL order of this merchant's, or null. Never the gateway's unmatched
-   * claim — that is `referencedOrderNumber`. */
+  /** A REAL order of this merchant's, or null. Null only for an event
+   * recorded before the API stored the order link (`WebhookEvent.orderId`);
+   * every alert written since resolves to the order the webhook handler
+   * itself matched. */
   orderNumber: number | null;
-  /** The order number the GATEWAY's payload named, matched or not. Rendered
-   * only ever as the gateway's own reference. */
-  referencedOrderNumber: number | null;
   amountCents: number | null;
   order: PaymentAlertOrder | null;
   /** The current review, or null while the alert is still pending. */

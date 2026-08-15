@@ -457,6 +457,36 @@ model WebhookEvent {
   result      String?
   createdAt   DateTime  @default(now())
 
+  // WHICH order this event was about, as resolved by the handler that
+  // processed it — the authoritative link, written once by
+  // services/api/src/payments/webhooks.controller.ts at the moment it already
+  // had the order in hand.
+  //
+  // This replaces re-deriving the link from `payload` after the fact, which is
+  // what the deleted `payment-alerts/webhook-links.ts` used to do. That
+  // approach needed per-provider knowledge of each gateway's body shape, was
+  // lossy (Mercado Pago's notification body carries no order reference AT ALL
+  // — just `{type, data:{id}}` — so those alerts could only be resolved via
+  // `Order.providerRef`, and only when one had been recorded), and read fields
+  // the handler had deliberately declined to trust. Recording what the handler
+  // actually resolved makes all three problems go away at once.
+  //
+  // Nullable, and genuinely so — three cases have no order by construction:
+  // an `invalid_reference` row (the reference never parsed), an
+  // `order_not_found` row (it parsed and matched nothing), and any future
+  // tenant-less writer. It is also null on every row written BEFORE this
+  // column existed; those are deliberately not backfilled, because the only
+  // way to backfill them is the payload re-derivation this column exists to
+  // retire. A legacy alert therefore renders as unidentified, carrying the
+  // gateway's own event id — the same thing the merchant already had.
+  //
+  // NOT a Prisma relation to `Order`, matching `InventoryMovement.orderId`
+  // above: a relation would imply a foreign key, and this table is the
+  // system's immutable record of what a gateway said — it must not acquire a
+  // constraint that could make a `WebhookEvent` row un-writable, or
+  // cascade-delete the evidence, because of the state of the order it names.
+  orderId     String?   @db.Uuid
+
   // Tenant-SCOPED idempotency key (widened from `@@unique([provider,
   // eventId])`, P3 wave-1 security fix 4). The old, global key was wrong for
   // an explicitly supported deployment shape: two Ventia tenants sharing ONE

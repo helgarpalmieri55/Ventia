@@ -217,13 +217,38 @@ export class WebhooksController {
       provider_tenantId_eventId: { provider: event.provider, tenantId, eventId: event.eventId },
     } as const;
 
+    /** WHICH order this event turned out to be about, once resolved below.
+     *
+     * Stays null until the reference has been matched to a real order of this
+     * tenant's, so the two branches that never get that far
+     * (`invalid_reference`, `order_not_found`) record a null — which is the
+     * true answer for them, not a missing one.
+     *
+     * A closure variable rather than a `markProcessed` parameter on purpose:
+     * every terminal branch after the resolution below is about an order that
+     * is already known, so threading it through ~6 call sites would add a way
+     * to forget it (and a way to pass the wrong one) in exchange for nothing.
+     */
+    let resolvedOrderId: string | null = null;
+
     /** Stamps this event's row as processed with an outcome. Every terminal
      * branch below goes through this — including the branches that
      * deliberately do NOT touch the order — because `processedAt` is now a
      * READ value (fix 5): an event left unstamped is one the next gateway
-     * retry will reprocess. */
+     * retry will reprocess.
+     *
+     * Also persists the resolved order link. That link is what the admin
+     * "pagos por revisar" page reads to tell a merchant WHICH order a
+     * `paid_order_not_settleable` charge was about; before this column it had
+     * to be re-derived from the stored payload per provider, which could not
+     * resolve Mercado Pago at all. Written here, in the same UPDATE as the
+     * outcome, so an event's disposition and the order it applied to can never
+     * disagree. */
     const markProcessed = async (result: string): Promise<void> => {
-      await platformDb.webhookEvent.update({ where: eventKey, data: { processedAt: new Date(), result } });
+      await platformDb.webhookEvent.update({
+        where: eventKey,
+        data: { processedAt: new Date(), result, orderId: resolvedOrderId },
+      });
     };
 
     // ---- fix 6: validate the reference BEFORE the idempotency row exists.
@@ -353,6 +378,17 @@ export class WebhooksController {
     const order = await tenantDb(tenantId).order.findFirst({
       where: { tenantId, number: Number(event.reference) },
     });
+
+    // Every `markProcessed` call from here down records this link. Set once,
+    // immediately after the lookup that establishes it, rather than at each
+    // terminal branch — including the branches that go on to REJECT the event
+    // (`amount_mismatch`, `currency_mismatch`). Recording the link there is
+    // correct and deliberate: "this event named this order and was refused" is
+    // a true, useful statement, and the `result` column is what carries the
+    // disposition. The alerts page only ever reads rows whose result is
+    // `paid_order_not_settleable`, so a rejected event's link is never
+    // presented to a merchant as a charge to act on.
+    resolvedOrderId = order?.id ?? null;
 
     if (!order) {
       // A validly-authenticated event whose reference doesn't match any of

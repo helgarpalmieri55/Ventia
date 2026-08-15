@@ -81,7 +81,13 @@ async function seedOrder(
 }
 
 /** Records one WebhookEvent exactly the way webhooks.controller.ts does —
- * `platformDb`, `payload` = the parsed raw delivery body. */
+ * `platformDb`, `payload` = the parsed raw delivery body, `orderId` = the
+ * order that handler resolved the event to.
+ *
+ * `orderId` is what the alerts list actually reads. `payload` is still seeded
+ * on every event because it is still stored in production, and several tests
+ * below exist precisely to prove it never escapes into a response — but it no
+ * longer decides anything, which is the point of the column. */
 async function seedWebhookEvent(
   tenantId: string | null,
   opts: {
@@ -89,6 +95,9 @@ async function seedWebhookEvent(
     eventId?: string;
     result?: string;
     payload: unknown;
+    /** Omitted = the handler resolved no order (`order_not_found`), or the row
+     * predates this column. Both list as unidentified. */
+    orderId?: string | null;
     processedAt?: Date | null;
   },
 ): Promise<string> {
@@ -98,6 +107,7 @@ async function seedWebhookEvent(
       eventId: opts.eventId ?? randomUUID(),
       tenantId,
       payload: opts.payload as never,
+      orderId: opts.orderId ?? null,
       processedAt: opts.processedAt === undefined ? new Date() : opts.processedAt,
       result: opts.result ?? 'paid_order_not_settleable',
     },
@@ -151,7 +161,7 @@ describe('GET /v1/admin/payment-alerts', () => {
     await seedWebhookEvent(tenantId, {
       provider: 'wompi',
       eventId: 'evt-wompi-1',
-      payload: wompiPayload(String(order.number)),
+      orderId: order.id, payload: wompiPayload(String(order.number)),
       processedAt,
     });
 
@@ -179,7 +189,7 @@ describe('GET /v1/admin/payment-alerts', () => {
   it('NEVER exposes the raw gateway payload', async () => {
     const { cookie, tenantId } = await signUpWithTenant('alerts-nopayload@demo.co', 'owner');
     const order = await seedOrder(tenantId);
-    await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    await seedWebhookEvent(tenantId, { orderId: order.id, payload: wompiPayload(String(order.number)) });
 
     const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
 
@@ -192,11 +202,12 @@ describe('GET /v1/admin/payment-alerts', () => {
     expect(res.body.items[0]).not.toHaveProperty('payload');
   });
 
-  it('resolves an ePayco event through x_extra1', async () => {
+  it('resolves an ePayco event through the stored order link', async () => {
     const { cookie, tenantId } = await signUpWithTenant('alerts-epayco@demo.co', 'owner');
     const order = await seedOrder(tenantId, { totalCents: 89_900, paymentProvider: 'epayco' });
     await seedWebhookEvent(tenantId, {
       provider: 'epayco',
+      orderId: order.id,
       payload: epaycoPayload(String(order.number)),
     });
 
@@ -208,22 +219,25 @@ describe('GET /v1/admin/payment-alerts', () => {
     expect(res.body.items[0].provider).toBe('epayco');
   });
 
-  it('resolves a Mercado Pago event through the order providerRef, since its payload carries no reference', async () => {
+  it('resolves a Mercado Pago event, whose payload carries no order reference at all', async () => {
+    // The case the stored link exists for. MP's delivered body is
+    // `{type, data:{id}}` — no external_reference, no amount. Re-deriving the
+    // link from the payload could therefore only ever go through
+    // `Order.providerRef`, and only when one had been recorded AND vouched
+    // for, so most MP alerts used to list with no order at all. The handler
+    // knew the order the whole time; it now records it, so MP resolves like
+    // every other provider and needs nothing stamped on the order.
     const { cookie, tenantId } = await signUpWithTenant('alerts-mp@demo.co', 'owner');
-    const paymentId = '1234567890';
     const order = await seedOrder(tenantId, {
       totalCents: 42_000,
       paymentProvider: 'mercadopago',
-      providerRef: paymentId,
-      // Reachable for real: markFailed stamps 'verified' on a first, declined
-      // attempt, the expiry worker then cancels the order, and the SAME
-      // payment id is later approved — so the ref the gateway already vouched
-      // for is exactly the one this alert's payload names.
-      providerRefSource: 'verified',
+      providerRef: null,
+      providerRefSource: null,
     });
     await seedWebhookEvent(tenantId, {
       provider: 'mercadopago',
-      payload: mercadoPagoPayload(paymentId),
+      orderId: order.id,
+      payload: mercadoPagoPayload('1234567890'),
     });
 
     const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
@@ -234,22 +248,22 @@ describe('GET /v1/admin/payment-alerts', () => {
     expect(res.body.items[0].amountCents).toBe(42_000);
   });
 
-  it('refuses to name an order when two of them share the same providerRef', async () => {
+  it('names the linked order even when another order shares its providerRef', async () => {
     // `Order.providerRef` has no uniqueness constraint and three independent
-    // writers, so a collision is possible. Guessing between them would put
-    // the WRONG order (and the wrong amount) on an alert about money already
-    // taken — worse than admitting we don't know.
+    // writers, so a collision is possible. The old payload-derived lookup had
+    // to detect that and deliberately resolve to NOTHING rather than guess.
+    // Resolving by primary key cannot be ambiguous, so the collision simply
+    // stops mattering — and the alert names the right order instead of
+    // degrading to "no identificado".
     const { cookie, tenantId } = await signUpWithTenant('alerts-ambiguous@demo.co', 'owner');
     const sharedRef = 'shared-provider-ref-1';
-    // Both 'verified', so this test still exercises AMBIGUITY rather than
-    // being short-circuited by the provenance gate below.
-    await seedOrder(tenantId, {
+    const linked = await seedOrder(tenantId, {
       totalCents: 11_100,
       providerRef: sharedRef,
       providerRefSource: 'verified',
       paymentProvider: 'mercadopago',
     });
-    await seedOrder(tenantId, {
+    const decoy = await seedOrder(tenantId, {
       totalCents: 22_200,
       providerRef: sharedRef,
       providerRefSource: 'verified',
@@ -258,6 +272,7 @@ describe('GET /v1/admin/payment-alerts', () => {
     await seedWebhookEvent(tenantId, {
       provider: 'mercadopago',
       eventId: 'ambiguous-ref',
+      orderId: linked.id,
       payload: mercadoPagoPayload(sharedRef),
     });
 
@@ -265,16 +280,21 @@ describe('GET /v1/admin/payment-alerts', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.total).toBe(1);
-    expect(res.body.items[0].order).toBeNull();
-    expect(res.body.items[0].amountCents).toBeNull();
-    expect(res.body.items[0].eventId).toBe('ambiguous-ref');
+    expect(res.body.items[0].order?.id).toBe(linked.id);
+    expect(res.body.items[0].order?.id).not.toBe(decoy.id);
+    expect(res.body.items[0].amountCents).toBe(11_100);
   });
 
-  it('still lists an event whose order cannot be resolved, with null order/amount', async () => {
+  it('still lists an event whose order was never resolved, with null order/amount', async () => {
+    // A row the handler recorded without ever matching an order — and the same
+    // shape a row written before `WebhookEvent.orderId` existed has. It must
+    // still LIST: hiding a row about money a shopper was charged is the one
+    // outcome this whole feature exists to prevent.
     const { cookie, tenantId } = await signUpWithTenant('alerts-unresolved@demo.co', 'owner');
     await seedWebhookEvent(tenantId, {
       provider: 'mercadopago',
       eventId: 'mp-orphan:approved',
+      orderId: null,
       payload: mercadoPagoPayload('no-such-payment'),
     });
 
@@ -294,7 +314,7 @@ describe('GET /v1/admin/payment-alerts', () => {
     const { cookie, tenantId } = await signUpWithTenant('alerts-otherresults@demo.co', 'owner');
     const order = await seedOrder(tenantId);
     for (const result of ['confirmed', 'amount_mismatch', 'order_not_found', 'currency_mismatch', 'failed']) {
-      await seedWebhookEvent(tenantId, { result, payload: wompiPayload(String(order.number)) });
+      await seedWebhookEvent(tenantId, { result, orderId: order.id, payload: wompiPayload(String(order.number)) });
     }
 
     const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
@@ -316,7 +336,7 @@ describe('GET /v1/admin/payment-alerts', () => {
   it('is reachable by a staff session, not only the owner', async () => {
     const { cookie, tenantId } = await signUpWithTenant('alerts-staff@demo.co', 'staff');
     const order = await seedOrder(tenantId);
-    await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    await seedWebhookEvent(tenantId, { orderId: order.id, payload: wompiPayload(String(order.number)) });
 
     const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
 
@@ -335,7 +355,7 @@ describe('GET /v1/admin/payment-alerts', () => {
       const order = await seedOrder(tenantId);
       await seedWebhookEvent(tenantId, {
         eventId: `paging-${i}`,
-        payload: wompiPayload(String(order.number)),
+        orderId: order.id, payload: wompiPayload(String(order.number)),
         processedAt: new Date(Date.UTC(2026, 7, 10 + i)),
       });
     }
@@ -380,7 +400,7 @@ describe('GET /v1/admin/payment-alerts', () => {
       const order = await seedOrder(tenantId);
       await seedWebhookEvent(tenantId, {
         eventId: `tie-${i}`,
-        payload: wompiPayload(String(order.number)),
+        orderId: order.id, payload: wompiPayload(String(order.number)),
         processedAt: sameInstant,
       });
     }
@@ -402,22 +422,26 @@ describe('GET /v1/admin/payment-alerts', () => {
   });
 });
 
-describe('payment alerts — providerRef provenance', () => {
-  // schema.prisma is explicit that `Order.providerRefSource = 'hint'` is
-  // written by the deliberately-unauthenticated hint endpoint and is
-  // "attacker-controlled by assumption", and that NULL is "treated exactly
-  // like 'hint' (untrusted) by every consumer: fail closed, never open".
-  // reconciliation.worker.ts honours that; this module must too, because it
-  // is where an order's total is shown to the merchant as "Monto cobrado" —
-  // the amount they are told a shopper was charged.
+describe('payment alerts — the link ignores everything except the stored orderId', () => {
+  // These tests used to assert a `providerRefSource` gate. That gate existed
+  // because the link was RE-DERIVED from the stored payload, which meant it
+  // could land on an order via `Order.providerRef` — a column schema.prisma
+  // calls "attacker-controlled by assumption", since the unauthenticated hint
+  // endpoint writes it. The gate made an untrusted ref resolve to nothing.
+  //
+  // The link is no longer derived from anything: `WebhookEvent.orderId` is
+  // written by the webhook handler from its own authenticated lookup. So the
+  // gate is gone, and these tests now assert the stronger property that
+  // replaced it — the payload and `providerRef` cannot influence which order
+  // an alert names, whatever they contain.
 
-  it('refuses to resolve an order through a HINT-sourced providerRef', async () => {
+  it('ignores a planted HINT-sourced providerRef entirely', async () => {
     const { cookie, tenantId } = await signUpWithTenant('alerts-hint@demo.co', 'owner');
     const plantedRef = 'mp-planted-99';
-    // A DELIVERED/PAID order — exactly the shape the reviewer planted live,
-    // which contradicts the alert's own premise and would have been shown
-    // with an authoritative "Monto cobrado".
-    await seedOrder(tenantId, {
+    // A DELIVERED/PAID order — the shape a reviewer planted live. Under the
+    // old derived link this contradicted the alert's own premise and rendered
+    // "refund the duplicate" against a legitimate single payment.
+    const planted = await seedOrder(tenantId, {
       status: 'DELIVERED',
       paymentStatus: 'PAID',
       totalCents: 999_000,
@@ -425,9 +449,12 @@ describe('payment alerts — providerRef provenance', () => {
       providerRefSource: 'hint',
       paymentProvider: 'mercadopago',
     });
+    // The event names the planted ref in its payload and is linked to NO
+    // order, which is what the handler records when it resolved none.
     await seedWebhookEvent(tenantId, {
       provider: 'mercadopago',
       eventId: 'hint-sourced',
+      orderId: null,
       payload: mercadoPagoPayload(plantedRef),
     });
 
@@ -439,62 +466,59 @@ describe('payment alerts — providerRef provenance', () => {
     expect(alert.order).toBeNull();
     expect(alert.orderNumber).toBeNull();
     // The money-shaped field is the whole point: no authoritative-looking
-    // amount may be derived from a link the codebase does not trust.
+    // amount may appear from a link nothing vouched for.
     expect(alert.amountCents).toBeNull();
+    expect(alert.amountCents).not.toBe(999_000);
+    expect(JSON.stringify(res.body)).not.toContain(planted.id);
     // The alert itself still lists, with the gateway's own id to look up.
     expect(alert.eventId).toBe('hint-sourced');
   });
 
-  it('fails closed on a NULL providerRefSource, exactly like a hint', async () => {
+  it('resolves a linked order regardless of its providerRefSource', async () => {
+    // The gate's former cost, now gone: an order whose ref provenance is
+    // unknown (NULL) is still named, because the link no longer comes from
+    // the ref at all. Under the gate this listed as unidentified.
     const { cookie, tenantId } = await signUpWithTenant('alerts-nullsource@demo.co', 'owner');
-    const ref = 'mp-unknown-provenance';
-    await seedOrder(tenantId, {
+    const order = await seedOrder(tenantId, {
       totalCents: 555_000,
-      providerRef: ref,
+      providerRef: 'mp-unknown-provenance',
       providerRefSource: null,
       paymentProvider: 'mercadopago',
     });
     await seedWebhookEvent(tenantId, {
       provider: 'mercadopago',
       eventId: 'null-sourced',
-      payload: mercadoPagoPayload(ref),
+      orderId: order.id,
+      payload: mercadoPagoPayload('mp-unknown-provenance'),
     });
 
     const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
 
-    expect(res.body.items[0].order).toBeNull();
-    expect(res.body.items[0].amountCents).toBeNull();
+    expect(res.body.items[0].order?.id).toBe(order.id);
+    expect(res.body.items[0].amountCents).toBe(555_000);
   });
 
-  it('still resolves a VERIFIED providerRef', async () => {
-    const { cookie, tenantId } = await signUpWithTenant('alerts-verifiedsource@demo.co', 'owner');
-    const ref = 'mp-verified-1';
-    const order = await seedOrder(tenantId, {
-      totalCents: 31_000,
-      providerRef: ref,
-      providerRefSource: 'verified',
-      paymentProvider: 'mercadopago',
+  it('names the LINKED order even when the payload names a different one', async () => {
+    // The sharpest version of the property: payload and link disagree on
+    // purpose. The stored link must win — otherwise the gateway body would
+    // still be steering which order a merchant is told to act on.
+    const { cookie, tenantId } = await signUpWithTenant('alerts-payloadconflict@demo.co', 'owner');
+    const linked = await seedOrder(tenantId, { totalCents: 12_300 });
+    const decoy = await seedOrder(tenantId, { totalCents: 987_600 });
+    await seedWebhookEvent(tenantId, {
+      provider: 'wompi',
+      eventId: 'payload-conflict',
+      orderId: linked.id,
+      // The payload names the DECOY's order number.
+      payload: wompiPayload(String(decoy.number)),
     });
-    await seedWebhookEvent(tenantId, { provider: 'mercadopago', payload: mercadoPagoPayload(ref) });
 
     const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
 
-    expect(res.body.items[0].order?.id).toBe(order.id);
-    expect(res.body.items[0].amountCents).toBe(31_000);
-  });
-
-  it('does NOT gate the order-NUMBER path, which never consults providerRef', async () => {
-    // Wompi/ePayco name the order by its own number in a signature-covered
-    // field. That link has nothing to do with `providerRefSource`, and
-    // gating it would blind the merchant on the dominant case for no gain.
-    const { cookie, tenantId } = await signUpWithTenant('alerts-numberpath@demo.co', 'owner');
-    const order = await seedOrder(tenantId, { totalCents: 77_000, providerRefSource: null });
-    await seedWebhookEvent(tenantId, { provider: 'wompi', payload: wompiPayload(String(order.number)) });
-
-    const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
-
-    expect(res.body.items[0].order?.id).toBe(order.id);
-    expect(res.body.items[0].amountCents).toBe(77_000);
+    expect(res.body.items[0].order?.id).toBe(linked.id);
+    expect(res.body.items[0].orderNumber).toBe(linked.number);
+    expect(res.body.items[0].amountCents).toBe(12_300);
+    expect(res.body.items[0].orderNumber).not.toBe(decoy.number);
   });
 });
 
@@ -512,6 +536,7 @@ describe('payment alerts — tenant isolation', () => {
 
     await seedWebhookEvent(b.tenantId, {
       eventId: 'tenant-b-only',
+      orderId: orderB.id,
       payload: wompiPayload(String(sharedNumber)),
     });
 
@@ -527,6 +552,42 @@ describe('payment alerts — tenant isolation', () => {
     // Resolved against B's OWN order, not A's same-numbered one.
     expect(asB.body.items[0].order.id).toBe(orderB.id);
     expect(asB.body.items[0].amountCents).toBe(777_000);
+  });
+
+  it('refuses to follow an orderId that points across the tenant boundary', async () => {
+    // `WebhookEvent.orderId` deliberately has no foreign key (this table is
+    // the system's record of what a gateway said, and must never be made
+    // un-writable by the state of an order), so nothing at the schema level
+    // stops a row from naming another tenant's order. The order lookup runs
+    // through `tenantDb`, which AND-scopes it and runs under RLS, so such a
+    // link must resolve to NOTHING rather than reach across.
+    //
+    // This is the failure that would matter most if it existed: it would
+    // attach one merchant's payment — and their customer's email and order
+    // total — to another merchant's alerts page.
+    const a = await signUpWithTenant('alerts-crosslink-a@demo.co', 'owner');
+    const b = await signUpWithTenant('alerts-crosslink-b@demo.co', 'owner');
+    const ordersA = await seedOrder(a.tenantId, { totalCents: 424_242 });
+
+    // B's event, linked to A's order.
+    await seedWebhookEvent(b.tenantId, {
+      eventId: 'cross-tenant-link',
+      orderId: ordersA.id,
+      payload: wompiPayload(String(ordersA.number)),
+    });
+
+    const asB = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', b.cookie);
+
+    expect(asB.status).toBe(200);
+    // The alert still LISTS — it is B's own event and hiding it would hide a
+    // charge — but names no order and no amount.
+    expect(asB.body.total).toBe(1);
+    expect(asB.body.items[0].eventId).toBe('cross-tenant-link');
+    expect(asB.body.items[0].order).toBeNull();
+    expect(asB.body.items[0].orderNumber).toBeNull();
+    expect(asB.body.items[0].amountCents).toBeNull();
+    expect(JSON.stringify(asB.body)).not.toContain(ordersA.id);
+    expect(JSON.stringify(asB.body)).not.toContain('424242');
   });
 
   it('never surfaces a tenant-less webhook event to anyone', async () => {
@@ -582,7 +643,7 @@ describe('POST /v1/admin/payment-alerts/:id/review', () => {
     const order = await seedOrder(tenantId, { totalCents: 120_000 });
     const eventId = await seedWebhookEvent(tenantId, {
       eventId: 'review-basic-evt',
-      payload: wompiPayload(String(order.number)),
+      orderId: order.id, payload: wompiPayload(String(order.number)),
     });
 
     // Before: the alarm is on.
@@ -621,7 +682,7 @@ describe('POST /v1/admin/payment-alerts/:id/review', () => {
   it('accepts a review with no note, and rejects an unknown action', async () => {
     const { cookie, tenantId } = await signUpWithTenant('review-validation@demo.co', 'owner');
     const order = await seedOrder(tenantId);
-    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    const eventId = await seedWebhookEvent(tenantId, { orderId: order.id, payload: wompiPayload(String(order.number)) });
 
     const bad = await request(app.getHttpServer())
       .post(`/v1/admin/payment-alerts/${eventId}/review`)
@@ -642,7 +703,7 @@ describe('POST /v1/admin/payment-alerts/:id/review', () => {
     const order = await seedOrder(tenantId);
     const eventId = await seedWebhookEvent(tenantId, {
       eventId: 'review-undo-evt',
-      payload: wompiPayload(String(order.number)),
+      orderId: order.id, payload: wompiPayload(String(order.number)),
     });
 
     await request(app.getHttpServer())
@@ -681,7 +742,7 @@ describe('POST /v1/admin/payment-alerts/:id/review', () => {
   it('takes the LATEST review as current state, so a re-review re-silences it', async () => {
     const { cookie, tenantId } = await signUpWithTenant('review-latest@demo.co', 'owner');
     const order = await seedOrder(tenantId);
-    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    const eventId = await seedWebhookEvent(tenantId, { orderId: order.id, payload: wompiPayload(String(order.number)) });
 
     for (const action of ['no_action_needed', 'reopened', 'refunded']) {
       const res = await request(app.getHttpServer())
@@ -704,7 +765,7 @@ describe('POST /v1/admin/payment-alerts/:id/review', () => {
   it('records the STAFF member who acted, not just the owner', async () => {
     const { cookie, tenantId } = await signUpWithTenant('review-staff@demo.co', 'staff');
     const order = await seedOrder(tenantId);
-    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    const eventId = await seedWebhookEvent(tenantId, { orderId: order.id, payload: wompiPayload(String(order.number)) });
 
     await request(app.getHttpServer())
       .post(`/v1/admin/payment-alerts/${eventId}/review`)
@@ -729,7 +790,7 @@ describe('POST /v1/admin/payment-alerts/:id/review', () => {
     const order = await seedOrder(tenantId);
     const confirmedId = await seedWebhookEvent(tenantId, {
       result: 'confirmed',
-      payload: wompiPayload(String(order.number)),
+      orderId: order.id, payload: wompiPayload(String(order.number)),
     });
 
     const notAnAlert = await request(app.getHttpServer())
@@ -752,7 +813,7 @@ describe('WebhookEventReview — append-only, enforced by Postgres', () => {
   /** Files one review row through the real endpoint and hands back its id. */
   async function seedReview(cookie: string, tenantId: string): Promise<string> {
     const order = await seedOrder(tenantId);
-    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    const eventId = await seedWebhookEvent(tenantId, { orderId: order.id, payload: wompiPayload(String(order.number)) });
     await request(app.getHttpServer())
       .post(`/v1/admin/payment-alerts/${eventId}/review`)
       .set('cookie', cookie)
@@ -820,7 +881,7 @@ describe('WebhookEventReview — append-only, enforced by Postgres', () => {
   it('still allows the INSERT that the append-only design depends on', async () => {
     const { tenantId } = await signUpWithTenant('review-caninsert@demo.co', 'owner');
     const order = await seedOrder(tenantId);
-    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    const eventId = await seedWebhookEvent(tenantId, { orderId: order.id, payload: wompiPayload(String(order.number)) });
     const { tenantDb } = (await import('@ventia/db')) as unknown as {
       tenantDb: (id: string) => { webhookEventReview: { create: (a: unknown) => Promise<{ id: string }> } };
     };
