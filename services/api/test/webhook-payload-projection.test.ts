@@ -75,3 +75,30 @@ describe('projectWebhookLinks — unknown provider', () => {
     });
   });
 });
+
+describe('projectWebhookLinks — providerRef length bound', () => {
+  it('rejects an absurdly long id instead of carrying it into an IN list', () => {
+    // The value arrives from a remote payload and ends up as a query
+    // parameter matched against Order.providerRef. A 200 KB "id" can never
+    // match a real gateway reference, so accepting it is pure downside.
+    const huge = 'x'.repeat(200_000);
+    expect(projectWebhookLinks('mercadopago', { data: { id: huge } }).providerRef).toBeNull();
+    expect(projectWebhookLinks('wompi', { data: { transaction: { id: huge, reference: '7' } } })).toEqual({
+      // The order number still reads fine — one over-long field degrades to
+      // null on its own rather than discarding the whole payload.
+      orderNumber: 7,
+      providerRef: null,
+    });
+    expect(projectWebhookLinks('epayco', { x_ref_payco: huge, x_extra1: '8' }).providerRef).toBeNull();
+  });
+
+  it('accepts real-world gateway reference lengths unchanged', () => {
+    // Wompi ~20 chars, ePayco numeric, MP ~11 digits — all far inside the
+    // bound. A boundary-length value is still accepted; one char more is not.
+    expect(projectWebhookLinks('wompi', { data: { transaction: { id: '1234-1699999999-12345' } } }).providerRef).toBe(
+      '1234-1699999999-12345',
+    );
+    expect(projectWebhookLinks('mercadopago', { data: { id: 'y'.repeat(128) } }).providerRef).toBe('y'.repeat(128));
+    expect(projectWebhookLinks('mercadopago', { data: { id: 'y'.repeat(129) } }).providerRef).toBeNull();
+  });
+});

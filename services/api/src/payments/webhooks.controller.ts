@@ -281,17 +281,29 @@ export class WebhooksController {
     }
 
     // WebhookEvent deliberately goes through platformDb, NOT tenantDb.
-    // WebhookEvent has no RLS policy at all — the `ventia_app` role tenantDb
-    // switches to has ALL PRIVILEGES explicitly REVOKED on this table
-    // (packages/db/prisma/migrations/20260723205801_revoke_ventia_app_system_tables),
-    // the same treatment AuditLog gets (see catalog/audit.ts's identical
-    // platformDb-direct pattern) — both are the system's own record of
-    // events, not a tenant-owned catalog/order row, and `tenantId` on this
-    // model is optional precisely because some webhook events are
-    // genuinely tenant-less. For THIS controller tenantId is always known
-    // from the URL, so it's passed through explicitly on the create call
+    //
+    // The `ventia_app` role tenantDb switches to holds exactly SELECT on this
+    // table, and NOTHING else — no INSERT, no UPDATE, no DELETE. It started
+    // with ALL PRIVILEGES revoked
+    // (20260723205801_revoke_ventia_app_system_tables); the read was granted
+    // back, alone, by 20260815120000_webhook_event_tenant_read, which also
+    // enabled a `FOR SELECT` RLS policy scoped to `app.tenant_id` so a tenant
+    // sees only its own rows. That grant exists so merchants can be shown
+    // their `paid_order_not_settleable` alerts (services/api/src/
+    // payment-alerts/) — a read-only surface over what this handler records.
+    //
+    // So this create MUST stay on platformDb: it is a WRITE, and the write
+    // privilege was deliberately not granted back. That asymmetry is the
+    // point — this table is the system's own record of what a gateway told
+    // us, and no tenant-scoped code can amend it. (AuditLog gets the stricter
+    // original treatment, with no grant at all; see catalog/audit.ts's
+    // identical platformDb-direct pattern.)
+    //
+    // `tenantId` on this model is optional precisely because some webhook
+    // events are genuinely tenant-less. For THIS controller tenantId is always
+    // known from the URL, so it's passed through explicitly on the create call
     // rather than relying on any RLS scoping tenantDb would otherwise add
-    // (which isn't available here anyway).
+    // (which doesn't apply to the owner connection anyway).
     try {
       await platformDb.webhookEvent.create({
         data: {

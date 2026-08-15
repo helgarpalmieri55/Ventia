@@ -37,8 +37,15 @@ STOREFRONT_LOG="$LOG_DIR/storefront.log"
 : "${S3_SECRET_KEY:=ventia-secret}"
 : "${S3_BUCKET:=ventia}"
 : "${S3_PUBLIC_URL:=http://localhost:9000/ventia}"
+# Required by @ventia/core's env schema since P3a — without it the API exits
+# at boot with "Invalid environment: PAYMENTS_ENCRYPTION_KEY: Required" and
+# this script fails at the 90s health-check wait with no obvious cause. A
+# fixed, obviously-fake dev key rather than a generated one, so reruns can
+# decrypt credentials seeded by a previous run; override it for any
+# environment where that matters. AES-256-GCM wants a base64 32-byte value.
+: "${PAYMENTS_ENCRYPTION_KEY:=ZGV2LW9ubHktZTJlLWtleS0zMi1ieXRlcy1sb25nISE=}"
 export DATABASE_URL REDIS_URL AUTH_SECRET API_URL API_INTERNAL_URL ADMIN_URL PLATFORM_ROOT_DOMAIN
-export S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_BUCKET S3_PUBLIC_URL
+export S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_BUCKET S3_PUBLIC_URL PAYMENTS_ENCRYPTION_KEY
 
 echo "==> Checking the dev stack (postgres/redis/caddy/minio) is up..."
 for name in docker-postgres-1 docker-redis-1 docker-caddy-1 docker-minio-1; do

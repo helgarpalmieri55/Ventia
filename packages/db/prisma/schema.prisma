@@ -489,6 +489,90 @@ model WebhookEvent {
   @@index([tenantId, result, processedAt(sort: Desc)])
 }
 
+// What a merchant DID about a `paid_order_not_settleable` alert. A small
+// closed set rather than free text, because the whole point of the review
+// record is that it can be read back later by someone who was not there:
+// "otro" + a note degrades gracefully, but the four real outcomes stay
+// countable and unambiguous.
+//
+// `reopened` is the odd one out and deliberately lives in the same enum: it
+// is still a statement about what a person did ("this was marked reviewed by
+// mistake — it is not handled"), and keeping it here is what lets the whole
+// history be one append-only sequence with no second mechanism. It is the
+// ONLY value that moves an alert back OUT of "Revisados" — see
+// `WebhookEventReview`'s comment on how current state is derived.
+enum WebhookEventReviewAction {
+  refunded
+  order_taken_again
+  no_action_needed
+  other
+  reopened
+}
+
+/// An APPEND-ONLY, tenant-owned record of a merchant reviewing one
+/// `WebhookEvent` alert. Deliberately a separate table rather than a column
+/// on `WebhookEvent`:
+///
+/// `WebhookEvent` is the system's own immutable statement of what a gateway
+/// told us — `ventia_app` holds SELECT on it and nothing else (migration
+/// 20260815120000), and writes stay on the owner connection. Letting a
+/// merchant amend that row to silence an alarm would destroy exactly the
+/// record the alarm exists to protect. So the merchant's own account of what
+/// they did lives HERE, alongside it, and the two are never confused: one is
+/// what the gateway said, the other is what a human claims to have done
+/// about it.
+///
+/// ## Append-only, enforced by Postgres
+///
+/// Migration 20260815140000 grants `ventia_app` SELECT + INSERT on this table
+/// and REVOKEs UPDATE/DELETE, and its RLS policies are `FOR SELECT` / `FOR
+/// INSERT` only. A tenant can therefore add to this history and read it back,
+/// and can never rewrite or erase a row of it — not even through a service
+/// that tried to. That is the same posture `WebhookEvent` itself gets, for
+/// the same reason: a financial discrepancy must never be able to vanish
+/// without a trace.
+///
+/// ## Current state is DERIVED, never stored
+///
+/// There is no `reviewed` boolean anywhere. An alert's current state is the
+/// LATEST row here for that event (`createdAt DESC, id DESC`): reviewed
+/// unless that latest row's action is `reopened`. Undo is therefore just
+/// another append — never an UPDATE, never a DELETE — so the full history of
+/// who said what, and when, survives every correction.
+///
+/// ## Why the reviewer is denormalized
+///
+/// `reviewedByEmail` is a SNAPSHOT, not a join. Two reasons: `User` and
+/// `Membership` have ALL PRIVILEGES revoked from `ventia_app`
+/// (20260723205801), so tenant-scoped code genuinely cannot join to them; and
+/// an audit row should say who acted at the time even after that person's
+/// staff account is removed from the store.
+///
+/// Follows `StaffInvite`'s shape — plain `tenantId`/`webhookEventId` columns
+/// with no Prisma relation and no FK, which is this schema's convention for
+/// tenant-owned side tables. The service validates that the referenced event
+/// is visible to this tenant (through the RLS-scoped client) BEFORE inserting,
+/// which is the check that actually matters; a FK would only prove the row
+/// exists somewhere, not that it is this merchant's to review.
+model WebhookEventReview {
+  id               String                   @id @default(uuid()) @db.Uuid
+  tenantId         String                   @db.Uuid
+  webhookEventId   String                   @db.Uuid
+  action           WebhookEventReviewAction
+  /// Optional free-text detail from the merchant (e.g. a refund receipt id).
+  /// Never a substitute for `action` — it is unstructured and nobody counts it.
+  note             String?
+  /// WHO acted. `reviewedByUserId` is the durable identity;
+  /// `reviewedByEmail` is the human-readable snapshot (see above).
+  reviewedByUserId String                   @db.Uuid
+  reviewedByEmail  String
+  createdAt        DateTime                 @default(now())
+
+  // Backs both reads this table has: "the latest review per event" (the list's
+  // batched lookup) and the "Revisados" section's ordering.
+  @@index([tenantId, webhookEventId, createdAt(sort: Desc)])
+}
+
 // ---- Agent ----
 model Conversation {
   id         String              @id @default(uuid()) @db.Uuid

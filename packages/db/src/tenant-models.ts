@@ -17,4 +17,13 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   // simply never matches a tenant-less row — correct, since no merchant owns
   // one. A tenantDb WRITE here fails on the missing grant, by design.
   'WebhookEvent',
+  // APPEND-ONLY for tenants. `ventia_app` holds SELECT + INSERT and has
+  // UPDATE/DELETE revoked, and the RLS policies are `FOR SELECT` / `FOR
+  // INSERT` only (see 20260815140000_webhook_event_review). Listing it here
+  // injects `AND tenantId = t` on reads and is what makes a tenant-scoped
+  // insert carry the right `tenantId`; the database enforces both
+  // independently. There is deliberately no code path that updates or
+  // deletes one of these rows — an alert marked reviewed by mistake is
+  // corrected by APPENDING a `reopened` row, never by rewriting history.
+  'WebhookEventReview',
 ]);

@@ -82,11 +82,22 @@ function toOrderNumber(value: unknown): number | null {
   return parsed <= MAX_ORDER_NUMBER ? parsed : null;
 }
 
+/** No real gateway transaction id comes close to this. Wompi's are ~20 chars,
+ * ePayco's `x_ref_payco` is numeric, Mercado Pago's payment ids are ~11
+ * digits. The bound exists because the value arrives from a remote payload
+ * and lands in an `IN (...)` list against `Order.providerRef`: without it, a
+ * 200 KB string in `data.id` is faithfully carried into a query parameter,
+ * which is pointless work at best (it can never match a real ref) and an easy
+ * amplification lever at worst. Over-long is treated as "no usable ref" —
+ * the same degradation as every other failure in this file. */
+const MAX_PROVIDER_REF_LENGTH = 128;
+
 function toProviderRef(value: unknown): string | null {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  if (trimmed.length === 0 || trimmed.length > MAX_PROVIDER_REF_LENGTH) return null;
+  return trimmed;
 }
 
 export function projectWebhookLinks(provider: string, payload: unknown): WebhookLinks {

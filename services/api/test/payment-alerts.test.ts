@@ -52,6 +52,7 @@ async function seedOrder(
     paymentStatus: PaymentStatus;
     totalCents: number;
     providerRef: string | null;
+    providerRefSource: string | null;
     paymentProvider: string | null;
   }> = {},
 ): Promise<{ id: string; number: number }> {
@@ -64,6 +65,10 @@ async function seedOrder(
       paymentStatus: overrides.paymentStatus ?? 'PENDING',
       paymentProvider: overrides.paymentProvider ?? 'wompi',
       providerRef: overrides.providerRef ?? null,
+      // Defaults to NULL — "unknown provenance", which schema.prisma says
+      // every consumer must treat exactly like 'hint' (untrusted). Tests that
+      // want a providerRef to actually resolve must say 'verified' out loud.
+      providerRefSource: overrides.providerRefSource ?? null,
       email: 'comprador@example.com',
       phone: '3000000000',
       shippingAddress: {},
@@ -210,6 +215,11 @@ describe('GET /v1/admin/payment-alerts', () => {
       totalCents: 42_000,
       paymentProvider: 'mercadopago',
       providerRef: paymentId,
+      // Reachable for real: markFailed stamps 'verified' on a first, declined
+      // attempt, the expiry worker then cancels the order, and the SAME
+      // payment id is later approved — so the ref the gateway already vouched
+      // for is exactly the one this alert's payload names.
+      providerRefSource: 'verified',
     });
     await seedWebhookEvent(tenantId, {
       provider: 'mercadopago',
@@ -231,8 +241,20 @@ describe('GET /v1/admin/payment-alerts', () => {
     // taken — worse than admitting we don't know.
     const { cookie, tenantId } = await signUpWithTenant('alerts-ambiguous@demo.co', 'owner');
     const sharedRef = 'shared-provider-ref-1';
-    await seedOrder(tenantId, { totalCents: 11_100, providerRef: sharedRef, paymentProvider: 'mercadopago' });
-    await seedOrder(tenantId, { totalCents: 22_200, providerRef: sharedRef, paymentProvider: 'mercadopago' });
+    // Both 'verified', so this test still exercises AMBIGUITY rather than
+    // being short-circuited by the provenance gate below.
+    await seedOrder(tenantId, {
+      totalCents: 11_100,
+      providerRef: sharedRef,
+      providerRefSource: 'verified',
+      paymentProvider: 'mercadopago',
+    });
+    await seedOrder(tenantId, {
+      totalCents: 22_200,
+      providerRef: sharedRef,
+      providerRefSource: 'verified',
+      paymentProvider: 'mercadopago',
+    });
     await seedWebhookEvent(tenantId, {
       provider: 'mercadopago',
       eventId: 'ambiguous-ref',
@@ -344,6 +366,136 @@ describe('GET /v1/admin/payment-alerts', () => {
     expect(garbage.body.page).toBe(1);
     expect(garbage.body.pageSize).toBe(20);
   });
+
+  it('paginates deterministically when every row shares one timestamp', async () => {
+    // `processedAt` and `createdAt` are BOTH non-unique and both stamped
+    // within one request, so a burst can share a millisecond. Without a
+    // unique final tiebreak, Postgres may order the ties differently between
+    // the page-1 and page-2 queries — silently duplicating one row across
+    // pages and dropping another entirely. On a list of "shoppers who were
+    // charged for nothing", a dropped row is a customer nobody refunds.
+    const { cookie, tenantId } = await signUpWithTenant('alerts-tiebreak@demo.co', 'owner');
+    const sameInstant = new Date('2026-08-12T00:00:00.000Z');
+    for (let i = 0; i < 6; i += 1) {
+      const order = await seedOrder(tenantId);
+      await seedWebhookEvent(tenantId, {
+        eventId: `tie-${i}`,
+        payload: wompiPayload(String(order.number)),
+        processedAt: sameInstant,
+      });
+    }
+
+    const seen: string[] = [];
+    for (const page of [1, 2, 3]) {
+      const res = await request(app.getHttpServer())
+        .get(`/v1/admin/payment-alerts?page=${page}&pageSize=2`)
+        .set('cookie', cookie);
+      expect(res.status).toBe(200);
+      seen.push(...res.body.items.map((a: { eventId: string }) => a.eventId));
+    }
+
+    // Every row seen exactly once across the three pages: no duplicates, no
+    // gaps.
+    expect(seen).toHaveLength(6);
+    expect(new Set(seen).size).toBe(6);
+    expect([...seen].sort()).toEqual(['tie-0', 'tie-1', 'tie-2', 'tie-3', 'tie-4', 'tie-5']);
+  });
+});
+
+describe('payment alerts — providerRef provenance', () => {
+  // schema.prisma is explicit that `Order.providerRefSource = 'hint'` is
+  // written by the deliberately-unauthenticated hint endpoint and is
+  // "attacker-controlled by assumption", and that NULL is "treated exactly
+  // like 'hint' (untrusted) by every consumer: fail closed, never open".
+  // reconciliation.worker.ts honours that; this module must too, because it
+  // is where an order's total is shown to the merchant as "Monto cobrado" —
+  // the amount they are told a shopper was charged.
+
+  it('refuses to resolve an order through a HINT-sourced providerRef', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('alerts-hint@demo.co', 'owner');
+    const plantedRef = 'mp-planted-99';
+    // A DELIVERED/PAID order — exactly the shape the reviewer planted live,
+    // which contradicts the alert's own premise and would have been shown
+    // with an authoritative "Monto cobrado".
+    await seedOrder(tenantId, {
+      status: 'DELIVERED',
+      paymentStatus: 'PAID',
+      totalCents: 999_000,
+      providerRef: plantedRef,
+      providerRefSource: 'hint',
+      paymentProvider: 'mercadopago',
+    });
+    await seedWebhookEvent(tenantId, {
+      provider: 'mercadopago',
+      eventId: 'hint-sourced',
+      payload: mercadoPagoPayload(plantedRef),
+    });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    const alert = res.body.items[0];
+    expect(alert.order).toBeNull();
+    expect(alert.orderNumber).toBeNull();
+    // The money-shaped field is the whole point: no authoritative-looking
+    // amount may be derived from a link the codebase does not trust.
+    expect(alert.amountCents).toBeNull();
+    // The alert itself still lists, with the gateway's own id to look up.
+    expect(alert.eventId).toBe('hint-sourced');
+  });
+
+  it('fails closed on a NULL providerRefSource, exactly like a hint', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('alerts-nullsource@demo.co', 'owner');
+    const ref = 'mp-unknown-provenance';
+    await seedOrder(tenantId, {
+      totalCents: 555_000,
+      providerRef: ref,
+      providerRefSource: null,
+      paymentProvider: 'mercadopago',
+    });
+    await seedWebhookEvent(tenantId, {
+      provider: 'mercadopago',
+      eventId: 'null-sourced',
+      payload: mercadoPagoPayload(ref),
+    });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+
+    expect(res.body.items[0].order).toBeNull();
+    expect(res.body.items[0].amountCents).toBeNull();
+  });
+
+  it('still resolves a VERIFIED providerRef', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('alerts-verifiedsource@demo.co', 'owner');
+    const ref = 'mp-verified-1';
+    const order = await seedOrder(tenantId, {
+      totalCents: 31_000,
+      providerRef: ref,
+      providerRefSource: 'verified',
+      paymentProvider: 'mercadopago',
+    });
+    await seedWebhookEvent(tenantId, { provider: 'mercadopago', payload: mercadoPagoPayload(ref) });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+
+    expect(res.body.items[0].order?.id).toBe(order.id);
+    expect(res.body.items[0].amountCents).toBe(31_000);
+  });
+
+  it('does NOT gate the order-NUMBER path, which never consults providerRef', async () => {
+    // Wompi/ePayco name the order by its own number in a signature-covered
+    // field. That link has nothing to do with `providerRefSource`, and
+    // gating it would blind the merchant on the dominant case for no gain.
+    const { cookie, tenantId } = await signUpWithTenant('alerts-numberpath@demo.co', 'owner');
+    const order = await seedOrder(tenantId, { totalCents: 77_000, providerRefSource: null });
+    await seedWebhookEvent(tenantId, { provider: 'wompi', payload: wompiPayload(String(order.number)) });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+
+    expect(res.body.items[0].order?.id).toBe(order.id);
+    expect(res.body.items[0].amountCents).toBe(77_000);
+  });
 });
 
 describe('payment alerts — tenant isolation', () => {
@@ -421,5 +573,363 @@ describe('payment alerts — tenant isolation', () => {
         data: { provider: 'wompi', eventId: 'forged', payload: {}, result: 'confirmed' },
       }),
     ).rejects.toThrow(/permission denied/i);
+  });
+});
+
+describe('POST /v1/admin/payment-alerts/:id/review', () => {
+  it('moves a reviewed alert out of the banner count and into the reviewed list', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-basic@demo.co', 'owner');
+    const order = await seedOrder(tenantId, { totalCents: 120_000 });
+    const eventId = await seedWebhookEvent(tenantId, {
+      eventId: 'review-basic-evt',
+      payload: wompiPayload(String(order.number)),
+    });
+
+    // Before: the alarm is on.
+    const before = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+    expect(before.body.total).toBe(1);
+    expect(before.body.items[0].review).toBeNull();
+
+    const posted = await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventId}/review`)
+      .set('cookie', cookie)
+      .send({ action: 'refunded', note: 'Devuelto en Wompi, recibo 8891' });
+    expect(posted.status).toBe(201);
+
+    // After: gone from the default (pending) list, which is exactly what the
+    // shell banner counts.
+    const pending = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+    expect(pending.body.total).toBe(0);
+    expect(pending.body.items).toEqual([]);
+
+    // But NOT gone from existence — it is in "Revisados", with who and what.
+    const reviewed = await request(app.getHttpServer())
+      .get('/v1/admin/payment-alerts?status=reviewed')
+      .set('cookie', cookie);
+    expect(reviewed.body.total).toBe(1);
+    expect(reviewed.body.items[0].id).toBe(eventId);
+    expect(reviewed.body.items[0].review).toMatchObject({
+      action: 'refunded',
+      note: 'Devuelto en Wompi, recibo 8891',
+      reviewedByEmail: 'review-basic@demo.co',
+    });
+    expect(typeof reviewed.body.items[0].review.reviewedAt).toBe('string');
+    // The alert's own facts survive review untouched.
+    expect(reviewed.body.items[0].amountCents).toBe(120_000);
+  });
+
+  it('accepts a review with no note, and rejects an unknown action', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-validation@demo.co', 'owner');
+    const order = await seedOrder(tenantId);
+    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+
+    const bad = await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventId}/review`)
+      .set('cookie', cookie)
+      .send({ action: 'deleted_the_evidence' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('VALIDATION_FAILED');
+
+    const ok = await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventId}/review`)
+      .set('cookie', cookie)
+      .send({ action: 'no_action_needed' });
+    expect(ok.status).toBe(201);
+  });
+
+  it('undoes a mistaken review by APPENDING a reopened row, never by deleting one', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-undo@demo.co', 'owner');
+    const order = await seedOrder(tenantId);
+    const eventId = await seedWebhookEvent(tenantId, {
+      eventId: 'review-undo-evt',
+      payload: wompiPayload(String(order.number)),
+    });
+
+    await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventId}/review`)
+      .set('cookie', cookie)
+      .send({ action: 'no_action_needed' });
+
+    const gone = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+    expect(gone.body.total).toBe(0);
+
+    // Wrong row. Undo.
+    const reopen = await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventId}/review`)
+      .set('cookie', cookie)
+      .send({ action: 'reopened', note: 'Marqué la fila equivocada' });
+    expect(reopen.status).toBe(201);
+
+    // Back in the alarm...
+    const back = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+    expect(back.body.total).toBe(1);
+    expect(back.body.items[0].id).toBe(eventId);
+    // ...and out of "Revisados".
+    const reviewed = await request(app.getHttpServer())
+      .get('/v1/admin/payment-alerts?status=reviewed')
+      .set('cookie', cookie);
+    expect(reviewed.body.total).toBe(0);
+
+    // The mistake itself was never erased: BOTH rows are still on the record.
+    const history = await prisma.webhookEventReview.findMany({
+      where: { webhookEventId: eventId },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(history.map((r) => r.action)).toEqual(['no_action_needed', 'reopened']);
+  });
+
+  it('takes the LATEST review as current state, so a re-review re-silences it', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-latest@demo.co', 'owner');
+    const order = await seedOrder(tenantId);
+    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+
+    for (const action of ['no_action_needed', 'reopened', 'refunded']) {
+      const res = await request(app.getHttpServer())
+        .post(`/v1/admin/payment-alerts/${eventId}/review`)
+        .set('cookie', cookie)
+        .send({ action });
+      expect(res.status).toBe(201);
+    }
+
+    const pending = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', cookie);
+    expect(pending.body.total).toBe(0);
+
+    const reviewed = await request(app.getHttpServer())
+      .get('/v1/admin/payment-alerts?status=reviewed')
+      .set('cookie', cookie);
+    expect(reviewed.body.total).toBe(1);
+    expect(reviewed.body.items[0].review.action).toBe('refunded');
+  });
+
+  it('records the STAFF member who acted, not just the owner', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-staff@demo.co', 'staff');
+    const order = await seedOrder(tenantId);
+    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+
+    await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventId}/review`)
+      .set('cookie', cookie)
+      .send({ action: 'order_taken_again' });
+
+    const reviewed = await request(app.getHttpServer())
+      .get('/v1/admin/payment-alerts?status=reviewed')
+      .set('cookie', cookie);
+    expect(reviewed.body.items[0].review.reviewedByEmail).toBe('review-staff@demo.co');
+  });
+
+  it('rejects an unauthenticated review', async () => {
+    const res = await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${randomUUID()}/review`)
+      .send({ action: 'refunded' });
+    expect(res.status).toBe(401);
+  });
+
+  it('404s on an event that is not a payment alert, and on a non-uuid id', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-notalert@demo.co', 'owner');
+    const order = await seedOrder(tenantId);
+    const confirmedId = await seedWebhookEvent(tenantId, {
+      result: 'confirmed',
+      payload: wompiPayload(String(order.number)),
+    });
+
+    const notAnAlert = await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${confirmedId}/review`)
+      .set('cookie', cookie)
+      .send({ action: 'refunded' });
+    expect(notAnAlert.status).toBe(404);
+
+    const garbage = await request(app.getHttpServer())
+      .post('/v1/admin/payment-alerts/not-a-uuid/review')
+      .set('cookie', cookie)
+      .send({ action: 'refunded' });
+    expect(garbage.status).toBe(404);
+
+    expect(await prisma.webhookEventReview.count({ where: { tenantId } })).toBe(0);
+  });
+});
+
+describe('WebhookEventReview — append-only, enforced by Postgres', () => {
+  /** Files one review row through the real endpoint and hands back its id. */
+  async function seedReview(cookie: string, tenantId: string): Promise<string> {
+    const order = await seedOrder(tenantId);
+    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventId}/review`)
+      .set('cookie', cookie)
+      .send({ action: 'refunded' });
+    const row = await prisma.webhookEventReview.findFirstOrThrow({ where: { webhookEventId: eventId } });
+    return row.id;
+  }
+
+  it('rejects a tenant-scoped UPDATE at the database level', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-noupdate@demo.co', 'owner');
+    const reviewId = await seedReview(cookie, tenantId);
+
+    // Raw SQL under the exact role + GUC tenantDb switches to — i.e. the most
+    // privileged thing tenant-scoped code could possibly attempt. The grant,
+    // not any application check, is what must stop this.
+    await expect(
+      prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+        return tx.$executeRaw`UPDATE "WebhookEventReview" SET "action" = 'other' WHERE id = ${reviewId}::uuid`;
+      }),
+    ).rejects.toThrow(/permission denied/i);
+
+    const after = await prisma.webhookEventReview.findFirstOrThrow({ where: { id: reviewId } });
+    expect(after.action).toBe('refunded');
+  });
+
+  it('rejects a tenant-scoped DELETE at the database level', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-nodelete@demo.co', 'owner');
+    const reviewId = await seedReview(cookie, tenantId);
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+        return tx.$executeRaw`DELETE FROM "WebhookEventReview" WHERE id = ${reviewId}::uuid`;
+      }),
+    ).rejects.toThrow(/permission denied/i);
+
+    expect(await prisma.webhookEventReview.count({ where: { id: reviewId } })).toBe(1);
+  });
+
+  it('rejects UPDATE and DELETE through the tenant Prisma client too', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('review-noprisma@demo.co', 'owner');
+    const reviewId = await seedReview(cookie, tenantId);
+    const { tenantDb } = (await import('@ventia/db')) as unknown as {
+      tenantDb: (id: string) => {
+        webhookEventReview: {
+          update: (a: unknown) => Promise<unknown>;
+          delete: (a: unknown) => Promise<unknown>;
+        };
+      };
+    };
+
+    await expect(
+      tenantDb(tenantId).webhookEventReview.update({ where: { id: reviewId }, data: { action: 'other' } }),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      tenantDb(tenantId).webhookEventReview.delete({ where: { id: reviewId } }),
+    ).rejects.toThrow(/permission denied/i);
+
+    expect(await prisma.webhookEventReview.count({ where: { id: reviewId } })).toBe(1);
+  });
+
+  it('still allows the INSERT that the append-only design depends on', async () => {
+    const { tenantId } = await signUpWithTenant('review-caninsert@demo.co', 'owner');
+    const order = await seedOrder(tenantId);
+    const eventId = await seedWebhookEvent(tenantId, { payload: wompiPayload(String(order.number)) });
+    const { tenantDb } = (await import('@ventia/db')) as unknown as {
+      tenantDb: (id: string) => { webhookEventReview: { create: (a: unknown) => Promise<{ id: string }> } };
+    };
+
+    const created = await tenantDb(tenantId).webhookEventReview.create({
+      data: {
+        webhookEventId: eventId,
+        action: 'other',
+        reviewedByUserId: randomUUID(),
+        reviewedByEmail: 'review-caninsert@demo.co',
+      },
+    });
+    expect(created.id).toBeTruthy();
+  });
+});
+
+describe('WebhookEventReview — tenant isolation', () => {
+  it('tenant A cannot see tenant B\'s reviews', async () => {
+    const a = await signUpWithTenant('review-iso-a@demo.co', 'owner');
+    const b = await signUpWithTenant('review-iso-b@demo.co', 'owner');
+
+    const orderB = await seedOrder(b.tenantId, { totalCents: 640_000 });
+    const eventB = await seedWebhookEvent(b.tenantId, {
+      eventId: 'review-iso-b-evt',
+      payload: wompiPayload(String(orderB.number)),
+    });
+    await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventB}/review`)
+      .set('cookie', b.cookie)
+      .send({ action: 'refunded', note: 'secreto-de-b' });
+
+    const asA = await request(app.getHttpServer())
+      .get('/v1/admin/payment-alerts?status=reviewed')
+      .set('cookie', a.cookie);
+    expect(asA.status).toBe(200);
+    expect(asA.body).toEqual({ items: [], total: 0, page: 1, pageSize: 20 });
+    expect(JSON.stringify(asA.body)).not.toContain('secreto-de-b');
+    expect(JSON.stringify(asA.body)).not.toContain('review-iso-b@demo.co');
+
+    const asB = await request(app.getHttpServer())
+      .get('/v1/admin/payment-alerts?status=reviewed')
+      .set('cookie', b.cookie);
+    expect(asB.body.total).toBe(1);
+    expect(asB.body.items[0].review.note).toBe('secreto-de-b');
+  });
+
+  it('tenant A cannot review tenant B\'s alert', async () => {
+    const a = await signUpWithTenant('review-cross-a@demo.co', 'owner');
+    const b = await signUpWithTenant('review-cross-b@demo.co', 'owner');
+    const orderB = await seedOrder(b.tenantId);
+    const eventB = await seedWebhookEvent(b.tenantId, {
+      eventId: 'review-cross-b-evt',
+      payload: wompiPayload(String(orderB.number)),
+    });
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventB}/review`)
+      .set('cookie', a.cookie)
+      .send({ action: 'no_action_needed' });
+    expect(res.status).toBe(404);
+
+    // No row was written under EITHER tenant, and B's alert is still live.
+    expect(await prisma.webhookEventReview.count({ where: { webhookEventId: eventB } })).toBe(0);
+    const asB = await request(app.getHttpServer()).get('/v1/admin/payment-alerts').set('cookie', b.cookie);
+    expect(asB.body.total).toBe(1);
+  });
+
+  it('is enforced by Postgres RLS itself, not only by the service\'s where clause', async () => {
+    const a = await signUpWithTenant('review-rls-a@demo.co', 'owner');
+    const b = await signUpWithTenant('review-rls-b@demo.co', 'owner');
+    const orderB = await seedOrder(b.tenantId);
+    const eventB = await seedWebhookEvent(b.tenantId, { payload: wompiPayload(String(orderB.number)) });
+    await request(app.getHttpServer())
+      .post(`/v1/admin/payment-alerts/${eventB}/review`)
+      .set('cookie', b.cookie)
+      .send({ action: 'refunded', note: 'rls-b-only-note' });
+
+    const read = (tenantId: string) =>
+      prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+        // Deliberately UNSCOPED: RLS alone must do the filtering.
+        return tx.$queryRaw<{ note: string | null }[]>`SELECT "note" FROM "WebhookEventReview"`;
+      });
+
+    expect((await read(a.tenantId)).map((r) => r.note)).not.toContain('rls-b-only-note');
+    expect((await read(b.tenantId)).map((r) => r.note)).toContain('rls-b-only-note');
+  });
+
+  it('refuses an INSERT that claims another tenant, via the RLS WITH CHECK', async () => {
+    const a = await signUpWithTenant('review-check-a@demo.co', 'owner');
+    const b = await signUpWithTenant('review-check-b@demo.co', 'owner');
+    const orderB = await seedOrder(b.tenantId);
+    const eventB = await seedWebhookEvent(b.tenantId, { payload: wompiPayload(String(orderB.number)) });
+
+    // Tenant A's context, but writing a row stamped with tenant B's id — the
+    // shape a service bug (or a future endpoint that forgot to scope) would
+    // produce. The policy, not the service, must reject it.
+    await expect(
+      prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${a.tenantId}, true)`;
+        return tx.$executeRaw`
+          INSERT INTO "WebhookEventReview"
+            ("id", "tenantId", "webhookEventId", "action", "reviewedByUserId", "reviewedByEmail")
+          VALUES (gen_random_uuid(), ${b.tenantId}::uuid, ${eventB}::uuid, 'refunded', gen_random_uuid(), 'a@evil.co')`;
+      }),
+    ).rejects.toThrow(/row-level security/i);
+
+    expect(await prisma.webhookEventReview.count({ where: { webhookEventId: eventB } })).toBe(0);
   });
 });

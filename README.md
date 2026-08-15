@@ -261,8 +261,16 @@ All three share the same provider-registry/webhook-controller/stock-reservation 
   could not read one), and a valid payment landing on an order that can no longer be settled — e.g.
   a `PAID` webhook arriving after the expiry worker cancelled the order — is recorded as
   `result: 'paid_order_not_settleable'` with a loud log, never as `'confirmed'`. Those orders mean a
-  shopper paid and has nothing, so they need a human:
-  `SELECT * FROM "WebhookEvent" WHERE result = 'paid_order_not_settleable'`.
+  shopper paid and has nothing, so they need a human — and the merchant is told so directly rather
+  than having to be told by us: `GET /v1/admin/payment-alerts` surfaces them, the admin shell shows a
+  banner on every authenticated page while any are unreviewed, and **Pagos por revisar**
+  (`/pagos-por-revisar`) holds the detail and the per-case guidance. A merchant records what they did
+  with `POST /v1/admin/payment-alerts/:id/review` (`refunded` / `order_taken_again` /
+  `no_action_needed` / `other` / `reopened`, plus an optional note), which appends a
+  `WebhookEventReview` row and moves the alert to that page's **Revisados** section. That table is
+  append-only in Postgres — `ventia_app` holds SELECT + INSERT with UPDATE/DELETE revoked — so a
+  financial discrepancy can be accounted for but never erased, and an alert marked reviewed by
+  mistake is corrected by appending a `reopened` row rather than by deleting anything.
 
 ### Onboarding, staff & launch
 
