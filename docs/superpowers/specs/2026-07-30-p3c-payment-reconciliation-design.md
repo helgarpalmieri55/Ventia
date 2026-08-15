@@ -185,6 +185,17 @@ point.
      `response` field specifically (rather than the account-wide dashboard "URL
      Respuesta y Confirmación" panel) is what those samples' URLs were configured by —
      neither sample states which mechanism registered the URL it is running on.
+   - **RESOLVED AFTER P3c — this blocker is gone and `response` is now wired.** The
+     per-tenant URL was threaded through as `OrderForPayment.storefrontBaseUrl`
+     (populated in `checkout.service.ts` from the request's own resolved
+     `TenantDomain` row), `PAYMENTS_STOREFRONT_BASE_URL` was deleted, and `epayco.ts`
+     sets `response` to that tenant's `/pago/epayco-retorno/{orderNumber}` route. The
+     MEDIUM-HIGH confidence note above still stands: no sandbox account was available
+     to confirm the session-create field is what registers the URL, versus the
+     dashboard panel. **The reconciliation half of this idea did NOT land and must not
+     be assumed:** a response-page ref is `hint`-sourced and the provenance gate still
+     refuses it for ePayco. The paragraph below is kept verbatim as the historical
+     record of why it was deferred.
    - **Blocker, and the reason this stays unimplemented:** it needs a real, public,
      PER-TENANT storefront URL. `PAYMENTS_STOREFRONT_BASE_URL` only approximates one
      (a single global base for every tenant — see `packages/payments/src/storefront-base.ts`'s

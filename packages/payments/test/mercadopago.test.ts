@@ -19,6 +19,11 @@ const order: OrderForPayment = {
   orderNumber: 'ORD-0001',
   totalCents: 4990000,
   customerEmail: 'shopper@example.com',
+  // Required on `OrderForPayment` since the multi-tenancy fix. This adapter
+  // does not read it (it omits `back_urls` — see mercadopago.ts's module doc
+  // comment for why that is now a scope decision rather than a blocker), so
+  // it is present here purely to satisfy the shared input type.
+  storefrontBaseUrl: 'https://tienda.example.com',
 };
 
 describe('MercadoPagoProvider.createCheckoutSession', () => {

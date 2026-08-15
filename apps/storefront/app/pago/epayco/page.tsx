@@ -123,29 +123,44 @@ import { Alert, Button, Card, CardContent, CardHeader, CardTitle, Spinner } from
  *     resources` for `setHooks`/`onResponse` returns ZERO hits, so there is
  *     no first-party payload example to check against either.
  *
- * **Consequence, and it is a real disclosed limitation, not a TODO:** this
- * page cannot capture ePayco's `x_ref_payco` as a reconciliation hint the
- * way `app/pago/wompi-retorno/[orderNumber]/page.tsx` captures Wompi's
- * `?id=`. P3c Task 3 therefore deliberately implemented NOTHING here rather
- * than pattern-matching the Wompi page against a payload that does not
- * exist. ePayco orders get a `Order.providerRef` only from a real,
- * signature-verified confirmation webhook (via `markPaid`/`markFailed`);
- * an ePayco order whose webhook never arrives has no `providerRef`, and per
- * design doc decision 3 is simply not reconcilable via any API — it falls
- * through to the existing 15-minute stock-reservation expiry worker.
+ * **Consequence, unchanged and still true:** THIS page cannot capture
+ * ePayco's `x_ref_payco`, because no hook of this page ever runs in
+ * `standard` mode and `onResponse`'s payload carries no payment reference on
+ * any code path anyway. So nothing was implemented here rather than
+ * pattern-matching the Wompi return page against a payload that does not
+ * exist.
+ *
+ * ## UPDATE: the shopper's return path is now a REAL, separate route
+ *
+ * The paragraph above used to end by noting that a shopper's return depended
+ * on ePayco's own response-page redirect — the session-create `response`
+ * field — "which `packages/payments/src/epayco.ts` deliberately does not
+ * populate". **It populates it now.** The blocker was that no per-tenant
+ * public URL reached the adapter; `OrderForPayment.storefrontBaseUrl` supplies
+ * one, so `epayco.ts` sets `response` to that tenant's own
+ * `/pago/epayco-retorno/{orderNumber}` route
+ * (`app/pago/epayco-retorno/[orderNumber]/page.tsx`), which reads `ref_payco`
+ * off its query string exactly as ePayco's own first-party samples do.
+ *
+ * Two things that does and does not change:
+ *  - **Does:** a shopper who pays on epayco.co now comes back to their order
+ *    automatically. The always-visible manual "Ya pagué, ver mi pedido" link
+ *    below stays as a fallback (this page is still where a shopper sits if the
+ *    widget never opens), but it is no longer the ONLY way back.
+ *  - **Does NOT:** reconciliation coverage. A `ref_payco` captured on the
+ *    response page is stored with `providerRefSource: 'hint'`, and
+ *    `reconciliation.worker.ts`'s provenance gate refuses hint-sourced refs for
+ *    ePayco (its status lookup is unauthenticated and merchant-agnostic). An
+ *    ePayco order whose confirmation webhook never arrives still has no
+ *    settle path and still falls through to the 15-minute stock-reservation
+ *    expiry worker. `markPaid`/`markFailed` stamping a `'verified'` ref from a
+ *    real signed webhook remains ePayco's only settle-capable ref source.
  *
  * The `setHooks` call below is KEPT (not deleted) purely as zero-cost
- * defensive wiring: it is now known not to fire in `standard` mode, but it
- * costs nothing, and it would resume working if this page ever moves to
+ * defensive wiring: it is known not to fire in `standard` mode, but it costs
+ * nothing, and it would resume working if this page ever moves to
  * `onpage`/`component` mode or if ePayco changes `standard`'s behavior.
- * Nothing depends on it. The always-visible manual "Ya pagué, ver mi pedido"
- * link remains the only mechanism that actually returns a shopper to their
- * order — and in `standard` mode the shopper is on epayco.co, not here, when
- * they finish paying, so in practice their return depends on ePayco's own
- * response-page redirect (the session-create `response` field, which
- * `packages/payments/src/epayco.ts` deliberately does not populate — see
- * that module's doc comment for why, and design doc decision 2 for the
- * assessment of it as a FUTURE capture avenue).
+ * Nothing depends on it.
  */
 
 declare global {

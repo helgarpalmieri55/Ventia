@@ -22,6 +22,11 @@ const CHECKOUT_TEST_DOMAINS = [
   'checkout-l.ventia.localhost',
   'checkout-m.ventia.localhost',
   'checkout-n.ventia.localhost',
+  // Tenants O and P exist ONLY for the two-tenant redirect-URL test. P
+  // deliberately owns a fully CUSTOM domain (not a `*.ventia.localhost`
+  // subdomain), which is the case no `PLATFORM_ROOT_DOMAIN` rule could derive.
+  'checkout-o.ventia.localhost',
+  'tienda-p.example.com',
 ];
 
 // Same fixture shape as payments-service.test.ts/webhooks.test.ts's own
@@ -58,6 +63,8 @@ let tenantKId: string; // wompi checkout, credentials saved but missing integrit
 let tenantLId: string; // mercadopago checkout, tenant never configured mercadopago credentials — no real adapter exists yet (P3b Task 1)
 let tenantMId: string; // mercadopago checkout, credentials saved but missing eventsSecret (phase-7 review gap)
 let tenantNId: string; // epayco checkout, credentials saved but missing epaycoCustomerId (phase-7 review gap)
+let tenantOId: string; // wompi checkout on a *.ventia.localhost domain — half of the two-tenant redirect-URL test
+let tenantPId: string; // wompi checkout on a fully CUSTOM domain — other half of the two-tenant redirect-URL test
 
 // Product fixture ids, populated in beforeAll.
 let productXId: string; // tenant A — 45900 cents
@@ -75,6 +82,8 @@ let wompiIncompleteCredsProductId: string; // tenant K — wompi credentials mis
 let mercadopagoUnconfiguredProductId: string; // tenant L — mercadopago checkout, no provider credentials saved
 let mercadopagoIncompleteCredsProductId: string; // tenant M — mercadopago credentials missing eventsSecret
 let epaycoIncompleteCredsProductId: string; // tenant N — epayco credentials missing epaycoCustomerId
+let multiTenantOProductId: string; // tenant O — wompi checkout, two-tenant redirect-URL test
+let multiTenantPProductId: string; // tenant P — wompi checkout, two-tenant redirect-URL test
 
 const BOGOTA_ADDRESS = {
   nombreCompleto: 'Ana Ejemplo',
@@ -445,6 +454,48 @@ beforeAll(async () => {
   });
   epaycoIncompleteCredsProductId = epaycoIncompleteCredsProduct.id;
 
+  // Tenants O and P: two DIFFERENT live tenants, both with working `wompi`
+  // credentials and enough stock, existing solely so one test can drive a real
+  // checkout on each and prove the redirect URLs differ. P's domain is
+  // deliberately a fully custom one.
+  const tenantO = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-o',
+      name: 'Checkout O',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantOId = tenantO.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantOId, domain: 'checkout-o.ventia.localhost', isPrimary: true } });
+  const multiTenantOProduct = await prisma.product.create({
+    data: { tenantId: tenantOId, name: 'Producto Multi O', slug: 'producto-multi-o', priceCents: 33000, status: 'active', stock: 10 },
+  });
+  multiTenantOProductId = multiTenantOProduct.id;
+
+  const tenantP = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-p',
+      name: 'Checkout P',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantPId = tenantP.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantPId, domain: 'tienda-p.example.com', isPrimary: true } });
+  const multiTenantPProduct = await prisma.product.create({
+    data: { tenantId: tenantPId, name: 'Producto Multi P', slug: 'producto-multi-p', priceCents: 33000, status: 'active', stock: 10 },
+  });
+  multiTenantPProductId = multiTenantPProduct.id;
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
@@ -458,6 +509,12 @@ beforeAll(async () => {
   await paymentsService.saveProviderCredentials(tenantGId, 'wompi', FAKE_WOMPI_CREDS);
   await paymentsService.saveProviderCredentials(tenantHId, 'wompi', FAKE_WOMPI_CREDS);
   await paymentsService.saveProviderCredentials(tenantJId, 'wompi', FAKE_WOMPI_CREDS);
+  // Identical credentials for O and P on purpose: the ONLY difference between
+  // the two checkouts in the two-tenant redirect test is which tenant/domain
+  // they run on, so a shared-global-base regression cannot hide behind a
+  // credential difference.
+  await paymentsService.saveProviderCredentials(tenantOId, 'wompi', FAKE_WOMPI_CREDS);
+  await paymentsService.saveProviderCredentials(tenantPId, 'wompi', FAKE_WOMPI_CREDS);
   // Tenant I deliberately gets NO saved credentials.
   await paymentsService.saveProviderCredentials(tenantKId, 'wompi', {
     publicKey: FAKE_WOMPI_CREDS.publicKey,
@@ -957,6 +1014,87 @@ describe('POST /v1/storefront/checkout — wompi happy path', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const wompiMail = sentMail.filter((m) => m.to === 'wompi-happy@example.com');
     expect(wompiMail).toHaveLength(0);
+  });
+});
+
+// ==== THE multi-tenancy regression test, end to end through the real HTTP
+// ==== stack: two tenants, two DIFFERENT payment redirect base URLs.
+//
+// Before this fix, the Wompi/ePayco adapters resolved their storefront base
+// from ONE global env var (`PAYMENTS_STOREFRONT_BASE_URL`), so both checkouts
+// below produced a `redirect-url` pointing at the SAME storefront. That is not
+// merely a cosmetic UX bug: the Wompi return page `PATCH`es the API, so tenant
+// P's shopper landing on tenant O's storefront had O's proxy stamp
+// `x-tenant-domain: O`, writing P's transaction id onto O's same-numbered
+// order — which O's reconciliation worker then looked up with O's own
+// credentials. Cross-tenant writes, no attacker required.
+//
+// Deliberately ONE test asserting on BOTH tenants (rather than two tests each
+// pinning one URL): a regression that reintroduces a single global base can
+// still satisfy two independent single-tenant assertions, but cannot satisfy
+// `expect(hostO).not.toBe(hostP)`.
+describe('POST /v1/storefront/checkout — two tenants get two different payment redirect base URLs', () => {
+  it('builds each tenant’s Wompi redirect-url on ITS OWN public domain, with its own scheme', async () => {
+    const cookieO = await newCartWithItem('checkout-o.ventia.localhost', multiTenantOProductId, 1);
+    const resO = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-o.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieO}`)
+      .send({
+        email: 'multi-o@example.com',
+        phone: '3009990010',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'wompi',
+      });
+    expect(resO.status).toBe(201);
+
+    const cookieP = await newCartWithItem('tienda-p.example.com', multiTenantPProductId, 1);
+    const resP = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'tienda-p.example.com')
+      .set('Cookie', `ventia_cart=${cookieP}`)
+      .send({
+        email: 'multi-p@example.com',
+        phone: '3009990011',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'wompi',
+      });
+    expect(resP.status).toBe(201);
+
+    // Both are Wompi hosted-checkout URLs carrying a `redirect-url` param.
+    const redirectO = new URL(resO.body.redirectUrl as string).searchParams.get('redirect-url')!;
+    const redirectP = new URL(resP.body.redirectUrl as string).searchParams.get('redirect-url')!;
+
+    // Each order number is 1 (per-tenant numbering), so the PATHS are
+    // identical — only the ORIGIN may differ. That makes this assertion pin
+    // exactly the thing that was broken and nothing else.
+    expect(redirectO).toBe('http://checkout-o.ventia.localhost/pago/wompi-retorno/1');
+    expect(redirectP).toBe('https://tienda-p.example.com/pago/wompi-retorno/1');
+    expect(redirectO).not.toBe(redirectP);
+    expect(new URL(redirectO).host).not.toBe(new URL(redirectP).host);
+    expect(new URL(redirectO).pathname).toBe(new URL(redirectP).pathname);
+
+    // The http/https decision is a documented rule, not an accident:
+    // `*.localhost` is a reserved, unregistrable special-use TLD and is this
+    // repo's dev stack (Caddy serves it on port 80), so it gets `http`; any
+    // real registered domain defaults to `https`. See
+    // `src/tenants/tenant-public-url.ts`.
+    expect(new URL(redirectO).protocol).toBe('http:');
+    expect(new URL(redirectP).protocol).toBe('https:');
+
+    // Neither tenant's redirect may reference the other's storefront anywhere
+    // in the whole checkout URL, not just in the parsed param.
+    expect(resO.body.redirectUrl).not.toContain('tienda-p.example.com');
+    expect(resP.body.redirectUrl).not.toContain('checkout-o.ventia.localhost');
+
+    // Sanity: both really did create their own orders, on their own tenants.
+    const orderO = await prisma.order.findFirstOrThrow({ where: { tenantId: tenantOId, number: 1 } });
+    const orderP = await prisma.order.findFirstOrThrow({ where: { tenantId: tenantPId, number: 1 } });
+    expect(orderO.paymentProvider).toBe('wompi');
+    expect(orderP.paymentProvider).toBe('wompi');
+    expect(orderO.id).not.toBe(orderP.id);
   });
 });
 

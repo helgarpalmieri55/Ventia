@@ -133,21 +133,31 @@ import type {
 //    the `checkout/preferences` request body built below. Reasoning: all
 //    three need a real, tenant-specific PUBLIC URL (the storefront's own
 //    domain for `back_urls`, and this API's public webhook base for
-//    `notification_url`) — and neither `OrderForPayment` nor
-//    `TenantProviderConfig` (the only two inputs `createCheckoutSession`
-//    receives) carries a tenant id or a domain at all. This isn't a gap in
-//    reading the inputs: this codebase resolves a tenant's storefront domain
-//    dynamically, per HTTP request, from the `TenantDomain` table
-//    (`services/api/src/tenants/domain-resolver.ts`) — there is no static
-//    per-tenant "public base URL" config anywhere (checked
-//    `packages/core/src/env.ts` and `.env.example`: `STOREFRONT_INTERNAL_URL`
-//    is an internal ISR-revalidation URL, not a public, shopper-redirectable,
-//    tenant-specific one; `API_URL` is a single global value, not per-tenant
-//    either). Forcing a value here would mean either fabricating a wrong
-//    domain (actively harmful — a real gateway would try to redirect
-//    shoppers or POST webhooks to it) or changing `OrderForPayment`'s shape,
-//    which this task's brief does not authorize (only `TenantProviderConfig`
-//    widens, and only by the one additive `epaycoCustomerId` field).
+//    `notification_url`).
+//
+//    **UPDATED (multi-tenancy fix): the "no tenant domain reaches this
+//    adapter" half of that reasoning is no longer true.** `OrderForPayment`
+//    now carries `storefrontBaseUrl` — the per-tenant public storefront base,
+//    resolved per HTTP request in `checkout.service.ts` from the same
+//    `TenantDomain` row `services/api/src/tenants/domain-resolver.ts` matched
+//    — so `back_urls` COULD now be built here. They are still omitted, but for
+//    a different and narrower reason: nothing needs them. Mercado Pago is the
+//    one provider whose orders reconcile without any browser return at all
+//    (its `searchByReference` runs off our own order number against MP's
+//    private-token-authenticated API, and it is the only member of
+//    `reconciliation.worker.ts`'s `ACCOUNT_SCOPED_LOOKUP_PROVIDERS`), and no
+//    MP return route exists on the storefront. Adding `back_urls` is a
+//    self-contained UX improvement for a later change, no longer blocked on
+//    anything structural.
+//
+//    `notification_url` stays omitted on its own merits, unchanged and
+//    deliberately: it is the URL MP POSTs the settle notification to, i.e. the
+//    verified path that can actually move an order to PAID. It is configured
+//    once per application in MP's Integrations Panel today, and moving that
+//    live path onto a per-preference value with no sandbox account to verify
+//    against risks silently killing webhook delivery — the same call
+//    `epayco.ts` makes about its own `confirmation` field.
+//
 //    Verified this is safe to omit for now, not just convenient: MP's own
 //    "configure-back-urls" docs page, fetched directly during this task,
 //    never states `back_urls`/`auto_return` are mandatory to create a
@@ -158,14 +168,13 @@ import type {
 //    instead be configured ONCE, per application, in the Integrations
 //    Panel — the exact mechanism this adapter relies on for now, mirroring
 //    how Wompi's webhook URL is likewise configured out-of-band in Wompi's
-//    own dashboard rather than passed into `createCheckoutSession`. This is
-//    a real, load-bearing gap for whoever wires this adapter into
-//    `checkout.service.ts` (Task 4 or later): if per-tenant, per-request
-//    `notification_url`/`back_urls` are ever required (e.g. because
-//    panel-level config can't vary per tenant on a shared MP application),
-//    `OrderForPayment` or this method's inputs will need a tenant
-//    domain/base-URL threaded through — that's out of scope here, flagged
-//    for whoever picks it up next.
+//    own dashboard rather than passed into `createCheckoutSession`. If
+//    per-tenant, per-request `notification_url` is ever required (e.g. because
+//    panel-level config can't vary per tenant on a shared MP application), the
+//    tenant base URL it would be built from is already available on
+//    `OrderForPayment.storefrontBaseUrl`; what is missing is a verified
+//    public API webhook base and a sandbox account to prove the switch-over
+//    doesn't drop deliveries.
 const API_BASE = 'https://api.mercadopago.com';
 
 /** `OrderForPayment` carries no currency field — this adapter targets

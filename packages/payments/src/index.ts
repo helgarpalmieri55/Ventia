@@ -5,6 +5,48 @@ export interface OrderForPayment {
   orderNumber: string;
   totalCents: number;
   customerEmail: string;
+  /** The PUBLIC, browser-reachable base URL of the storefront **this
+   * particular order was placed on** — origin only, no trailing slash, e.g.
+   * `https://tienda-a.example.com` or, in dev,
+   * `http://demo-moda.ventia.localhost`.
+   *
+   * ## Why this lives on `OrderForPayment` and is REQUIRED
+   *
+   * Two of the three adapters have to hand the gateway a URL pointing back at
+   * a FIRST-PARTY storefront route: `wompi.ts`'s `redirect-url`
+   * (`/pago/wompi-retorno/{orderNumber}`) and `epayco.ts`'s bridge-page
+   * `redirectUrl` + session-create `response` field
+   * (`/pago/epayco`, `/pago/epayco-retorno/{orderNumber}`). Until this field
+   * existed, both resolved that base from ONE global env var
+   * (`PAYMENTS_STOREFRONT_BASE_URL`), because nothing in this method's inputs
+   * carried a tenant domain. In any deployment with two or more tenants on
+   * Wompi or ePayco that sent EVERY tenant's shopper to whichever single
+   * storefront that variable named — and, once the Wompi return page started
+   * `PATCH`ing the API, tenant B's shopper landing on tenant A's storefront
+   * had A's proxy stamp `x-tenant-domain: A`, writing B's transaction id onto
+   * A's same-numbered order. Cross-tenant writes with no attacker involved.
+   *
+   * Shape decisions, deliberate:
+   *  - **On `OrderForPayment` rather than a third `ctx` parameter.** Two
+   *    adapters (`epayco.ts`, `mercadopago.ts`) already use an optional THIRD
+   *    positional parameter as their injected-`fetch` test seam
+   *    (`createCheckoutSession(order, cfg, fetchImpl)`), so a third `ctx`
+   *    parameter would collide with an established convention across the
+   *    package. `OrderForPayment` is already "everything about this one
+   *    checkout the adapter needs", and this value is per-checkout exactly
+   *    like `totalCents` and `customerEmail` are.
+   *  - **REQUIRED, not optional-with-a-fallback.** An optional field backed by
+   *    a global default reproduces the exact failure mode this fixes: a caller
+   *    that forgets it produces a silently WRONG redirect with no signal.
+   *    Required means TypeScript refuses to compile a call site that hasn't
+   *    decided. There is exactly one production call site
+   *    (`services/api/src/checkout/checkout.service.ts`), which resolves this
+   *    from the request's own already-resolved tenant domain.
+   *
+   * Adapters must run it through `requireStorefrontBaseUrl` (storefront-base.ts)
+   * rather than interpolating it raw — see that function for the validation
+   * rules and why a bad value must throw instead of degrading. */
+  storefrontBaseUrl: string;
 }
 
 export interface TenantProviderConfig {
@@ -256,6 +298,11 @@ export interface PaymentProvider {
   ): Promise<ReferenceSearchResult | null>;
 }
 
+/** Exported so callers that BUILD an `OrderForPayment.storefrontBaseUrl` can
+ * assert against the same rules the adapters enforce, rather than discovering
+ * a mismatch only when a real checkout throws. See its own doc comment for the
+ * rules and for why every failure mode throws instead of degrading. */
+export { requireStorefrontBaseUrl } from './storefront-base.js';
 export { WompiProvider } from './wompi.js';
 export { MercadoPagoProvider } from './mercadopago.js';
 export { EpaycoProvider } from './epayco.js';
