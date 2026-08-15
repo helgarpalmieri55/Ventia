@@ -9,6 +9,7 @@ import type {
   TenantProviderConfig,
   TransactionStatusResult,
 } from './index.js';
+import { fetchGateway } from './http.js';
 
 // --- Facts below are cited in the Task 2 report as verified-against-real-docs
 // vs. inferred vs. genuinely unresolved. Full detail (including the specific
@@ -382,7 +383,11 @@ export class MercadoPagoProvider implements PaymentProvider {
       external_reference: order.orderNumber,
     };
 
-    const res = await fetchImpl(`${API_BASE}/checkout/preferences`, {
+    const res = await fetchGateway(
+      fetchImpl,
+      'mercadopago createCheckoutSession',
+      `${API_BASE}/checkout/preferences`,
+      {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${cfg.privateKey}`,
@@ -452,9 +457,12 @@ export class MercadoPagoProvider implements PaymentProvider {
     // webhook payload itself is deliberately lightweight (just `{type,
     // data: {id}}`, per design doc decision 5) and is never trusted for
     // status/amount/reference, only for WHICH payment id to look up next.
-    const res = await fetchImpl(`${API_BASE}/v1/payments/${encodeURIComponent(dataIdStr)}`, {
-      headers: { Authorization: `Bearer ${cfg.privateKey}` },
-    });
+    const res = await fetchGateway(
+      fetchImpl,
+      'mercadopago webhook',
+      `${API_BASE}/v1/payments/${encodeURIComponent(dataIdStr)}`,
+      { headers: { Authorization: `Bearer ${cfg.privateKey}` } },
+    );
     if (!res.ok) {
       throw new Error(`mercadopago webhook: payment lookup HTTP ${res.status}`);
     }
@@ -555,9 +563,12 @@ export class MercadoPagoProvider implements PaymentProvider {
     cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
   ): Promise<TransactionStatusResult> {
-    const res = await fetchImpl(`${API_BASE}/v1/payments/${encodeURIComponent(providerRef)}`, {
-      headers: { Authorization: `Bearer ${cfg.privateKey}` },
-    });
+    const res = await fetchGateway(
+      fetchImpl,
+      'mercadopago getTransactionStatus',
+      `${API_BASE}/v1/payments/${encodeURIComponent(providerRef)}`,
+      { headers: { Authorization: `Bearer ${cfg.privateKey}` } },
+    );
     if (!res.ok) {
       throw new Error(`mercadopago getTransactionStatus: HTTP ${res.status}`);
     }
@@ -641,7 +652,9 @@ export class MercadoPagoProvider implements PaymentProvider {
     cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
   ): Promise<ReferenceSearchResult | null> {
-    const res = await fetchImpl(
+    const res = await fetchGateway(
+      fetchImpl,
+      'mercadopago searchByReference',
       `${API_BASE}/v1/payments/search?external_reference=${encodeURIComponent(reference)}`,
       { headers: { Authorization: `Bearer ${cfg.privateKey}` } },
     );

@@ -9,6 +9,7 @@ import type {
   TransactionStatusResult,
 } from './index.js';
 import { requireStorefrontBaseUrl } from './storefront-base.js';
+import { fetchGateway } from './http.js';
 
 // --- Facts below are this task's own re-verification against real
 // docs.epayco.com pages (fetched directly during this task) and, where the
@@ -447,7 +448,11 @@ export class EpaycoProvider implements PaymentProvider {
     // from. See `requireStorefrontBaseUrl` for the rules.
     const storefrontBase = requireStorefrontBaseUrl(order.storefrontBaseUrl, 'epayco');
     const basicAuth = Buffer.from(`${cfg.publicKey}:${cfg.privateKey}`, 'utf8').toString('base64');
-    const loginRes = await fetchImpl(`${APIFY_BASE}/login`, {
+    const loginRes = await fetchGateway(
+      fetchImpl,
+      'epayco createCheckoutSession (login)',
+      `${APIFY_BASE}/login`,
+      {
       method: 'POST',
       headers: {
         Authorization: `Basic ${basicAuth}`,
@@ -463,7 +468,11 @@ export class EpaycoProvider implements PaymentProvider {
     }
     const jwt = loginBody.token;
 
-    const sessionRes = await fetchImpl(`${APIFY_BASE}/payment/session/create`, {
+    const sessionRes = await fetchGateway(
+      fetchImpl,
+      'epayco createCheckoutSession',
+      `${APIFY_BASE}/payment/session/create`,
+      {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${jwt}`,
@@ -719,7 +728,11 @@ export class EpaycoProvider implements PaymentProvider {
     _cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
   ): Promise<TransactionStatusResult> {
-    const res = await fetchImpl(`${VALIDATION_BASE}/validation/v1/reference/${encodeURIComponent(providerRef)}`, {
+    const res = await fetchGateway(
+      fetchImpl,
+      'epayco getTransactionStatus',
+      `${VALIDATION_BASE}/validation/v1/reference/${encodeURIComponent(providerRef)}`,
+      {
       headers: { 'Content-Type': 'application/json' },
     });
     if (!res.ok) {

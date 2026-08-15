@@ -9,6 +9,7 @@ import type {
   TransactionStatusResult,
 } from './index.js';
 import { requireStorefrontBaseUrl } from './storefront-base.js';
+import { fetchGateway } from './http.js';
 
 // --- Facts below are cited in the Task 2 report as verified-against-real-docs
 // vs. inferred. Summary (see full citations in the commit body / task
@@ -453,9 +454,12 @@ export class WompiProvider implements PaymentProvider {
     cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
   ): Promise<TransactionStatusResult> {
-    const res = await fetchImpl(`${this.apiBase(cfg)}/transactions/${encodeURIComponent(providerRef)}`, {
-      headers: { Authorization: `Bearer ${cfg.publicKey}` },
-    });
+    const res = await fetchGateway(
+      fetchImpl,
+      'wompi getTransactionStatus',
+      `${this.apiBase(cfg)}/transactions/${encodeURIComponent(providerRef)}`,
+      { headers: { Authorization: `Bearer ${cfg.publicKey}` } },
+    );
     if (!res.ok) {
       throw new Error(`wompi getTransactionStatus: HTTP ${res.status}`);
     }
