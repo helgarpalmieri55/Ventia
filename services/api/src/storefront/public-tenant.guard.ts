@@ -16,6 +16,13 @@ export class PublicTenantGuard implements CanActivate {
       throw new HttpException({ error: 'TENANT_SUSPENDED' }, 503);
     }
     req.storefrontTenantId = req.tenant.tenantId;
+    // Set alongside the id, from the same already-resolved tenant, so routes
+    // that need the tenant's PUBLIC domain (today: checkout, to build the
+    // payment adapters' per-tenant browser return URLs) read it through the
+    // same guard-then-decorator path as the id rather than re-deriving it from
+    // request headers — one resolution mechanism, not two. It is the
+    // `TenantDomain.domain` row `DomainResolver` matched, never the raw header.
+    req.storefrontTenantDomain = req.tenant.domain;
     return true;
   }
 }

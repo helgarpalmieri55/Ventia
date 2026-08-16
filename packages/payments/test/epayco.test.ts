@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EpaycoProvider } from '../src/epayco';
 import type { NormalizedStatus, OrderForPayment, RawRequest, TenantProviderConfig } from '../src/index';
 
@@ -20,6 +20,10 @@ const order: OrderForPayment = {
   orderNumber: 'ORD-0001',
   totalCents: 4990000,
   customerEmail: 'shopper@example.com',
+  // Per-tenant, and REQUIRED (multi-tenancy fix) — this replaced the single
+  // global `PAYMENTS_STOREFRONT_BASE_URL` env var the block below used to
+  // set/unset.
+  storefrontBaseUrl: 'https://tienda.example.com',
 };
 
 describe('EpaycoProvider.createCheckoutSession', () => {
@@ -69,6 +73,23 @@ describe('EpaycoProvider.createCheckoutSession', () => {
     // extras.extra1 is the SAME slot verifyAndParseWebhook reads back as
     // x_extra1 — this is the sending side of that contract.
     expect(sessionBody.extras.extra1).toBe('ORD-0001');
+    // `response` — the shopper's browser return URL, now populated per tenant.
+    // Verified against ePayco's own docs (checkout-implementacion's verbatim
+    // session-create example carries `"response": "https://mysite.com"`;
+    // paginas-de-respuestas states the shopper returns with `ref_payco` in the
+    // URL parameters) and against ePayco's own sample repo (`onePage/response/
+    // response.html` reads `getQueryParam('ref_payco')`).
+    expect(sessionBody.response).toBe('https://tienda.example.com/pago/epayco-retorno/ORD-0001');
+    // `method` is deliberately NOT sent: ePayco documents it as `GET | POST`
+    // with no stated default and no statement of which URL it governs, and the
+    // analogous legacy `method_confirmation` selects the CONFIRMATION
+    // webhook's method — i.e. the verified settle path. Guessing there could
+    // silently kill webhook delivery.
+    expect(sessionBody.method).toBeUndefined();
+    // `confirmation` likewise stays out of this body: it is the signature-
+    // verified settle path's URL, configured out-of-band in ePayco's dashboard
+    // panel today. Changing it is a separate change with its own verification.
+    expect(sessionBody.confirmation).toBeUndefined();
 
     // THIRD-PARTY vs FIRST-PARTY redirect distinction — the one adapter
     // where this matters: redirectUrl must be OUR OWN storefront's
@@ -84,62 +105,100 @@ describe('EpaycoProvider.createCheckoutSession', () => {
     expect(url.searchParams.get('orderNumber')).toBe('ORD-0001');
   });
 
-  // --- P3c Task 2 (requirement 3): REGRESSION GUARD for the
-  // `EPAYCO_STOREFRONT_BASE_URL` -> `PAYMENTS_STOREFRONT_BASE_URL` rename.
+  // --- Per-tenant storefront base URL (multi-tenancy fix). This replaces the
+  // former `PAYMENTS_STOREFRONT_BASE_URL` env-var regression block: that env
+  // var is gone, and with it the single-global-base behavior it pinned.
   //
-  // ePayco's redirect is already live/shipped, so this rename is the single
-  // biggest regression risk in that task. These tests pin the produced URL
-  // BYTE-FOR-BYTE (not just "hostname isn't epayco.co"), for the env-var-set
-  // case, the unset-default case, and the now-removed old env var — so a
-  // half-done rename (e.g. shared module added but ePayco still reading the
-  // old var, or the default silently changed) fails loudly here.
-  describe('storefront base URL after the PAYMENTS_STOREFRONT_BASE_URL rename', () => {
-    const ORIGINAL_NEW = process.env.PAYMENTS_STOREFRONT_BASE_URL;
-    const ORIGINAL_OLD = process.env.EPAYCO_STOREFRONT_BASE_URL;
-    const restore = (key: string, value: string | undefined) => {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    };
-    afterEach(() => {
-      restore('PAYMENTS_STOREFRONT_BASE_URL', ORIGINAL_NEW);
-      restore('EPAYCO_STOREFRONT_BASE_URL', ORIGINAL_OLD);
-    });
-
-    async function buildRedirect(): Promise<string> {
+  // ePayco's redirect is already live/shipped, so these still pin the produced
+  // URLs BYTE-FOR-BYTE (not just "hostname isn't epayco.co"), so any drift in
+  // the bridge-page URL or the new `response` URL fails loudly here.
+  describe('per-tenant storefront base URL', () => {
+    async function buildSession(
+      overrides: Partial<OrderForPayment> = {},
+    ): Promise<{ redirectUrl: string; body: Record<string, unknown> }> {
       const provider = new EpaycoProvider();
       const fetchImpl = vi.fn();
       fetchImpl.mockImplementationOnce(async () => new Response(JSON.stringify({ token: 'jwt' }), { status: 200 }));
       fetchImpl.mockImplementationOnce(async () =>
         new Response(JSON.stringify({ data: { sessionId: 'sess-1' } }), { status: 200 }),
       );
-      const { redirectUrl } = await provider.createCheckoutSession(order, cfg, fetchImpl as unknown as typeof fetch);
-      return redirectUrl;
+      const { redirectUrl } = await provider.createCheckoutSession(
+        { ...order, ...overrides },
+        cfg,
+        fetchImpl as unknown as typeof fetch,
+      );
+      const [, sessionInit] = fetchImpl.mock.calls[1] as [string, RequestInit];
+      return { redirectUrl, body: JSON.parse(sessionInit.body as string) as Record<string, unknown> };
     }
 
-    it('produces the byte-identical redirect URL it produced before the rename, when the new env var is set', async () => {
-      delete process.env.EPAYCO_STOREFRONT_BASE_URL;
-      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
-      expect(await buildRedirect()).toBe(
+    it('builds both the bridge-page redirect and the `response` URL on the order-supplied base', async () => {
+      const { redirectUrl, body } = await buildSession();
+      expect(redirectUrl).toBe(
         'https://tienda.example.com/pago/epayco?session=sess-1&sandbox=true&orderNumber=ORD-0001',
       );
+      expect(body.response).toBe('https://tienda.example.com/pago/epayco-retorno/ORD-0001');
     });
 
-    it('keeps the SAME http://localhost:3000 dev default when no env var is set at all', async () => {
-      delete process.env.EPAYCO_STOREFRONT_BASE_URL;
-      delete process.env.PAYMENTS_STOREFRONT_BASE_URL;
-      expect(await buildRedirect()).toBe(
-        'http://localhost:3000/pago/epayco?session=sess-1&sandbox=true&orderNumber=ORD-0001',
+    // ==== THE multi-tenancy regression test (ePayco half). ====
+    //
+    // See `wompi.test.ts`'s twin for the full reasoning. The previous
+    // implementation read ONE global env var, so both tenants below got a
+    // byte-identical base and every ePayco shopper was redirected to whichever
+    // single storefront that variable named. Both URLs ePayco receives — the
+    // bridge page the browser is sent to, and the `response` page it is
+    // returned to afterwards — must differ per tenant.
+    it('gives two different tenants two DIFFERENT bridge-page AND response URLs', async () => {
+      const a = await buildSession({ storefrontBaseUrl: 'https://tienda-a.example.com' });
+      const b = await buildSession({ storefrontBaseUrl: 'https://tienda-b.example.com' });
+
+      expect(a.redirectUrl).toBe(
+        'https://tienda-a.example.com/pago/epayco?session=sess-1&sandbox=true&orderNumber=ORD-0001',
       );
+      expect(b.redirectUrl).toBe(
+        'https://tienda-b.example.com/pago/epayco?session=sess-1&sandbox=true&orderNumber=ORD-0001',
+      );
+      expect(a.redirectUrl).not.toBe(b.redirectUrl);
+      expect(new URL(a.redirectUrl).host).not.toBe(new URL(b.redirectUrl).host);
+
+      expect(a.body.response).toBe('https://tienda-a.example.com/pago/epayco-retorno/ORD-0001');
+      expect(b.body.response).toBe('https://tienda-b.example.com/pago/epayco-retorno/ORD-0001');
+      expect(a.body.response).not.toBe(b.body.response);
     });
 
-    it('no longer reads the OLD EPAYCO_STOREFRONT_BASE_URL name (proves the rename is complete, not additive)', async () => {
-      process.env.EPAYCO_STOREFRONT_BASE_URL = 'https://stale-old-var.example.com';
-      delete process.env.PAYMENTS_STOREFRONT_BASE_URL;
-      const redirectUrl = await buildRedirect();
-      expect(redirectUrl).not.toContain('stale-old-var.example.com');
-      expect(redirectUrl).toBe(
-        'http://localhost:3000/pago/epayco?session=sess-1&sandbox=true&orderNumber=ORD-0001',
-      );
+    it('carries the order number in the response URL PATH, with no query string of its own', async () => {
+      const { body } = await buildSession();
+      const response = body.response as string;
+      // ePayco appends `?ref_payco=...` to whatever URL it was given (its own
+      // `onePage/response/response.html` sample reads that query param), and
+      // no ePayco doc promises correct behavior when a query string is already
+      // present — same reasoning as `wompi.ts`'s `?id=` append.
+      expect(response).not.toContain('?');
+      expect(response).not.toContain('&');
+
+      const returned = new URL(`${response}?ref_payco=123456789`);
+      expect(returned.pathname.split('/').pop()).toBe('ORD-0001');
+      expect(returned.searchParams.get('ref_payco')).toBe('123456789');
+      expect([...returned.searchParams.keys()]).toEqual(['ref_payco']);
+    });
+
+    it('percent-encodes a URL-significant order number into the response path segment', async () => {
+      const { body } = await buildSession({ orderNumber: 'a/b?c' });
+      expect(body.response).toBe('https://tienda.example.com/pago/epayco-retorno/a%2Fb%3Fc');
+    });
+
+    it('throws BEFORE any network call when storefrontBaseUrl is missing, rather than falling back to a global default', async () => {
+      const provider = new EpaycoProvider();
+      const fetchImpl = vi.fn();
+      await expect(
+        provider.createCheckoutSession(
+          { ...order, storefrontBaseUrl: '' } as OrderForPayment,
+          cfg,
+          fetchImpl as unknown as typeof fetch,
+        ),
+      ).rejects.toThrow(/storefrontBaseUrl is required/);
+      // A real ePayco session the shopper could never return from must never
+      // be created in the first place.
+      expect(fetchImpl).not.toHaveBeenCalled();
     });
   });
 

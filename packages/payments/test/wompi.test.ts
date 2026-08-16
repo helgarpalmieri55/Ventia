@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { WompiProvider } from '../src/wompi';
 import type { NormalizedStatus, OrderForPayment, RawRequest, TenantProviderConfig } from '../src/index';
 
@@ -20,6 +20,10 @@ const order: OrderForPayment = {
   orderNumber: 'ORD-0001',
   totalCents: 4990000,
   customerEmail: 'shopper@example.com',
+  // Per-tenant, and REQUIRED (multi-tenancy fix) — this replaced the single
+  // global `PAYMENTS_STOREFRONT_BASE_URL` env var every test in this block
+  // used to set/unset.
+  storefrontBaseUrl: 'https://tienda.example.com',
 };
 
 describe('WompiProvider.createCheckoutSession', () => {
@@ -54,14 +58,7 @@ describe('WompiProvider.createCheckoutSession', () => {
 
   // --- P3c Task 2 (requirement 3): the redirect-url return-capture path.
   describe('redirect-url (P3c return capture)', () => {
-    const ORIGINAL_ENV = process.env.PAYMENTS_STOREFRONT_BASE_URL;
-    afterEach(() => {
-      if (ORIGINAL_ENV === undefined) delete process.env.PAYMENTS_STOREFRONT_BASE_URL;
-      else process.env.PAYMENTS_STOREFRONT_BASE_URL = ORIGINAL_ENV;
-    });
-
     it('carries the order number in the URL PATH, with NO query string of its own', async () => {
-      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
       const provider = new WompiProvider();
       const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
 
@@ -76,17 +73,56 @@ describe('WompiProvider.createCheckoutSession', () => {
       expect(redirect).not.toContain('&');
     });
 
-    it('defaults to the localhost dev base when PAYMENTS_STOREFRONT_BASE_URL is unset', async () => {
-      delete process.env.PAYMENTS_STOREFRONT_BASE_URL;
+    // ==== THE multi-tenancy regression test. ====
+    //
+    // This is the whole point of threading `storefrontBaseUrl` through
+    // `OrderForPayment`, and the thing most likely to regress silently: the
+    // previous implementation read ONE global env var, so two tenants got
+    // BYTE-IDENTICAL redirect bases and every tenant's shopper landed on
+    // whichever single storefront that variable named. Worse, once the return
+    // page started PATCHing the API, tenant B's shopper landing on tenant A's
+    // storefront had A's proxy stamp `x-tenant-domain: A` — writing B's
+    // transaction id onto A's same-numbered order.
+    //
+    // Deliberately asserts on TWO different tenants in ONE test, rather than
+    // two tests each pinning one URL: a regression that reintroduces a single
+    // global base would still pass two independent single-tenant assertions if
+    // they happened to share a fixture, but cannot pass this one.
+    it('gives two different tenants two DIFFERENT redirect base URLs for the same order number', async () => {
       const provider = new WompiProvider();
-      const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
-      expect(new URL(redirectUrl).searchParams.get('redirect-url')).toBe(
-        'http://localhost:3000/pago/wompi-retorno/ORD-0001',
+
+      const tenantA = await provider.createCheckoutSession(
+        { ...order, storefrontBaseUrl: 'https://tienda-a.example.com' },
+        cfg,
       );
+      const tenantB = await provider.createCheckoutSession(
+        { ...order, storefrontBaseUrl: 'https://tienda-b.example.com' },
+        cfg,
+      );
+
+      const redirectA = new URL(tenantA.redirectUrl).searchParams.get('redirect-url')!;
+      const redirectB = new URL(tenantB.redirectUrl).searchParams.get('redirect-url')!;
+
+      expect(redirectA).toBe('https://tienda-a.example.com/pago/wompi-retorno/ORD-0001');
+      expect(redirectB).toBe('https://tienda-b.example.com/pago/wompi-retorno/ORD-0001');
+      expect(redirectA).not.toBe(redirectB);
+      expect(new URL(redirectA).host).not.toBe(new URL(redirectB).host);
+      // Same order number, same credentials — ONLY the tenant differs, so a
+      // shared-global-base regression makes these two hosts equal.
+      expect(new URL(redirectA).pathname).toBe(new URL(redirectB).pathname);
+    });
+
+    it('throws instead of falling back to any global default when storefrontBaseUrl is missing', async () => {
+      const provider = new WompiProvider();
+      await expect(
+        provider.createCheckoutSession(
+          { ...order, storefrontBaseUrl: '' } as OrderForPayment,
+          cfg,
+        ),
+      ).rejects.toThrow(/storefrontBaseUrl is required/);
     });
 
     it('percent-encodes an order number containing URL-significant characters into the path segment', async () => {
-      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
       const provider = new WompiProvider();
       const { redirectUrl } = await provider.createCheckoutSession(
         { ...order, orderNumber: 'a/b?c' },
@@ -98,7 +134,6 @@ describe('WompiProvider.createCheckoutSession', () => {
     });
 
     it('adding `redirect-url` does not disturb the integrity signature or any other checkout param', async () => {
-      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
       const provider = new WompiProvider();
       const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
       const url = new URL(redirectUrl);
@@ -118,7 +153,6 @@ describe('WompiProvider.createCheckoutSession', () => {
     // Wompi actually does to the URL it was handed, then prove BOTH values
     // survive the round trip and are extractable by the storefront page.
     it('survives Wompi appending `?id={transactionId}`: both orderNumber and id stay extractable', async () => {
-      process.env.PAYMENTS_STOREFRONT_BASE_URL = 'https://tienda.example.com';
       const provider = new WompiProvider();
       const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
       const redirect = new URL(redirectUrl).searchParams.get('redirect-url')!;

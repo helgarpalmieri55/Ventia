@@ -217,13 +217,38 @@ export class WebhooksController {
       provider_tenantId_eventId: { provider: event.provider, tenantId, eventId: event.eventId },
     } as const;
 
+    /** WHICH order this event turned out to be about, once resolved below.
+     *
+     * Stays null until the reference has been matched to a real order of this
+     * tenant's, so the two branches that never get that far
+     * (`invalid_reference`, `order_not_found`) record a null — which is the
+     * true answer for them, not a missing one.
+     *
+     * A closure variable rather than a `markProcessed` parameter on purpose:
+     * every terminal branch after the resolution below is about an order that
+     * is already known, so threading it through ~6 call sites would add a way
+     * to forget it (and a way to pass the wrong one) in exchange for nothing.
+     */
+    let resolvedOrderId: string | null = null;
+
     /** Stamps this event's row as processed with an outcome. Every terminal
      * branch below goes through this — including the branches that
      * deliberately do NOT touch the order — because `processedAt` is now a
      * READ value (fix 5): an event left unstamped is one the next gateway
-     * retry will reprocess. */
+     * retry will reprocess.
+     *
+     * Also persists the resolved order link. That link is what the admin
+     * "pagos por revisar" page reads to tell a merchant WHICH order a
+     * `paid_order_not_settleable` charge was about; before this column it had
+     * to be re-derived from the stored payload per provider, which could not
+     * resolve Mercado Pago at all. Written here, in the same UPDATE as the
+     * outcome, so an event's disposition and the order it applied to can never
+     * disagree. */
     const markProcessed = async (result: string): Promise<void> => {
-      await platformDb.webhookEvent.update({ where: eventKey, data: { processedAt: new Date(), result } });
+      await platformDb.webhookEvent.update({
+        where: eventKey,
+        data: { processedAt: new Date(), result, orderId: resolvedOrderId },
+      });
     };
 
     // ---- fix 6: validate the reference BEFORE the idempotency row exists.
@@ -281,17 +306,29 @@ export class WebhooksController {
     }
 
     // WebhookEvent deliberately goes through platformDb, NOT tenantDb.
-    // WebhookEvent has no RLS policy at all — the `ventia_app` role tenantDb
-    // switches to has ALL PRIVILEGES explicitly REVOKED on this table
-    // (packages/db/prisma/migrations/20260723205801_revoke_ventia_app_system_tables),
-    // the same treatment AuditLog gets (see catalog/audit.ts's identical
-    // platformDb-direct pattern) — both are the system's own record of
-    // events, not a tenant-owned catalog/order row, and `tenantId` on this
-    // model is optional precisely because some webhook events are
-    // genuinely tenant-less. For THIS controller tenantId is always known
-    // from the URL, so it's passed through explicitly on the create call
+    //
+    // The `ventia_app` role tenantDb switches to holds exactly SELECT on this
+    // table, and NOTHING else — no INSERT, no UPDATE, no DELETE. It started
+    // with ALL PRIVILEGES revoked
+    // (20260723205801_revoke_ventia_app_system_tables); the read was granted
+    // back, alone, by 20260815120000_webhook_event_tenant_read, which also
+    // enabled a `FOR SELECT` RLS policy scoped to `app.tenant_id` so a tenant
+    // sees only its own rows. That grant exists so merchants can be shown
+    // their `paid_order_not_settleable` alerts (services/api/src/
+    // payment-alerts/) — a read-only surface over what this handler records.
+    //
+    // So this create MUST stay on platformDb: it is a WRITE, and the write
+    // privilege was deliberately not granted back. That asymmetry is the
+    // point — this table is the system's own record of what a gateway told
+    // us, and no tenant-scoped code can amend it. (AuditLog gets the stricter
+    // original treatment, with no grant at all; see catalog/audit.ts's
+    // identical platformDb-direct pattern.)
+    //
+    // `tenantId` on this model is optional precisely because some webhook
+    // events are genuinely tenant-less. For THIS controller tenantId is always
+    // known from the URL, so it's passed through explicitly on the create call
     // rather than relying on any RLS scoping tenantDb would otherwise add
-    // (which isn't available here anyway).
+    // (which doesn't apply to the owner connection anyway).
     try {
       await platformDb.webhookEvent.create({
         data: {
@@ -341,6 +378,17 @@ export class WebhooksController {
     const order = await tenantDb(tenantId).order.findFirst({
       where: { tenantId, number: Number(event.reference) },
     });
+
+    // Every `markProcessed` call from here down records this link. Set once,
+    // immediately after the lookup that establishes it, rather than at each
+    // terminal branch — including the branches that go on to REJECT the event
+    // (`amount_mismatch`, `currency_mismatch`). Recording the link there is
+    // correct and deliberate: "this event named this order and was refused" is
+    // a true, useful statement, and the `result` column is what carries the
+    // disposition. The alerts page only ever reads rows whose result is
+    // `paid_order_not_settleable`, so a rejected event's link is never
+    // presented to a merchant as a charge to act on.
+    resolvedOrderId = order?.id ?? null;
 
     if (!order) {
       // A validly-authenticated event whose reference doesn't match any of

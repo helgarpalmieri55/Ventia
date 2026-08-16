@@ -8,7 +8,8 @@ import type {
   TenantProviderConfig,
   TransactionStatusResult,
 } from './index.js';
-import { resolveStorefrontBase } from './storefront-base.js';
+import { requireStorefrontBaseUrl } from './storefront-base.js';
+import { fetchGateway } from './http.js';
 
 // --- Facts below are this task's own re-verification against real
 // docs.epayco.com pages (fetched directly during this task) and, where the
@@ -56,50 +57,51 @@ import { resolveStorefrontBase } from './storefront-base.js';
 //    included defensively since this adapter is Colombia-only anyway
 //    (mirrors `wompi.ts`'s/`mercadopago.ts`'s own hardcoded `CHECKOUT_CURRENCY`
 //    reasoning), not because its necessity is verified.
-//  - **Deliberate scope decision, mirroring `mercadopago.ts`'s identical
-//    `back_urls`/`notification_url` omission and reasoning**: `response`
-//    (the browser post-payment return URL) and `confirmation` (the webhook
-//    URL) are REAL, confirmed fields on this same session-create request
-//    body (both appear in the real example fetched above) — but BOTH are
-//    deliberately omitted here. Reasoning: both need a real, tenant-specific
-//    PUBLIC URL, and `createCheckoutSession`'s only inputs
-//    (`OrderForPayment`, `TenantProviderConfig`) carry no tenant id or
-//    domain at all — this codebase resolves a tenant's real public domain
-//    dynamically, per HTTP request, from the `TenantDomain` table
-//    (`services/api/src/tenants/domain-resolver.ts`'s `DomainResolver`,
-//    keyed on an arbitrary `domain` string per tenant — NOT derivable from
-//    `PLATFORM_ROOT_DOMAIN` alone, since a tenant can have a fully custom
-//    domain registered there), and neither `STOREFRONT_INTERNAL_URL` (a
-//    single global, internal, Docker-network-only URL used for ISR
-//    revalidation — confirmed by reading `packages/core/src/env.ts` and
-//    `.env.example` directly, NOT a public per-tenant one) nor any other env
-//    var in this codebase carries that per-tenant domain today. Forcing a
-//    value here would mean fabricating a wrong domain for every tenant
-//    except (at best) one. VERIFIED this is safe to omit for now, not just
-//    convenient: a web search of ePayco's own account-settings docs found
-//    that ePayco's dashboard has a "URL Respuesta y Confirmación" panel
-//    section (account-wide, out-of-band configuration) that both a) lets a
-//    merchant configure a response/confirmation URL once per account
-//    (mirroring Wompi's dashboard-configured webhook URL and Mercado Pago's
-//    Integrations-Panel `notification_url`, the exact precedent
-//    `mercadopago.ts` relies on for the identical gap) and b) lets the
-//    account choose which transaction states actually fire the webhook.
-//    THIS IS A REAL, LOAD-BEARING GAP for whoever wires this adapter into
-//    `checkout.service.ts` (Task 4/6): if per-tenant `response`/
-//    `confirmation` URLs are ever required (e.g. because a shared ePayco
-//    merchant account can't vary the panel-level URL per storefront tenant),
-//    `OrderForPayment` or this method's inputs will need a tenant
-//    domain/base-URL threaded through — out of scope here, flagged for
-//    whoever picks it up next. Separately: since the shopper's browser is
-//    redirected to the tenant's OWN storefront's `/pago/epayco` bridge page
-//    FIRST (see the `redirectUrl`/`resolveStorefrontBase` section below)
-//    before the widget ever opens, that bridge page (Task 6) already knows
-//    its own real origin client-side (`window.location.origin`) and can
-//    build any final post-payment navigation itself via the widget's
-//    `onResponse`/`onClosed` hooks — so the missing per-tenant `response`
-//    URL may turn out to be fully avoidable rather than something Task 6
-//    strictly needs solved server-side. Flagged as an open design question
-//    for Task 6, not resolved here.
+//  - **`response` is now POPULATED; `confirmation` is still deliberately
+//    omitted.** Both are REAL, confirmed fields on this same session-create
+//    request body (both appear in the real example fetched above, and the
+//    example was re-fetched from docs.epayco.com/docs/checkout-implementacion
+//    during the multi-tenancy fix — it still shows `"response":
+//    "https://mysite.com"` and `"confirmation": "https://webhook.site/..."`,
+//    with `response` documented as the browser redirect URL the shopper
+//    returns to and `confirmation` as the server-to-server webhook).
+//
+//    Both were previously omitted for ONE shared reason: each needs a real,
+//    tenant-specific PUBLIC URL, and `createCheckoutSession`'s inputs carried
+//    no tenant id or domain at all. That blocker is gone —
+//    `OrderForPayment.storefrontBaseUrl` now carries the per-tenant public
+//    base URL, resolved per HTTP request in `checkout.service.ts` from the
+//    same `TenantDomain` row `services/api/src/tenants/domain-resolver.ts`
+//    already matched (an arbitrary per-tenant `domain` string, NOT derivable
+//    from `PLATFORM_ROOT_DOMAIN`, since a tenant can have a fully custom
+//    domain). So `response` is set, to this tenant's own
+//    `/pago/epayco-retorno/{orderNumber}` route — see `createCheckoutSession`
+//    below for what that does and, importantly, what it does NOT achieve.
+//
+//    `confirmation` stays omitted, and that is a separate judgment, not an
+//    oversight: it is the URL ePayco POSTs the SIGNATURE-VERIFIED settle
+//    payload to — the one input that can actually move an order to PAID
+//    (`services/api/src/payments/webhooks.controller.ts`). It is configured
+//    today, out of band, in ePayco's dashboard "URL Respuesta y Confirmación"
+//    panel (account-wide), which also controls which transaction states fire
+//    it at all — mirroring Wompi's dashboard-configured webhook URL and
+//    Mercado Pago's Integrations-Panel `notification_url`. Moving that live
+//    settle path onto a per-session value nobody here can test against a real
+//    sandbox account would risk silently killing webhook delivery, which is
+//    strictly worse than the UX problem the `response` field fixes. If a
+//    shared ePayco merchant account ever has to vary the confirmation URL per
+//    storefront tenant, that is its own change, with its own verification.
+//
+//  - **The `method` field is deliberately NOT sent.** The same real example
+//    body carries `"method": "POST"`, and ePayco's docs list it as `GET |
+//    POST` while stating neither a default nor which URL it governs.
+//    Community/legacy sources describe the analogous `method_confirmation`
+//    as choosing the HTTP method for the CONFIRMATION webhook — i.e. this
+//    field plausibly controls the verified settle path, not the response
+//    redirect. Sending a guessed value could silently break webhook delivery;
+//    omitting it leaves ePayco's own default in place, and every first-party
+//    sample of the response page (below) reads its parameters off the QUERY
+//    STRING, which is what a default browser redirect produces.
 //  - **Re-verified per this task's Step 1(a) instruction**: does
 //    `ePayco.checkout.configure(...)` (the CLIENT-SIDE widget call, distinct
 //    from the server-side session-create call above) accept a post-payment
@@ -239,32 +241,23 @@ const VALIDATION_BASE = 'https://secure.epayco.co';
 const CHECKOUT_CURRENCY = 'COP';
 const CHECKOUT_COUNTRY = 'CO';
 
-// **Interim, explicitly-provisional mechanism for the storefront-redirect
-// architectural gap (see the module doc comment's `response`/`confirmation`
-// section above for the full reasoning on why no per-tenant public base URL
-// reaches this adapter today).** `createCheckoutSession`'s returned
-// `redirectUrl` must point at THIS codebase's own storefront's
-// `/pago/epayco` bridge page (design doc decision 6) — a real, public,
-// per-TENANT browser-reachable base URL, which neither `OrderForPayment` nor
-// `TenantProviderConfig` carries. **This single-global-URL mechanism is a
-// real, load-bearing, multi-tenant-wrong limitation, not a convenience
-// shortcut**: every tenant's shopper would be redirected to the SAME single
-// storefront base regardless of which tenant they actually checked out on,
-// and `http://localhost:3000` is its dev-loop default. **Whoever wires
-// `EpaycoProvider` up for production MUST replace this with the real
-// per-request tenant domain**, NOT simply leave this env var in place.
+// ## Storefront base URL — RESOLVED, per tenant
 //
-// P3c Task 2 moved this resolution OUT of this file, unchanged in behavior,
-// into `storefront-base.ts` — Wompi's new return-capture redirect
-// (`/pago/wompi-retorno/{orderNumber}`) has the identical need and the
-// identical gap, so the env var is now the provider-neutral
-// `PAYMENTS_STOREFRONT_BASE_URL` (renamed from this file's original
-// `EPAYCO_STOREFRONT_BASE_URL`) shared by both adapters. Read that module's
-// doc comment — it carries the full, unabridged version of this warning.
-// The rename is the ONLY change: this adapter's produced `redirectUrl` is
-// byte-identical to before, pinned by a dedicated regression block in
-// `test/epayco.test.ts`. (The `resolveStorefrontBase` import itself lives at
-// the top of this file with the other imports.)
+// `createCheckoutSession`'s returned `redirectUrl` points at THIS codebase's
+// own storefront's `/pago/epayco` bridge page (design doc decision 6), and its
+// session-create `response` field points at that same storefront's
+// `/pago/epayco-retorno/{orderNumber}` route. Both need a real, public,
+// per-TENANT browser-reachable base URL.
+//
+// That base used to come from ONE global env var
+// (`PAYMENTS_STOREFRONT_BASE_URL`), which was multi-tenant-WRONG by
+// construction: every tenant's shopper was redirected to the same storefront
+// regardless of which tenant they checked out on. It now comes from
+// `OrderForPayment.storefrontBaseUrl`, populated per HTTP request in
+// `services/api/src/checkout/checkout.service.ts` from the tenant domain that
+// request already resolved against the `TenantDomain` table. The env var is
+// gone; `storefront-base.ts` now only VALIDATES the supplied value (and
+// throws rather than substituting anything if it is missing or malformed).
 
 function sha256Hex(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
@@ -394,17 +387,72 @@ export class EpaycoProvider implements PaymentProvider {
   /** Steps (a)+(b) of design doc decision 6, done server-side:
    * `POST /login` (HTTP Basic) → JWT, then `POST /payment/session/create`
    * (Bearer JWT) → `sessionId`. Returns a `redirectUrl` pointing at THIS
-   * storefront's own `/pago/epayco` bridge page (step (c), the client-side
-   * widget `.open()` call, is Task 6's job) — see `resolveStorefrontBase`'s
-   * doc comment for the honest, load-bearing gap in how that base URL is
-   * resolved today. */
+   * tenant's own storefront `/pago/epayco` bridge page, which loads
+   * `checkout-v2.js` and opens the widget client-side.
+   *
+   * ## The `response` field — what it fixes, and what it explicitly does NOT
+   *
+   * In `type: 'standard'` (the mode this integration uses, because card data
+   * must never touch this app), the widget does a full-page navigation to
+   * `new-checkout.epayco.co`. Established by reading ePayco's actual shipped
+   * `checkout-v2.js`: the bridge page is unloaded, so every `setHooks`
+   * closure dies and NO hook can fire. Until now that left the manual "Ya
+   * pagué, ver mi pedido" link as the only way back — a shopper who didn't
+   * click it was simply stranded on epayco.co.
+   *
+   * `response` is ePayco's own answer to that, and it is now populated with
+   * `{storefrontBaseUrl}/pago/epayco-retorno/{orderNumber}`. Verified for this
+   * change, first-party sources only:
+   *  - `docs.epayco.com/docs/checkout-implementacion`'s verbatim
+   *    session-create example carries `"response": "https://mysite.com"`,
+   *    documented as the browser redirect URL the shopper returns to.
+   *  - `docs.epayco.com/docs/paginas-de-respuestas` states the shopper is
+   *    redirected there with **`ref_payco`** in the URL parameters, and warns
+   *    the response page is "NOT reliable to validate the final state of the
+   *    transaction" and that "parameters can be manipulated by the user".
+   *  - ePayco's OWN sample repo `github.com/epayco/resources` confirms the
+   *    parameter is read off the QUERY STRING:
+   *    `onePage/response/response.html` does
+   *    `var ref_payco = getQueryParam('ref_payco')`, and
+   *    `epayco-ng6/.../response/response.component.ts` does
+   *    `params['ref_payco'] || params['x_ref_payco']` — both then GET
+   *    `https://secure.epayco.co/validation/v1/reference/{ref}`.
+   *
+   * **What this achieves: the UX dead end, and a support breadcrumb. Nothing
+   * more.** The return route sends the captured `ref_payco` to the API's
+   * provider-ref-hint endpoint, which stores it with
+   * `providerRefSource: 'hint'`. `reconciliation.worker.ts`'s provenance gate
+   * (`ACCOUNT_SCOPED_LOOKUP_PROVIDERS`) REFUSES hint-sourced refs for ePayco,
+   * because the lookup endpoint above is unauthenticated and ignores the
+   * caller's credentials entirely — any `ref_payco` resolves globally, so a
+   * truthful "PAID" from it says nothing about money reaching THIS tenant.
+   * **So this does NOT restore ePayco reconciliation coverage**: an ePayco
+   * order whose confirmation webhook never arrives still cannot be settled,
+   * and still falls through to the 15-minute stock-reservation expiry worker.
+   * Do not read the capture as having closed that gap, and do not add
+   * `'epayco'` to that Set — that needs merchant-identifier binding verified
+   * against a real sandbox account.
+   *
+   * The order number rides in the response route's PATH, not its query
+   * string, for the same reason `wompi.ts`'s does: the gateway appends its own
+   * `?ref_payco=` to whatever URL it was given, and no ePayco doc promises
+   * correct behavior when a query string is already present. */
   async createCheckoutSession(
     order: OrderForPayment,
     cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
   ): Promise<{ redirectUrl: string }> {
+    // Validated up front, before the (network-touching) login call: a
+    // missing/malformed per-tenant base must fail this checkout outright
+    // rather than create a real ePayco session the shopper can never return
+    // from. See `requireStorefrontBaseUrl` for the rules.
+    const storefrontBase = requireStorefrontBaseUrl(order.storefrontBaseUrl, 'epayco');
     const basicAuth = Buffer.from(`${cfg.publicKey}:${cfg.privateKey}`, 'utf8').toString('base64');
-    const loginRes = await fetchImpl(`${APIFY_BASE}/login`, {
+    const loginRes = await fetchGateway(
+      fetchImpl,
+      'epayco createCheckoutSession (login)',
+      `${APIFY_BASE}/login`,
+      {
       method: 'POST',
       headers: {
         Authorization: `Basic ${basicAuth}`,
@@ -420,7 +468,11 @@ export class EpaycoProvider implements PaymentProvider {
     }
     const jwt = loginBody.token;
 
-    const sessionRes = await fetchImpl(`${APIFY_BASE}/payment/session/create`, {
+    const sessionRes = await fetchGateway(
+      fetchImpl,
+      'epayco createCheckoutSession',
+      `${APIFY_BASE}/payment/session/create`,
+      {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${jwt}`,
@@ -433,6 +485,11 @@ export class EpaycoProvider implements PaymentProvider {
         currency: CHECKOUT_CURRENCY,
         country: CHECKOUT_COUNTRY,
         amount: order.totalCents / 100,
+        // The shopper's browser return URL, per tenant. See this method's doc
+        // comment for the first-party sources this was verified against, and
+        // for the explicit statement that capturing `ref_payco` here does NOT
+        // restore ePayco reconciliation coverage.
+        response: `${storefrontBase}/pago/epayco-retorno/${encodeURIComponent(order.orderNumber)}`,
         // Same slot `verifyAndParseWebhook` reads back as `x_extra1` — see
         // module doc comment's dedicated section on this naming asymmetry.
         extras: { extra1: order.orderNumber },
@@ -461,7 +518,7 @@ export class EpaycoProvider implements PaymentProvider {
       sandbox: String(cfg.sandbox),
       orderNumber: String(order.orderNumber),
     });
-    return { redirectUrl: `${resolveStorefrontBase()}/pago/epayco?${params.toString()}` };
+    return { redirectUrl: `${storefrontBase}/pago/epayco?${params.toString()}` };
   }
 
   /** Verifies and parses an ePayco confirmation ("URL de confirmación")
@@ -671,7 +728,11 @@ export class EpaycoProvider implements PaymentProvider {
     _cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
   ): Promise<TransactionStatusResult> {
-    const res = await fetchImpl(`${VALIDATION_BASE}/validation/v1/reference/${encodeURIComponent(providerRef)}`, {
+    const res = await fetchGateway(
+      fetchImpl,
+      'epayco getTransactionStatus',
+      `${VALIDATION_BASE}/validation/v1/reference/${encodeURIComponent(providerRef)}`,
+      {
       headers: { 'Content-Type': 'application/json' },
     });
     if (!res.ok) {

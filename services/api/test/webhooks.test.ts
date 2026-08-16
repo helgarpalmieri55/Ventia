@@ -633,6 +633,10 @@ describe('POST /webhooks/payments/:provider/:tenantId', () => {
       expect(webhookEvents).toHaveLength(1);
       expect(webhookEvents[0].processedAt).not.toBeNull();
       expect(webhookEvents[0].result).toBe('order_not_found');
+      // No order link, because there genuinely is no order — a true null, not
+      // a forgotten write. The one above (`paid_order_not_settleable`) proves
+      // the same code path DOES write the link when an order was resolved.
+      expect(webhookEvents[0].orderId).toBeNull();
     });
 
     it('a PENDING-status event -> 200, WebhookEvent durably recorded with a noop result, no order mutation', async () => {
@@ -1169,6 +1173,12 @@ describe('a valid payment landing on an order that can no longer be settled (wav
     // The core of the fix: NOT 'confirmed'.
     expect(events[0].result).toBe('paid_order_not_settleable');
     expect(events[0].processedAt).not.toBeNull();
+    // WHICH order the charge was about, recorded by this handler at the moment
+    // it resolved it. This is the row the merchant sees on /pagos-por-revisar,
+    // and this column is the only thing that tells them which order it names —
+    // the alerts service reads it and nothing else. An unlinked row here would
+    // show a merchant "a shopper was charged" with no way to know for what.
+    expect(events[0].orderId).toBe(orderId);
     // And it is loud: a human has to be able to find these, because it means
     // a shopper paid and has nothing.
     expect(errorSpy).toHaveBeenCalled();
@@ -1582,6 +1592,10 @@ describe('reference parsing is strict and happens before the idempotency row is 
     expect(rows).toHaveLength(1);
     expect(rows[0].result).toBe('invalid_reference');
     expect(rows[0].processedAt).not.toBeNull();
+    // This branch writes its row directly and never reaches the order lookup,
+    // so the link is null — again the true answer for a reference that never
+    // named anything.
+    expect(rows[0].orderId).toBeNull();
   });
 
   it('an all-digits reference too large for the int4 Order.number column is rejected, not 500d', async () => {

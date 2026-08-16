@@ -25,7 +25,7 @@ describe('TenantMiddleware', () => {
   });
 
   it('still resolves req.tenant and calls next() with no args on the success path', async () => {
-    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live', domain: 'demo.ventia.localhost' };
     const stubResolver = { resolve: () => Promise.resolve(tenant) } as unknown as DomainResolver;
     const middleware = new TenantMiddleware(stubResolver);
     const req = { headers: { host: 'demo.ventia.localhost' } } as Request;
@@ -40,7 +40,7 @@ describe('TenantMiddleware', () => {
   });
 
   it('prefers x-tenant-domain over a different Host header', async () => {
-    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live', domain: 'demo.ventia.localhost' };
     const resolve = vi.fn().mockResolvedValue(tenant);
     const stubResolver = { resolve } as unknown as DomainResolver;
     const middleware = new TenantMiddleware(stubResolver);
@@ -58,7 +58,7 @@ describe('TenantMiddleware', () => {
   });
 
   it('falls back to Host when x-tenant-domain is absent', async () => {
-    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live', domain: 'demo.ventia.localhost' };
     const resolve = vi.fn().mockResolvedValue(tenant);
     const stubResolver = { resolve } as unknown as DomainResolver;
     const middleware = new TenantMiddleware(stubResolver);
@@ -73,7 +73,7 @@ describe('TenantMiddleware', () => {
   });
 
   it('falls back to Host when x-tenant-domain is an empty string', async () => {
-    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live', domain: 'demo.ventia.localhost' };
     const resolve = vi.fn().mockResolvedValue(tenant);
     const stubResolver = { resolve } as unknown as DomainResolver;
     const middleware = new TenantMiddleware(stubResolver);
@@ -91,7 +91,7 @@ describe('TenantMiddleware', () => {
   });
 
   it('uses the first value when x-tenant-domain arrives as an array', async () => {
-    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live' };
+    const tenant: ResolvedTenant = { tenantId: 't1', slug: 'demo', name: 'Demo', status: 'live', domain: 'demo.ventia.localhost' };
     const resolve = vi.fn().mockResolvedValue(tenant);
     const stubResolver = { resolve } as unknown as DomainResolver;
     const middleware = new TenantMiddleware(stubResolver);

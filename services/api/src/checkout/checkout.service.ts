@@ -7,6 +7,7 @@ import { sendOrderEmails, type OrderEmailContext } from '../mailer/order-emails'
 import { adjustStockLine } from '../orders/orders.service';
 import { PaymentsService } from '../payments/payments.service';
 import { getProvider, PAYMENT_PROVIDER_NOT_CONFIGURED } from '../payments/provider-registry';
+import { tenantStorefrontBaseUrl } from '../tenants/tenant-public-url';
 import { ShippingService } from './shipping.service';
 import { nextOrderNumber } from './order-number';
 
@@ -110,7 +111,40 @@ export class CheckoutService {
     @Inject(PaymentsService) private readonly paymentsService: PaymentsService,
   ) {}
 
-  async checkout(tenantId: string, cartCookieKey: string, input: CheckoutInput): Promise<CheckoutResult> {
+  /** @param tenantDomain The PUBLIC domain this request's tenant was resolved
+   * through (`TenantDomain.domain`, supplied by `PublicTenantGuard` via
+   * `@StorefrontTenantDomain()`). Used for exactly one thing: building the
+   * tenant's own public storefront base URL, which every non-`cod` checkout
+   * hands the payment adapter as `OrderForPayment.storefrontBaseUrl`.
+   *
+   * ## Why this parameter exists (multi-tenancy fix)
+   *
+   * Wompi's `redirect-url` and ePayco's bridge-page + `response` URLs must
+   * point at the storefront the shopper is actually checking out on. Those
+   * adapters used to resolve that base from ONE global env var
+   * (`PAYMENTS_STOREFRONT_BASE_URL`), because nothing in their inputs carried a
+   * tenant domain — so in any deployment with two or more tenants on Wompi or
+   * ePayco, EVERY tenant's shopper was redirected to whichever single
+   * storefront that variable named. Once Wompi's return page began `PATCH`ing
+   * the API, that also became a cross-tenant WRITE: tenant B's shopper landing
+   * on tenant A's storefront had A's proxy stamp `x-tenant-domain: A`, writing
+   * B's transaction id onto A's same-numbered order, which A's reconciliation
+   * worker then looked up with A's own credentials.
+   *
+   * Deliberately threaded from the request rather than re-resolved here: this
+   * method already runs inside a real HTTP request whose tenant
+   * `DomainResolver` matched against the `TenantDomain` table, and adding a
+   * second resolution mechanism (a `TenantDomain` query of its own, or a
+   * derivation from `PLATFORM_ROOT_DOMAIN`) would be both redundant and wrong
+   * — a tenant can own a fully custom domain that no root-domain rule
+   * produces, and a tenant can own several, of which the right one is the one
+   * the shopper actually arrived on. */
+  async checkout(
+    tenantId: string,
+    tenantDomain: string,
+    cartCookieKey: string,
+    input: CheckoutInput,
+  ): Promise<CheckoutResult> {
     // The chosen online provider's tenant-provider-config check happens
     // FIRST, before this method touches the database at all — deliberately
     // BEFORE the transaction below, not after it commits. If this ran after
@@ -121,7 +155,17 @@ export class CheckoutService {
     // front with zero side effects. A `cod` checkout never reaches this
     // branch at all (`onlineProviderConfig` stays `null` and unused for it).
     let onlineProviderConfig: TenantProviderConfig | null = null;
+    // The tenant's own public storefront base URL, e.g.
+    // `https://tienda.example.com` (or, in dev,
+    // `http://demo-moda.ventia.localhost`). Resolved here, BEFORE the
+    // transaction opens, for exactly the same reason the credential checks
+    // below are: a malformed/absent tenant domain is knowable up front with
+    // zero side effects, and discovering it post-commit would leave a real
+    // Order row with real stock decremented and a shopper with no usable
+    // checkout. `cod` never needs it and never computes it.
+    let storefrontBaseUrl: string | null = null;
     if (input.paymentMethod !== 'cod') {
+      storefrontBaseUrl = tenantStorefrontBaseUrl(tenantDomain);
       onlineProviderConfig = await this.paymentsService.getTenantProviderConfig(tenantId, input.paymentMethod);
       if (!onlineProviderConfig) {
         throw new HttpException({ error: PAYMENT_PROVIDER_NOT_CONFIGURED }, 400);
@@ -529,6 +573,14 @@ export class CheckoutService {
           orderNumber: String(result.orderNumber),
           totalCents: result.totalCents,
           customerEmail: result.email,
+          // The PER-TENANT public storefront base, computed above from this
+          // request's own resolved tenant domain. This is what makes two
+          // tenants' shoppers come back to two different storefronts; see this
+          // method's `tenantDomain` doc comment for the cross-tenant write the
+          // previous single-global-env-var version produced. Non-null here for
+          // the same reason `onlineProviderConfig` is: both are set on exactly
+          // the `paymentMethod !== 'cod'` path, before the transaction opened.
+          storefrontBaseUrl: storefrontBaseUrl!,
         },
         onlineProviderConfig!,
       );

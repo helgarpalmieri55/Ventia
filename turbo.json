@@ -1,5 +1,43 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  // Env vars turbo passes through to every task WITHOUT making them part of
+  // any task's cache key.
+  //
+  // Turbo runs tasks in a filtered environment by default: a variable not
+  // named here (or in a task's own `env`) simply does not exist in the child
+  // process. That is the right default — it stops a build from depending on
+  // something invisible — but it strips the outbound network configuration a
+  // proxied environment needs, and the resulting failure points nowhere near
+  // the cause.
+  //
+  // Verified by removing this list and rebuilding: `@ventia/storefront:build`
+  // fails with "self-signed certificate in certificate chain" (repeated once
+  // per font request), because `next/font` fetches Google Fonts at build time
+  // through a TLS-terminating proxy whose CA is named by NODE_EXTRA_CA_CERTS
+  // — which turbo had filtered out. Running `pnpm next build` directly in the
+  // same directory succeeds, since it inherits the real environment. Restoring
+  // the list makes the build pass under turbo's default (strict) env mode, so
+  // no `--env-mode=loose` workaround is needed.
+  //
+  // Pass-through rather than `globalEnv` deliberately: this is how a build
+  // reaches the network, not an input that changes its output. Putting it in
+  // `globalEnv` would make every developer's and CI runner's differing proxy
+  // value bust the entire cache for no behavioural reason.
+  "globalPassThroughEnv": [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    // The CA bundle for the proxy's terminated TLS. This is the one whose
+    // absence produced the certificate error above; the proxy address vars
+    // are listed alongside it because an environment that needs one generally
+    // needs the others, and a build blocked outright is no better than a
+    // build that fails verification.
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE"
+  ],
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", ".next/**"] },
     "lint": {},

@@ -261,8 +261,16 @@ All three share the same provider-registry/webhook-controller/stock-reservation 
   could not read one), and a valid payment landing on an order that can no longer be settled — e.g.
   a `PAID` webhook arriving after the expiry worker cancelled the order — is recorded as
   `result: 'paid_order_not_settleable'` with a loud log, never as `'confirmed'`. Those orders mean a
-  shopper paid and has nothing, so they need a human:
-  `SELECT * FROM "WebhookEvent" WHERE result = 'paid_order_not_settleable'`.
+  shopper paid and has nothing, so they need a human — and the merchant is told so directly rather
+  than having to be told by us: `GET /v1/admin/payment-alerts` surfaces them, the admin shell shows a
+  banner on every authenticated page while any are unreviewed, and **Pagos por revisar**
+  (`/pagos-por-revisar`) holds the detail and the per-case guidance. A merchant records what they did
+  with `POST /v1/admin/payment-alerts/:id/review` (`refunded` / `order_taken_again` /
+  `no_action_needed` / `other` / `reopened`, plus an optional note), which appends a
+  `WebhookEventReview` row and moves the alert to that page's **Revisados** section. That table is
+  append-only in Postgres — `ventia_app` holds SELECT + INSERT with UPDATE/DELETE revoked — so a
+  financial discrepancy can be accounted for but never erased, and an alert marked reviewed by
+  mistake is corrected by appending a `reopened` row rather than by deleting anything.
 
 ### Onboarding, staff & launch
 
@@ -422,14 +430,34 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
       support/audit breadcrumb, and a merchant-identifier binding — or evidence that Wompi's lookup
       really is account-scoped — would make it settle-capable again by adding `'wompi'` to
       `ACCOUNT_SCOPED_LOOKUP_PROVIDERS`, one line in `reconciliation.worker.ts`.
-    - **Related, still open:** `PAYMENTS_STOREFRONT_BASE_URL` is a single *global* URL, so the
-      redirect URLs handed to Wompi and ePayco are wrong for any deployment with 2+ tenants on
-      those gateways; and ePayco shoppers in `standard` mode have no automatic return path at all
-      (the bridge page's hook-driven handlers are proven dead in that mode, leaving the manual
-      "Ya pagué" link as the only way back). Both share one root cause — `OrderForPayment`
-      carries no tenant domain — and fixing that would also unlock ePayco's response-page return,
-      which ePayco's own first-party samples show *does* carry the `ref_payco` reconciliation
-      needs.
+    - **FIXED (was: "Related, still open"):** the redirect URLs handed to Wompi and ePayco used to
+      come from a single *global* `PAYMENTS_STOREFRONT_BASE_URL`, so with 2+ tenants on those
+      gateways every shopper was redirected to one storefront — and, since Wompi's return page
+      `PATCH`es the API, tenant B's shopper landing on tenant A's storefront had A's proxy stamp
+      `x-tenant-domain: A`, writing B's transaction id onto **A's** same-numbered order, which A's
+      reconciliation worker then queried with **A's own** credentials. `OrderForPayment` now
+      carries `storefrontBaseUrl`, populated per request in `checkout.service.ts` from the
+      `TenantDomain` row that request resolved through (`@StorefrontTenantDomain()` →
+      `tenants/tenant-public-url.ts`); the env var is gone, with no fallback, so a call site that
+      omits the value fails to compile rather than silently redirecting somewhere wrong. The
+      http-vs-https choice is an explicit documented rule: `*.localhost`/`*.local`/`*.test`/
+      loopback get `http` (this repo's dev stack), every real registrable domain defaults to
+      `https`, and `STOREFRONT_PUBLIC_SCHEME` overrides both.
+    - **Also fixed: ePayco's missing return path.** ePayco `standard`-mode shoppers had no
+      automatic way back (the bridge page's hooks are proven dead in that mode — `open()` is a
+      full-page navigation — leaving the manual "Ya pagué" link as the only way back, on a page
+      the shopper had already left). With a per-tenant public URL available, `epayco.ts` now sets
+      the session-create `response` field to that tenant's own
+      `/pago/epayco-retorno/{orderNumber}` route, which captures `ref_payco` off the query string
+      exactly as ePayco's own first-party samples do (`docs.epayco.com/docs/paginas-de-respuestas`;
+      `github.com/epayco/resources`' `onePage/response/response.html` and `epayco-ng6`'s
+      `response.component.ts`). **This does NOT restore ePayco reconciliation coverage** — read the
+      two bullets above: a response-page ref is `hint`-sourced, and the provenance gate refuses
+      hint-sourced refs for ePayco because its status lookup is unauthenticated and
+      merchant-agnostic. It buys the UX return path and a support/audit breadcrumb, nothing more;
+      an ePayco order whose webhook never arrives still falls through to the expiry worker.
+      ePayco's `confirmation` (webhook) URL and its `method` field are still deliberately NOT sent
+      — both touch the *verified settle* path, which no one here can test against a real sandbox.
     - **`Order.number` is per-tenant**, so two tenants sharing one gateway account would produce
       colliding references. Pre-existing rather than introduced here — the already-shipped
       webhook path makes the identical assumption — but worth stating alongside the binding

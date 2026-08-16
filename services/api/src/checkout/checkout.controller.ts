@@ -16,7 +16,7 @@ import { Prisma, tenantDb } from '@ventia/db';
 import { checkoutAddressSchema, DEPARTAMENTOS, type CheckoutAddressInput } from '@ventia/core';
 import type { PaymentProviderId } from '@ventia/payments';
 import { PublicTenantGuard } from '../storefront/public-tenant.guard';
-import { StorefrontTenantId } from '../storefront/storefront-tenant.decorator';
+import { StorefrontTenantDomain, StorefrontTenantId } from '../storefront/storefront-tenant.decorator';
 import { CartCookieGuard } from './cart-cookie.guard';
 import { CartCookieKey } from './cart-cookie.decorator';
 import { ShippingService } from './shipping.service';
@@ -234,6 +234,11 @@ export class CheckoutController {
   @UseGuards(CartCookieGuard)
   async checkout(
     @StorefrontTenantId() tenantId: string,
+    // The tenant's own public domain, from the same `PublicTenantGuard`
+    // resolution that produced `tenantId`. Passed down because an online
+    // checkout has to hand the payment gateway a browser return URL on THIS
+    // tenant's storefront — see CheckoutService.checkout's own doc comment.
+    @StorefrontTenantDomain() tenantDomain: string,
     @CartCookieKey() cartCookieKey: string | null,
     @Body() body: unknown,
     @Res({ passthrough: true }) res: Response,
@@ -244,7 +249,7 @@ export class CheckoutController {
       throw new HttpException({ error: 'CART_EMPTY' }, 400);
     }
     const input = parseCheckoutBody(body);
-    const result = await this.checkoutService.checkout(tenantId, cartCookieKey, input);
+    const result = await this.checkoutService.checkout(tenantId, tenantDomain, cartCookieKey, input);
     // No explicit res.status() call — Nest's default status code for a POST
     // handler is already 201 (see cart.controller.ts's addItem, which relies
     // on the same default while also using @Res({ passthrough: true }) for

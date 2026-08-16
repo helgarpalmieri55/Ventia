@@ -8,7 +8,8 @@ import type {
   TenantProviderConfig,
   TransactionStatusResult,
 } from './index.js';
-import { resolveStorefrontBase } from './storefront-base.js';
+import { requireStorefrontBaseUrl } from './storefront-base.js';
+import { fetchGateway } from './http.js';
 
 // --- Facts below are cited in the Task 2 report as verified-against-real-docs
 // vs. inferred. Summary (see full citations in the commit body / task
@@ -71,9 +72,19 @@ const CHECKOUT_CURRENCY = 'COP';
  * this way is NEVER proof of payment. It is only a HINT telling reconciliation
  * WHICH transaction to look up through Wompi's own authenticated API — whose
  * response's `reference`/`amount_in_cents` must then be matched against the
- * order (see `getTransactionStatus` below and `TransactionStatusResult`). */
-function buildRedirectUrl(orderNumber: string): string {
-  return `${resolveStorefrontBase()}/pago/wompi-retorno/${encodeURIComponent(orderNumber)}`;
+ * order (see `getTransactionStatus` below and `TransactionStatusResult`).
+ *
+ * ## The base URL is PER TENANT (multi-tenancy fix)
+ *
+ * `storefrontBase` comes from `OrderForPayment.storefrontBaseUrl` — the public
+ * base URL of the storefront THIS order was placed on, resolved per HTTP
+ * request from the tenant domain the API already matched against the
+ * `TenantDomain` table. It replaced a single global `PAYMENTS_STOREFRONT_BASE_URL`
+ * env var that sent every tenant's shopper to one storefront regardless of
+ * which tenant they checked out on; see that field's doc comment in
+ * `index.ts` for the concrete cross-tenant write that produced. */
+function buildRedirectUrl(storefrontBase: string, orderNumber: string): string {
+  return `${storefrontBase}/pago/wompi-retorno/${encodeURIComponent(orderNumber)}`;
 }
 
 function sha256Hex(input: string): string {
@@ -216,6 +227,10 @@ export class WompiProvider implements PaymentProvider {
     cfg: TenantProviderConfig,
   ): Promise<{ redirectUrl: string }> {
     const integritySecret = requireSecret(cfg, 'integritySecret');
+    // Validated BEFORE any URL is built (and before the signature is
+    // computed): a missing/malformed per-tenant base must fail this call
+    // outright, never degrade into a redirect pointing somewhere else.
+    const storefrontBase = requireStorefrontBaseUrl(order.storefrontBaseUrl, 'wompi');
     const reference = order.orderNumber;
     const amountInCents = order.totalCents;
     const signature = sha256Hex(`${reference}${amountInCents}${CHECKOUT_CURRENCY}${integritySecret}`);
@@ -232,7 +247,7 @@ export class WompiProvider implements PaymentProvider {
       // has no redirect-url term, so this addition cannot and does not
       // change any previously-produced signature. See buildRedirectUrl's doc
       // comment for why the order number rides in the path, not a query param.
-      'redirect-url': buildRedirectUrl(reference),
+      'redirect-url': buildRedirectUrl(storefrontBase, reference),
     });
 
     return { redirectUrl: `${CHECKOUT_URL}?${params.toString()}` };
@@ -439,9 +454,12 @@ export class WompiProvider implements PaymentProvider {
     cfg: TenantProviderConfig,
     fetchImpl: typeof fetch = fetch,
   ): Promise<TransactionStatusResult> {
-    const res = await fetchImpl(`${this.apiBase(cfg)}/transactions/${encodeURIComponent(providerRef)}`, {
-      headers: { Authorization: `Bearer ${cfg.publicKey}` },
-    });
+    const res = await fetchGateway(
+      fetchImpl,
+      'wompi getTransactionStatus',
+      `${this.apiBase(cfg)}/transactions/${encodeURIComponent(providerRef)}`,
+      { headers: { Authorization: `Bearer ${cfg.publicKey}` } },
+    );
     if (!res.ok) {
       throw new Error(`wompi getTransactionStatus: HTTP ${res.status}`);
     }

@@ -362,3 +362,60 @@ describe('expireReservations — genuine concurrent race with a real webhook (ma
     }
   });
 });
+
+describe('sweep indexes', () => {
+  it('creates both partial indexes with the predicate the sweeps filter on', async () => {
+    const rows = await prisma.$queryRawUnsafe<{ indexname: string; indexdef: string }[]>(
+      `SELECT indexname, indexdef FROM pg_indexes
+       WHERE tablename = 'Order' AND indexname LIKE '%sweep%'
+       ORDER BY indexname`,
+    );
+
+    expect(rows.map((r) => r.indexname)).toEqual([
+      'Order_reconciliation_sweep_idx',
+      'Order_stock_reservation_sweep_idx',
+    ]);
+    // Partial, not full — the point is an index that stays the size of
+    // "orders currently mid-payment" rather than growing with every order the
+    // platform has ever taken.
+    for (const row of rows) {
+      expect(row.indexdef).toContain('WHERE');
+      expect(row.indexdef).toContain('PENDING');
+    }
+  });
+
+  it('is actually USABLE for the expiry sweep query, not merely present', async () => {
+    // A partial index whose predicate does not match the query is dead weight
+    // at any table size, and nothing about its mere existence would reveal
+    // that. `enable_seqscan = off` makes the planner show whether it CAN use
+    // the index for this exact query shape — which is the real question here,
+    // since these test tables are far too small for it to prefer an index on
+    // cost alone.
+    // `SET LOCAL` is scoped to a transaction and Prisma's raw helpers send one
+    // statement per call, so both run inside an explicit $transaction.
+    const text = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
+      const plan = await tx.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
+        `EXPLAIN SELECT id, "tenantId" FROM "Order"
+         WHERE "stockReservedUntil" < now() AND status = 'PENDING'
+         ORDER BY "stockReservedUntil" ASC LIMIT 500`,
+      );
+      return plan.map((r) => r['QUERY PLAN']).join('\n');
+    });
+    expect(text).toContain('Order_stock_reservation_sweep_idx');
+  });
+
+  it('is actually USABLE for the reconciliation sweep query', async () => {
+    const text = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
+      const plan = await tx.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
+        `EXPLAIN SELECT id FROM "Order"
+         WHERE status = 'PENDING' AND "paymentStatus" IN ('PENDING','FAILED')
+           AND "stockReservedUntil" IS NOT NULL AND "createdAt" < now()
+         ORDER BY "createdAt" ASC LIMIT 200`,
+      );
+      return plan.map((r) => r['QUERY PLAN']).join('\n');
+    });
+    expect(text).toContain('Order_reconciliation_sweep_idx');
+  });
+});

@@ -457,6 +457,36 @@ model WebhookEvent {
   result      String?
   createdAt   DateTime  @default(now())
 
+  // WHICH order this event was about, as resolved by the handler that
+  // processed it — the authoritative link, written once by
+  // services/api/src/payments/webhooks.controller.ts at the moment it already
+  // had the order in hand.
+  //
+  // This replaces re-deriving the link from `payload` after the fact, which is
+  // what the deleted `payment-alerts/webhook-links.ts` used to do. That
+  // approach needed per-provider knowledge of each gateway's body shape, was
+  // lossy (Mercado Pago's notification body carries no order reference AT ALL
+  // — just `{type, data:{id}}` — so those alerts could only be resolved via
+  // `Order.providerRef`, and only when one had been recorded), and read fields
+  // the handler had deliberately declined to trust. Recording what the handler
+  // actually resolved makes all three problems go away at once.
+  //
+  // Nullable, and genuinely so — three cases have no order by construction:
+  // an `invalid_reference` row (the reference never parsed), an
+  // `order_not_found` row (it parsed and matched nothing), and any future
+  // tenant-less writer. It is also null on every row written BEFORE this
+  // column existed; those are deliberately not backfilled, because the only
+  // way to backfill them is the payload re-derivation this column exists to
+  // retire. A legacy alert therefore renders as unidentified, carrying the
+  // gateway's own event id — the same thing the merchant already had.
+  //
+  // NOT a Prisma relation to `Order`, matching `InventoryMovement.orderId`
+  // above: a relation would imply a foreign key, and this table is the
+  // system's immutable record of what a gateway said — it must not acquire a
+  // constraint that could make a `WebhookEvent` row un-writable, or
+  // cascade-delete the evidence, because of the state of the order it names.
+  orderId     String?   @db.Uuid
+
   // Tenant-SCOPED idempotency key (widened from `@@unique([provider,
   // eventId])`, P3 wave-1 security fix 4). The old, global key was wrong for
   // an explicitly supported deployment shape: two Ventia tenants sharing ONE
@@ -479,6 +509,98 @@ model WebhookEvent {
   // `tenantId` from the URL path; any future tenant-less writer must bring its
   // own dedupe.
   @@unique([provider, tenantId, eventId])
+  // Backs the admin "pagos por revisar" list
+  // (services/api/src/payment-alerts/payment-alerts.service.ts), whose
+  // predicate + ordering are exactly `("tenantId", result)` filtered,
+  // `processedAt` descending. Added in
+  // 20260815120000_webhook_event_tenant_read alongside this table's SELECT
+  // grant + RLS policy for `ventia_app`; see that migration for why a tenant
+  // can now read (and only read) its own rows here.
+  @@index([tenantId, result, processedAt(sort: Desc)])
+}
+
+// What a merchant DID about a `paid_order_not_settleable` alert. A small
+// closed set rather than free text, because the whole point of the review
+// record is that it can be read back later by someone who was not there:
+// "otro" + a note degrades gracefully, but the four real outcomes stay
+// countable and unambiguous.
+//
+// `reopened` is the odd one out and deliberately lives in the same enum: it
+// is still a statement about what a person did ("this was marked reviewed by
+// mistake — it is not handled"), and keeping it here is what lets the whole
+// history be one append-only sequence with no second mechanism. It is the
+// ONLY value that moves an alert back OUT of "Revisados" — see
+// `WebhookEventReview`'s comment on how current state is derived.
+enum WebhookEventReviewAction {
+  refunded
+  order_taken_again
+  no_action_needed
+  other
+  reopened
+}
+
+/// An APPEND-ONLY, tenant-owned record of a merchant reviewing one
+/// `WebhookEvent` alert. Deliberately a separate table rather than a column
+/// on `WebhookEvent`:
+///
+/// `WebhookEvent` is the system's own immutable statement of what a gateway
+/// told us — `ventia_app` holds SELECT on it and nothing else (migration
+/// 20260815120000), and writes stay on the owner connection. Letting a
+/// merchant amend that row to silence an alarm would destroy exactly the
+/// record the alarm exists to protect. So the merchant's own account of what
+/// they did lives HERE, alongside it, and the two are never confused: one is
+/// what the gateway said, the other is what a human claims to have done
+/// about it.
+///
+/// ## Append-only, enforced by Postgres
+///
+/// Migration 20260815140000 grants `ventia_app` SELECT + INSERT on this table
+/// and REVOKEs UPDATE/DELETE, and its RLS policies are `FOR SELECT` / `FOR
+/// INSERT` only. A tenant can therefore add to this history and read it back,
+/// and can never rewrite or erase a row of it — not even through a service
+/// that tried to. That is the same posture `WebhookEvent` itself gets, for
+/// the same reason: a financial discrepancy must never be able to vanish
+/// without a trace.
+///
+/// ## Current state is DERIVED, never stored
+///
+/// There is no `reviewed` boolean anywhere. An alert's current state is the
+/// LATEST row here for that event (`createdAt DESC, id DESC`): reviewed
+/// unless that latest row's action is `reopened`. Undo is therefore just
+/// another append — never an UPDATE, never a DELETE — so the full history of
+/// who said what, and when, survives every correction.
+///
+/// ## Why the reviewer is denormalized
+///
+/// `reviewedByEmail` is a SNAPSHOT, not a join. Two reasons: `User` and
+/// `Membership` have ALL PRIVILEGES revoked from `ventia_app`
+/// (20260723205801), so tenant-scoped code genuinely cannot join to them; and
+/// an audit row should say who acted at the time even after that person's
+/// staff account is removed from the store.
+///
+/// Follows `StaffInvite`'s shape — plain `tenantId`/`webhookEventId` columns
+/// with no Prisma relation and no FK, which is this schema's convention for
+/// tenant-owned side tables. The service validates that the referenced event
+/// is visible to this tenant (through the RLS-scoped client) BEFORE inserting,
+/// which is the check that actually matters; a FK would only prove the row
+/// exists somewhere, not that it is this merchant's to review.
+model WebhookEventReview {
+  id               String                   @id @default(uuid()) @db.Uuid
+  tenantId         String                   @db.Uuid
+  webhookEventId   String                   @db.Uuid
+  action           WebhookEventReviewAction
+  /// Optional free-text detail from the merchant (e.g. a refund receipt id).
+  /// Never a substitute for `action` — it is unstructured and nobody counts it.
+  note             String?
+  /// WHO acted. `reviewedByUserId` is the durable identity;
+  /// `reviewedByEmail` is the human-readable snapshot (see above).
+  reviewedByUserId String                   @db.Uuid
+  reviewedByEmail  String
+  createdAt        DateTime                 @default(now())
+
+  // Backs both reads this table has: "the latest review per event" (the list's
+  // batched lookup) and the "Revisados" section's ordering.
+  @@index([tenantId, webhookEventId, createdAt(sort: Desc)])
 }
 
 // ---- Agent ----

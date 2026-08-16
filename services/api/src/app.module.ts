@@ -7,6 +7,7 @@ import { CheckoutModule } from './checkout/checkout.module';
 import { HealthController } from './health/health.controller';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { OrdersModule } from './orders/orders.module';
+import { PaymentAlertsModule } from './payment-alerts/payment-alerts.module';
 import { SettingsModule } from './settings/settings.module';
 import { StaffModule } from './staff/staff.module';
 import { StorefrontModule } from './storefront/storefront.module';
@@ -23,6 +24,7 @@ export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
     CheckoutModule,
     OnboardingModule,
     OrdersModule,
+    PaymentAlertsModule,
     SettingsModule,
     StaffModule,
     StorefrontModule,

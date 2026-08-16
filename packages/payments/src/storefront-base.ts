@@ -1,52 +1,119 @@
-/** Shared resolution of THIS codebase's own storefront base URL, for the two
- * adapters whose gateway flow sends the shopper's browser back to a
- * first-party storefront route: `epayco.ts` (its `/pago/epayco` bridge page,
- * shipped in P3b Task 6) and `wompi.ts` (its `/pago/wompi-retorno/{orderNumber}`
- * return-capture page, added in P3c Task 2).
+/** Shared VALIDATION of the per-tenant storefront base URL that the two
+ * adapters with a first-party browser return route — `wompi.ts` (its
+ * `/pago/wompi-retorno/{orderNumber}` return-capture page) and `epayco.ts`
+ * (its `/pago/epayco` widget bridge page and `/pago/epayco-retorno/{orderNumber}`
+ * response page) — build their redirect URLs on top of.
  *
- * **Interim, explicitly-provisional mechanism for the storefront-redirect
- * architectural gap (see `epayco.ts`'s module doc comment's
- * `response`/`confirmation` section for the full reasoning on why no
- * per-tenant public base URL reaches these adapters today).** Each adapter's
- * returned/registered redirect URL must point at THIS codebase's own
- * storefront — a real, public, per-TENANT browser-reachable base URL, which
- * neither `OrderForPayment` nor `TenantProviderConfig` carries, and which
- * sourcing correctly requires widening `OrderForPayment` and touching
- * `checkout.controller.ts`/`checkout.service.ts`. Rather than silently
- * hardcode any single tenant's real domain (which would produce a WRONG,
- * broken redirect for every other tenant, in production, with no signal that
- * anything's wrong) or throw unconditionally (which would make these adapters
- * unusable end-to-end even for local, single-tenant-dev testing), this reads
- * ONE explicitly provisional env var, defaulting to `http://localhost:3000`
- * for a single-tenant dev loop (mirroring `revalidate.ts`'s identical
- * `STOREFRONT_INTERNAL_URL` dev default) — **this default, and indeed this
- * whole mechanism, is WRONG for any real multi-tenant deployment where more
- * than one tenant uses ePayco or Wompi**: every tenant's shopper would be
- * redirected to the SAME single storefront base regardless of which tenant
- * they actually checked out on. This is a real, load-bearing,
- * multi-tenant-wrong limitation, not a convenience shortcut — flagged loudly
- * here, in the commit body, and in this task's own report: **whoever wires
- * these adapters' redirect URLs up for production MUST replace this with the
- * real per-request tenant domain** (resolved the same way
- * `services/api/src/tenants/domain-resolver.ts`'s `DomainResolver` already
- * resolves an inbound request's host to a tenant, threaded down through
- * `OrderForPayment` or an equivalent widened input), NOT simply leave this
- * env var in place for production.
+ * ## What changed here, and why the old warning is gone rather than reworded
  *
- * ## Naming (P3c Task 2)
+ * This module used to RESOLVE that base URL, from one global env var
+ * (`PAYMENTS_STOREFRONT_BASE_URL`, defaulting to `http://localhost:3000`),
+ * under a long doc comment stating that doing so was "a real, load-bearing,
+ * multi-tenant-wrong limitation": with two or more tenants on Wompi or
+ * ePayco, every tenant's shopper was redirected to whichever single
+ * storefront that one variable named.
  *
- * This started life as `EPAYCO_STOREFRONT_BASE_URL`, private to `epayco.ts`.
- * P3c gave Wompi the identical need, and the gap above affects both adapters
- * IDENTICALLY — so it was renamed to the provider-neutral
- * `PAYMENTS_STOREFRONT_BASE_URL` and moved here, rather than duplicated as
- * two near-identical provider-specific vars that would then have to be kept
- * in sync (and that would imply, wrongly, that this is a per-provider
- * concern). The env var name is the ONLY thing that changed: the default and
- * the produced URLs are byte-identical to before the rename, which
- * `test/epayco.test.ts`'s dedicated regression block pins explicitly.
+ * That is fixed, so the warning is deleted rather than softened — it would
+ * now be a stale description of a problem that no longer exists.
+ * `OrderForPayment.storefrontBaseUrl` (packages/payments/src/index.ts) carries
+ * the REAL, per-tenant public base URL of the storefront the order was placed
+ * on, resolved per HTTP request in
+ * `services/api/src/checkout/checkout.service.ts` from the tenant domain that
+ * `services/api/src/tenants/domain-resolver.ts` already matched against the
+ * `TenantDomain` table for that request. Two tenants therefore get two
+ * different redirect bases, by construction.
+ *
+ * ## Why `PAYMENTS_STOREFRONT_BASE_URL` was removed outright, with no
+ * ## dev/local fallback left behind
+ *
+ * A "dev only" fallback would have kept exactly the property that made the
+ * original bug invisible: a call site that fails to supply a per-tenant value
+ * silently gets a plausible-looking global one, and nothing anywhere reports
+ * that the redirect is wrong. It would also mean the dev loop exercises a
+ * DIFFERENT code path from production — which is how a redirect nobody
+ * noticed shipped in the first place.
+ *
+ * It is also unnecessary. Dev resolves per-tenant domains through the very
+ * same machinery production does: Caddy serves `http://*.ventia.localhost`
+ * (docker/Caddyfile), the seeded tenants own real `TenantDomain` rows
+ * (`demo-moda.ventia.localhost`, `demo-tech.ventia.localhost`), and the
+ * storefront's `/api/checkout/*` proxy forwards its own `Host` as
+ * `x-tenant-domain`. A request that resolves no tenant never reaches checkout
+ * at all (`PublicTenantGuard` 404s first), so there is no real code path where
+ * a base URL is genuinely unavailable — only call sites that forgot, which is
+ * precisely what should fail loudly.
+ *
+ * The env var is correspondingly gone from `.env.example`. A leftover value in
+ * someone's local `.env` is now simply ignored — nothing reads it.
  */
-export const STOREFRONT_BASE_ENV_VAR = 'PAYMENTS_STOREFRONT_BASE_URL';
 
-export function resolveStorefrontBase(): string {
-  return process.env[STOREFRONT_BASE_ENV_VAR] ?? 'http://localhost:3000';
+/** Validates a caller-supplied storefront base URL and returns it normalized
+ * (no trailing slash), or THROWS.
+ *
+ * Throwing rather than degrading is the whole point: every failure mode here
+ * — an empty string, a relative path, a `javascript:` URL, a base with a query
+ * string that would swallow the gateway's appended `?id=`/`?ref_payco=` — ends
+ * with a shopper sent somewhere wrong. `createCheckoutSession` failing loudly
+ * is recoverable (the API returns an error and no shopper is redirected
+ * anywhere); a quietly malformed redirect is not.
+ *
+ * Rules, and why each one:
+ *  - **Non-empty string.** Guards the one case TypeScript cannot: a value read
+ *    from JSON/`process.env`/a stale Redis cache that typed as `string` but is
+ *    `''` or `undefined` at runtime.
+ *  - **Parses as an absolute URL with an `http:`/`https:` scheme.** Rejects
+ *    relative paths (`/pago`), scheme-relative (`//evil.example`), and every
+ *    non-navigational scheme (`javascript:`, `data:`, `file:`).
+ *  - **No query string and no fragment.** Both adapters append a PATH to this
+ *    value, and both gateways then append their own query param to the result;
+ *    a base carrying `?`/`#` produces a URL where the order number lands
+ *    inside a query value (the exact ambiguity `wompi.ts`'s path-segment shape
+ *    exists to avoid).
+ *  - **No userinfo (`user:pass@`).** Never legitimate for a storefront origin
+ *    and a classic URL-spoofing shape.
+ *
+ * A path IS allowed (e.g. a storefront mounted under `https://x.example/co`),
+ * since that is a real deployment shape and appending to it is unambiguous.
+ * The trailing slash is stripped so callers can concatenate `/pago/...`
+ * without producing a double slash.
+ *
+ * `provider` only shapes the error message, so a thrown error names which
+ * adapter rejected the value.
+ */
+export function requireStorefrontBaseUrl(value: string | undefined | null, provider: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(
+      `${provider}: OrderForPayment.storefrontBaseUrl is required — it must be the tenant's own public storefront base URL (e.g. https://tienda.example.com)`,
+    );
+  }
+  const raw = value.trim();
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(
+      `${provider}: OrderForPayment.storefrontBaseUrl must be an absolute http(s) URL, got ${JSON.stringify(raw)}`,
+    );
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `${provider}: OrderForPayment.storefrontBaseUrl must use http: or https:, got ${JSON.stringify(parsed.protocol)}`,
+    );
+  }
+  if (parsed.search.length > 0 || parsed.hash.length > 0) {
+    throw new Error(
+      `${provider}: OrderForPayment.storefrontBaseUrl must not carry a query string or fragment, got ${JSON.stringify(raw)}`,
+    );
+  }
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new Error(
+      `${provider}: OrderForPayment.storefrontBaseUrl must not carry userinfo credentials`,
+    );
+  }
+
+  // `URL` normalizes a bare origin's pathname to `'/'`; strip that (and any
+  // real trailing slash) so callers concatenate `/pago/...` cleanly.
+  const normalized = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+  return normalized;
 }
