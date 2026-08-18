@@ -1,6 +1,7 @@
 import { Controller, HttpCode, HttpException, Inject, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Prisma, platformDb, tenantDb } from '@ventia/db';
+import { WebhookVerificationUnavailableError } from '@ventia/payments';
 import type { NormalizedPaymentEvent, PaymentProviderId, RawRequest } from '@ventia/payments';
 import { ORDER_CURRENCY, PROVIDERS } from './provider-registry';
 import { PaymentsService } from './payments.service';
@@ -168,8 +169,34 @@ export class WebhooksController {
     try {
       event = await provider.verifyAndParseWebhook(rawRequest, cfg);
     } catch (err) {
-      // Per spec's explicit AC: the raw payload is still logged even though
-      // it's rejected. The order (if it were even resolvable from an
+      // Two different failures live here, and they must not get the same
+      // answer.
+      //
+      // "I could not COMPLETE the check" — ePayco's verification calls the
+      // gateway back mid-way (its confirmation signature covers neither the
+      // status nor the reference, so both are re-read from ePayco's own
+      // record), and a timeout or 5xx on that call says nothing whatsoever
+      // about the signature. Answering it with 401 tells the gateway its
+      // signature was wrong about a delivery that may be perfectly valid, and
+      // a provider that sees an endpoint 401 repeatedly may DISABLE the
+      // webhook — turning a transient network blip into silently unsettled
+      // payments. 503 says the true thing: try again.
+      //
+      // Nothing is durably recorded on either path (the `WebhookEvent` insert
+      // is below), so the gateway's retry reprocesses this delivery from
+      // scratch, which is exactly what should happen for a transient failure.
+      if (err instanceof WebhookVerificationUnavailableError) {
+        console.error('[webhooks] could not complete verification — asking the gateway to retry', {
+          provider: providerId,
+          tenantId,
+          error: err.message,
+        });
+        throw new HttpException({ error: 'WEBHOOK_VERIFICATION_UNAVAILABLE' }, 503);
+      }
+
+      // "The check FAILED" — a permanent verdict about the bytes sent. Per
+      // spec's explicit AC: the raw payload is still logged even though it's
+      // rejected. The order (if it were even resolvable from an
       // unverified/tampered payload) is NOT touched — no attempt is made to
       // parse a `reference` out of this payload for any side effect; the
       // only thing that happens here is a log line and a 401.

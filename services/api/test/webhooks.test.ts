@@ -1659,3 +1659,76 @@ describe('reference parsing is strict and happens before the idempotency row is 
     },
   );
 });
+
+describe('an unreachable gateway is 503, not a bogus 401 (ePayco re-verification)', () => {
+  it('answers 503 and records NOTHING when the verification lookup fails', async () => {
+    // ePayco's confirmation signature covers neither the payment status nor
+    // the order reference, so verification calls the gateway back mid-way. A
+    // timeout there says nothing about the signature — and answering "your
+    // signature was wrong" is not merely inaccurate: a provider that sees an
+    // endpoint 401 repeatedly may disable the webhook, which turns a network
+    // blip into silently unsettled payments.
+    const { tenantId } = await signUpWithTenant('webhooks-epayco-unavailable@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'epayco', FAKE_EPAYCO_CREDS);
+    const { orderNumber } = await seedOrderWithNumberAndTotal(tenantId, { number: 9101, totalCents: 30_000 });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // The lookup rejects outright, exactly as a timeout or DNS failure would.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('epayco getTransactionStatus: request to https://secure.epayco.co/… timed out after 10000ms');
+    });
+
+    const res = await postEpaycoWebhook(tenantId, {
+      xRefPayco: 'ref-unavailable-1',
+      xTransactionId: 'txn-unavailable-1',
+      xAmount: '300.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: String(orderNumber),
+      epaycoCustomerId: FAKE_EPAYCO_CREDS.epaycoCustomerId,
+      eventsSecret: FAKE_EPAYCO_CREDS.eventsSecret,
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('WEBHOOK_VERIFICATION_UNAVAILABLE');
+    expect(res.body.error).not.toBe('WEBHOOK_INVALID_SIGNATURE');
+
+    // Nothing durable: the WebhookEvent insert happens after verification, so
+    // the gateway's retry reprocesses this delivery from scratch. A recorded
+    // row here would be worse than useless — it is the idempotency key, and
+    // one written for a delivery that was never verified could swallow the
+    // retry that WOULD have settled the order.
+    const events = await prisma.webhookEvent.findMany({ where: { tenantId } });
+    expect(events).toHaveLength(0);
+
+    // And the order is untouched, still awaiting its payment.
+    const order = await prisma.order.findFirst({ where: { tenantId, number: orderNumber } });
+    expect(order?.status).toBe('PENDING');
+    expect(order?.paymentStatus).toBe('PENDING');
+  });
+
+  it('still answers 401 for a genuinely bad signature', async () => {
+    // The other half: a permanent verdict must stay permanent. Retrying a
+    // tampered delivery reaches the same conclusion, and 503 would invite the
+    // gateway to keep resending it.
+    const { tenantId } = await signUpWithTenant('webhooks-epayco-badsig@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'epayco', FAKE_EPAYCO_CREDS);
+    const { orderNumber } = await seedOrderWithNumberAndTotal(tenantId, { number: 9102, totalCents: 30_000 });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await postEpaycoWebhook(tenantId, {
+      xRefPayco: 'ref-badsig-1',
+      xTransactionId: 'txn-badsig-1',
+      xAmount: '300.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: String(orderNumber),
+      epaycoCustomerId: FAKE_EPAYCO_CREDS.epaycoCustomerId,
+      // Wrong secret => the confirmation hash will not match.
+      eventsSecret: 'not-the-real-p-key',
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('WEBHOOK_INVALID_SIGNATURE');
+  });
+});

@@ -302,6 +302,7 @@ export interface PaymentProvider {
  * assert against the same rules the adapters enforce, rather than discovering
  * a mismatch only when a real checkout throws. See its own doc comment for the
  * rules and for why every failure mode throws instead of degrading. */
+export { WebhookVerificationUnavailableError } from './errors.js';
 export { requireStorefrontBaseUrl } from './storefront-base.js';
 export { WompiProvider } from './wompi.js';
 export { MercadoPagoProvider } from './mercadopago.js';
