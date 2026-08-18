@@ -551,6 +551,19 @@ model WebhookEvent {
   // grant + RLS policy for `ventia_app`; see that migration for why a tenant
   // can now read (and only read) its own rows here.
   @@index([tenantId, result, processedAt(sort: Desc)])
+  // Declared to match the index 20260815160000_webhook_event_order_id already
+  // created in the database. It answers the reverse of the alerts list's
+  // question — "what did the gateway ever tell us about THIS order?" — which
+  // is the natural support query once the link exists, and which would
+  // otherwise scan.
+  //
+  // It was missing here, which is not cosmetic: Prisma diffs the schema
+  // against the migration history, so every `migrate dev` / `migrate diff`
+  // emitted a spurious `DROP INDEX` for it. Anyone who accepted that diff
+  // would have silently dropped a real index in production, and anyone who
+  // rejected it had to re-reject it on every subsequent migration. Found while
+  // adding the WhatsApp tables; the drift predates that work.
+  @@index([tenantId, orderId])
 }
 
 // What a merchant DID about a `paid_order_not_settleable` alert. A small
