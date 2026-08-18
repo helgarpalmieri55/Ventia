@@ -190,6 +190,9 @@ describe('escalate_to_human — what a successful handoff does', () => {
 
     const mail = sentMail.find((m) => m.to === MERCHANT_EMAIL);
     expect(mail?.text).toContain('no dejó datos de contacto');
+    // And a way to actually find them: for an anonymous shopper the link IS
+    // the notice's usefulness.
+    expect(mail?.text).toContain(`/conversaciones?c=${conversation.id}`);
   });
 
   it('does not mail the merchant twice about the same conversation', async () => {

@@ -5,6 +5,7 @@ import { AgentBudgetService } from './agent-budget.service';
 import { AgentThrottleService } from './agent-throttle.service';
 import { AgentController } from './agent.controller';
 import { AgentAdminController } from './agent-admin.controller';
+import { ConversationsController } from './conversations.controller';
 import { AgentService, ANTHROPIC_CLIENT } from './agent.service';
 import { RedisModule } from '../common/redis.module';
 import { AdminModule } from '../admin/admin.module';
@@ -29,7 +30,7 @@ import { CheckoutModule } from '../checkout/checkout.module';
  */
 @Module({
   imports: [RedisModule, StorefrontModule, CheckoutModule, AdminModule, MailerModule],
-  controllers: [AgentController, AgentAdminController],
+  controllers: [AgentController, AgentAdminController, ConversationsController],
   providers: [
     AgentToolsService,
     AgentBudgetService,

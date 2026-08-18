@@ -2,33 +2,44 @@ import { describe, expect, it } from 'vitest';
 import { navItems } from '../lib/nav';
 
 describe('navItems', () => {
-  it('gives owners all 8 items in order, with es-CO labels', () => {
+  it('gives owners all 9 items in order, with es-CO labels', () => {
     const items = navItems('owner');
 
-    expect(items).toHaveLength(8);
+    expect(items).toHaveLength(9);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
       'Importar CSV',
       'Pedidos',
       'Pagos por revisar',
+      'Conversaciones',
       'Equipo',
       'Configuración',
       'Lanzamiento',
     ]);
   });
 
-  it('gives staff only the 5 catalog items', () => {
+  it('gives staff only the 6 catalog items', () => {
     const items = navItems('staff');
 
-    expect(items).toHaveLength(5);
+    expect(items).toHaveLength(6);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
       'Importar CSV',
       'Pedidos',
       'Pagos por revisar',
+      'Conversaciones',
     ]);
+  });
+
+  it('gives both roles /conversaciones, mirroring the API\'s owner-or-staff guard', () => {
+    // ConversationsController uses AdminSessionGuard with no @Roles(), for the
+    // same reason as orders and payment alerts: answering a shopper the agent
+    // handed over is fulfilment work, and staff are the people most likely to
+    // be doing it.
+    expect(navItems('owner').some((item) => item.href === '/conversaciones')).toBe(true);
+    expect(navItems('staff').some((item) => item.href === '/conversaciones')).toBe(true);
   });
 
   it('gives both roles /pagos-por-revisar, mirroring the API\'s owner-or-staff guard', () => {

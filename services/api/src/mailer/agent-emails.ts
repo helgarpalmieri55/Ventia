@@ -45,7 +45,13 @@ export interface HandoffEmailContext {
 export async function sendHandoffEmail(mailer: Mailer, ctx: HandoffEmailContext): Promise<void> {
   const contactLine = ctx.shopperRef
     ? `Contacto del cliente: ${ctx.shopperRef}`
-    : 'El cliente escribió desde el chat de la tienda y no dejó datos de contacto. Puedes responderle desde la conversación en tu panel.';
+    : 'El cliente escribió desde el chat de la tienda y no dejó datos de contacto. Abre la conversación para ver qué necesita.';
+
+  // Same `ADMIN_URL` fallback every other merchant-facing link in this codebase
+  // uses (staff invites, email verification). The link is the whole point of
+  // the notice for an anonymous web shopper: without it the merchant is told
+  // someone needs help and has no way to find out who.
+  const adminUrl = process.env.ADMIN_URL ?? 'http://admin.ventia.localhost';
 
   await mailer.send({
     to: ctx.merchantContactEmail,
@@ -61,7 +67,8 @@ ${ctx.transcriptSummary}
 
 ${contactLine}
 
-Conversación: ${ctx.conversationId}
+Abre la conversación:
+${adminUrl}/conversaciones?c=${ctx.conversationId}
 
 Le dijimos al cliente que alguien de tu equipo lo contactará.`,
   });

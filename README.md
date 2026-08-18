@@ -281,9 +281,14 @@ never from the body. Six tools run server-side against that tenant only — `sea
 `get_product`, `recommend_products`, `create_cart_link`, `get_order_status`, `get_store_info`.
 `escalate_to_human` is plan-gated on `TenantLimits.humanHandoff` and is filtered out of the tool
 array — and out of the prompt's rule 7 — for a store without it, so the model is never told to reach
-for something it does not have. It marks the conversation `escalated` and emails the merchant; SPEC's
-Chatwoot conversation is a P5 line item that will become a second notifier alongside the email rather
-than a replacement.
+for something it does not have. It marks the conversation `escalated` and emails the merchant a link to the
+transcript; SPEC's Chatwoot conversation is a P5 line item that will become a second notifier
+alongside the email rather than a replacement.
+
+**Conversaciones** (`/v1/admin/conversations`, both roles) is where the merchant reads what the agent
+has been saying and answers the chats it handed over — the handoff email deep-links to a row via
+`?c=<id>`, which for an anonymous web shopper is the merchant's only route to finding out who needs
+help. `PATCH :id/resolve` marks an escalation handled so the list stays meaningful as it grows.
 
 Three independent limits, deliberately not one:
 

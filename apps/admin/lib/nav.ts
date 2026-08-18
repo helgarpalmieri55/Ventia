@@ -1,3 +1,4 @@
+import { CONVERSATIONS_PATH } from './conversations-api';
 import { ALERTS_PATH } from './payment-alerts-api';
 
 export type Role = 'owner' | 'staff';
@@ -27,6 +28,17 @@ const CATALOG_ITEMS: NavItem[] = [
   // still being live. Its empty state is a genuinely useful answer ("no
   // tienes pagos por revisar"), not filler.
   { href: ALERTS_PATH, label: 'Pagos por revisar' },
+  // Both roles, same reasoning as Pedidos and Pagos por revisar: answering a
+  // shopper the AI handed over is fulfilment work, not account
+  // administration, and the API mirrors that (no @Roles() on
+  // ConversationsController).
+  //
+  // Permanent rather than conditional on there being an escalation. A store
+  // whose plan excludes human handoff still has conversations worth reading —
+  // seeing what the agent actually says to customers is the main reason a
+  // merchant opens this — and its empty state is a real answer rather than
+  // filler.
+  { href: CONVERSATIONS_PATH, label: 'Conversaciones' },
 ];
 
 /** Owner-only items — the server mirrors this with @Roles('owner') on the
