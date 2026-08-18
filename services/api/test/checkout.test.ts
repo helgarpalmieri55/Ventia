@@ -575,12 +575,15 @@ describe('POST /v1/storefront/checkout — happy path', () => {
     // lineX: 45900 * 2 = 91800 subtotal; 19% tax portion = 91800 - round(91800/1.19) = 14657.
     // lineY: 20000 * 1 = 20000 subtotal; 19% tax portion = 20000 - round(20000/1.19) = 3193.
     const expectedSubtotal = 91800 + 20000;
+    // The IVA CONTAINED IN that subtotal, not an addition to it — SPEC.md §5's
+    // "prices include IVA". Recorded on the order for the DIAN-ready
+    // breakdown, and deliberately absent from the total below.
     const expectedTax = 14657 + 3193;
     const expectedShipping = 12000; // flat-1
-    const expectedTotal = expectedSubtotal + expectedTax + expectedShipping;
+    const expectedTotal = expectedSubtotal + expectedShipping;
     expect(expectedSubtotal).toBe(111800);
     expect(expectedTax).toBe(17850);
-    expect(expectedTotal).toBe(141650);
+    expect(expectedTotal).toBe(123800);
 
     const before = await prisma.order.count({ where: { tenantId: tenantAId } });
     expect(before).toBe(0);
@@ -1452,5 +1455,95 @@ describe('POST /v1/storefront/checkout — order source is inherited from the ca
       where: { tenantId: tenantAId, email: 'web-attributed@example.com' },
     });
     expect(order.source).toBe('web');
+  });
+});
+
+/**
+ * SPEC.md §5's totals rule, pinned on its own rather than left implicit in the
+ * happy path's expected numbers.
+ *
+ * > Totals: Colombian retail convention — **prices include IVA**. Order stores
+ * > the tax breakdown per line derived from each product's tax rate
+ * > (`price_cents - price_cents / (1 + rate)` for the tax portion).
+ *
+ * The code read `subtotal + tax + shipping` for the whole of P2b/P2c/P3,
+ * charging every shopper the IVA contained in their own basket a second time.
+ * A happy-path test whose expected total is computed the same wrong way cannot
+ * catch that, which is why this states the RULE and derives nothing.
+ */
+describe('POST /v1/storefront/checkout — prices include IVA (SPEC §5)', () => {
+  it('charges the sticker price plus shipping, and nothing else', async () => {
+    const cookieValue = await newCartWithItem('checkout-a.ventia.localhost', productXId, 1);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'iva-inclusive@example.com',
+        phone: '3009990099',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+      });
+
+    expect(res.status).toBe(201);
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'iva-inclusive@example.com' },
+    });
+
+    // productX is 45.900 at 19% IVA; flat-1 ships for 12.000. The shopper was
+    // quoted 45.900 on the product page, so that is what the product costs.
+    expect(order.subtotalCents).toBe(45_900);
+    expect(order.shippingCents).toBe(12_000);
+    expect(order.totalCents).toBe(57_900);
+  });
+
+  it('records the IVA CONTAINED IN the price, for the DIAN breakdown', async () => {
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'iva-inclusive@example.com' },
+    });
+
+    // 45.900 - round(45.900 / 1.19) = 7.329. Strictly less than the subtotal,
+    // which is the arithmetic signature of an INCLUDED tax: an added 19% would
+    // be 8.721 and would push the total to 66.621.
+    expect(order.taxCents).toBe(45_900 - Math.round(45_900 / 1.19));
+    expect(order.taxCents).toBeLessThan(order.subtotalCents);
+    expect(order.totalCents).toBe(order.subtotalCents + order.shippingCents);
+  });
+
+  it('is unaffected by a zero-rated or excluded product', async () => {
+    // `excluido` and `0` products have no IVA portion at all; the total is
+    // still price + shipping, so the rule holds without a special case.
+    const zeroRated = await prisma.product.create({
+      data: {
+        tenantId: tenantAId,
+        name: 'Libro Excluido',
+        slug: `libro-excluido-${Date.now()}`,
+        priceCents: 30_000,
+        status: 'active',
+        stock: 5,
+        taxRate: 'EXCLUIDO',
+      },
+    });
+    const cookieValue = await newCartWithItem('checkout-a.ventia.localhost', zeroRated.id, 1);
+
+    await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'iva-excluido@example.com',
+        phone: '3009990098',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+      });
+
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'iva-excluido@example.com' },
+    });
+    expect(order.taxCents).toBe(0);
+    expect(order.totalCents).toBe(30_000 + 12_000);
   });
 });

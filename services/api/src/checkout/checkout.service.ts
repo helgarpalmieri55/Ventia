@@ -351,7 +351,18 @@ export class CheckoutService {
           subtotalCents,
         );
 
-        const totalCents = subtotalCents + taxCents + shippingCents;
+        // NOT `+ taxCents`. SPEC.md §5: "Colombian retail convention —
+        // **prices include IVA**. Order stores the tax breakdown per line
+        // derived from each product's tax rate (`price_cents - price_cents /
+        // (1 + rate)` for the tax portion)". `taxCents` is therefore the IVA
+        // ALREADY CONTAINED IN `subtotalCents`, recorded so the order can show
+        // a DIAN-ready breakdown — adding it charges the shopper IVA twice.
+        //
+        // This read as `subtotalCents + taxCents + shippingCents` until the P4
+        // DoD test computed a total by hand and disagreed with it by 57.479
+        // pesos on a 360.000-peso basket. Every order placed before this was
+        // over-charged by the IVA portion of its own contents.
+        const totalCents = subtotalCents + shippingCents;
         const orderNumber = await nextOrderNumber(tx, tenantId);
 
         // Only needed for the post-checkout email flow below (tenant display

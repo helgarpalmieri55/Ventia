@@ -231,7 +231,12 @@ export default function CheckoutPage() {
   const shippingCents = selectedShippingLine?.priceCents ?? 0;
   const subtotalCents = cart?.subtotalCents ?? 0;
   const taxCents = cart?.taxCents ?? 0;
-  const grandTotalCents = subtotalCents + taxCents + shippingCents;
+  // NOT `+ taxCents`. SPEC.md §5: prices include IVA, so `taxCents` is the
+  // portion of `subtotalCents` that IS IVA, not an extra charge. This has to
+  // match what `CheckoutService` actually bills — a shopper quoted one number
+  // here and charged another on the confirmation page has every reason to
+  // dispute the order.
+  const grandTotalCents = subtotalCents + shippingCents;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -554,7 +559,7 @@ export default function CheckoutPage() {
                 <span>{formatCOP(subtotalCents)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Impuestos</span>
+                <span className="text-muted-foreground">IVA incluido</span>
                 <span>{formatCOP(taxCents)}</span>
               </div>
               <div className="flex justify-between">

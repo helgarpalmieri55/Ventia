@@ -150,15 +150,18 @@ describe('P4 DoD — an agent-created cart converts to an order flagged source=a
     expect(order.items[0].qty).toBe(2);
     expect(order.subtotalCents).toBe(180_000 * 2);
     expect(order.shippingCents).toBe(12_000);
-    // Stated as the relationship the totals code actually maintains rather
-    // than as a literal. A literal here would quietly encode this codebase's
-    // IVA handling — `taxCents` is EXTRACTED from a tax-inclusive price
-    // (`x - x/(1+r)`) and then ADDED to a subtotal that already contains it,
-    // so this order's total is ~57.000 above the sticker price of its
-    // contents. That is a real defect, it predates P4, and it is not this
-    // test's to fix — but neither is it this test's to bless by hard-coding
-    // the number it produces.
-    expect(order.totalCents).toBe(order.subtotalCents + order.taxCents + order.shippingCents);
+    // SPEC.md §5: prices INCLUDE IVA, so the shopper pays the sticker price
+    // plus shipping and nothing else. `taxCents` is the portion of that
+    // subtotal which is IVA, recorded for the DIAN breakdown — adding it would
+    // charge IVA twice.
+    //
+    // This assertion is what caught that bug: written as `subtotal + tax +
+    // shipping` it disagreed with a hand-computed total by 57.479 pesos, which
+    // turned out to be the code over-charging rather than the arithmetic being
+    // wrong.
+    expect(order.totalCents).toBe(order.subtotalCents + order.shippingCents);
+    expect(order.taxCents).toBeGreaterThan(0);
+    expect(order.taxCents).toBeLessThan(order.subtotalCents);
   });
 
   it('shows up in the merchant\'s AI-assisted-sales figure', async () => {

@@ -317,6 +317,21 @@ status change and not just a sentence, a price comes from the current row. The l
 AGENT_LIVE_EVALS=1 ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @ventia/api vitest run test/agent-evals
 ```
 
+### Totals and IVA
+
+Colombian retail convention, per `docs/SPEC.md` §5: **catalogue prices include IVA**. An order's
+`taxCents` is therefore the IVA portion *contained in* `subtotalCents`
+(`price_cents - price_cents / (1 + rate)`), recorded for the DIAN breakdown — it is **not** added to
+the total. A shopper pays `subtotal + shipping`, which is exactly the sticker prices they were
+quoted plus delivery. Every surface that shows it says "IVA incluido" for the same reason.
+
+This was wrong from P2b until P4: checkout, the cart API, the cart drawer, the cart page and the
+checkout page all computed `subtotal + tax + shipping`, over-charging every order by the IVA
+contained in its own contents (a $180.000 basket at 19% was billed $208.739). It is pinned now by
+`POST /v1/storefront/checkout — prices include IVA (SPEC §5)` in `test/checkout.test.ts`, which
+states the rule rather than deriving an expected number the same way the code does — the reason the
+original happy-path test could not catch it.
+
 ### Onboarding, staff & launch
 
 A signed-up user provisions their tenant via `POST /v1/admin/onboarding/tenant`, then drives the

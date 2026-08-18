@@ -169,14 +169,20 @@ function CarritoContent() {
           <span className="text-muted-foreground">Subtotal</span>
           <span>{formatCOP(cart.subtotalCents)}</span>
         </div>
+        {/* "IVA incluido", not a line added to the total. SPEC.md §5: prices
+            include IVA, so `taxCents` is the portion of the subtotal that IS
+            IVA — showing it as a separate charge and adding it (which this
+            block used to do) told the shopper a total higher than the prices
+            they had just been quoted. */}
         <div className="flex w-48 justify-between">
-          <span className="text-muted-foreground">Impuestos</span>
+          <span className="text-muted-foreground">IVA incluido</span>
           <span>{formatCOP(cart.taxCents)}</span>
         </div>
         <div className="flex w-48 justify-between text-base font-semibold">
           <span>Total</span>
-          <span>{formatCOP(cart.subtotalCents + cart.taxCents)}</span>
+          <span>{formatCOP(cart.subtotalCents)}</span>
         </div>
+        <p className="w-48 text-xs text-muted-foreground">Envío calculado en el checkout.</p>
       </div>
 
       <div className="mt-6 flex justify-end">
