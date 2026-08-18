@@ -34,7 +34,7 @@ export class TenantController {
   // detect `suspended` ahead of the route tree) is updated in the same
   // commit to key off the resulting 503 instead of a 200-with-status-field
   // body.
-  current(@Req() req: Request): ResolvedTenant & { theme: unknown } {
+  current(@Req() req: Request): ResolvedTenant & { theme: unknown; agentEnabled: boolean } {
     if (!req.tenant || req.tenant.status === 'draft') {
       throw new NotFoundException({ error: 'TENANT_NOT_FOUND' });
     }
@@ -49,6 +49,16 @@ export class TenantController {
     // endpoint. `?? null` guards only the `theme?: unknown` optional-field
     // widening on `ResolvedTenant`, not a real runtime gap: every resolve
     // through `DomainResolver.resolve()` sets it from the tenant row.
-    return { ...req.tenant, theme: req.tenant.theme ?? null };
+    // `agentEnabled` defaults to false rather than true when absent: a cache
+    // entry written by a previous deploy predates the field, and for the ~60s
+    // until its TTL expires the widget simply stays hidden. Erring hidden
+    // means a store briefly does not offer chat; erring shown would mean
+    // shoppers briefly get the out-of-budget sentence from a store that never
+    // had budget.
+    return {
+      ...req.tenant,
+      theme: req.tenant.theme ?? null,
+      agentEnabled: req.tenant.agentEnabled ?? false,
+    };
   }
 }

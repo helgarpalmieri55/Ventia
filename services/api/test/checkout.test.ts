@@ -1396,3 +1396,61 @@ describe('POST /v1/storefront/checkout — mercadopago checkout, no adapter/cred
     expect(cartStillThere).not.toBeNull();
   });
 });
+
+/**
+ * Attribution (SPEC.md §7): an order placed from a cart the AI agent built
+ * must be identifiable as AI-assisted. Every "ventas asistidas por IA" number
+ * the merchant is shown reads `Order.source`, so if it is hardcoded the KPI
+ * is silently, permanently zero — the kind of bug that looks like "the agent
+ * isn't selling anything" rather than like a bug.
+ */
+describe('POST /v1/storefront/checkout — order source is inherited from the cart', () => {
+  it('marks an order from an agent-built cart as source=agent', async () => {
+    // Shaped exactly like what `create_cart_link` writes: a fresh cart with
+    // its own key and `source: 'agent'`.
+    const cart = await prisma.cart.create({
+      data: { tenantId: tenantAId, cookieKey: crypto.randomUUID(), source: 'agent' },
+    });
+    await prisma.cartItem.create({ data: { tenantId: tenantAId, cartId: cart.id, productId: productXId, qty: 1 } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cart.cookieKey}`)
+      .send({
+        email: 'agent-attributed@example.com',
+        phone: '3009990077',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+      });
+
+    expect(res.status).toBe(201);
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'agent-attributed@example.com' },
+    });
+    expect(order.source).toBe('agent');
+  });
+
+  it('still marks an ordinary shopper cart as source=web', async () => {
+    const cookieValue = await newCartWithItem('checkout-a.ventia.localhost', productXId, 1);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'web-attributed@example.com',
+        phone: '3009990078',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+      });
+
+    expect(res.status).toBe(201);
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'web-attributed@example.com' },
+    });
+    expect(order.source).toBe('web');
+  });
+});

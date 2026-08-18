@@ -30,6 +30,18 @@ beforeAll(async () => {
   await prisma.tenantDomain.create({ data: { tenantId: draftTenant.id, domain: 'draftco.ventia.localhost', isPrimary: true } });
   const suspendedTenant = await prisma.tenant.create({ data: { slug: 'suspendedco', name: 'SuspendedCo', status: 'suspended' } });
   await prisma.tenantDomain.create({ data: { tenantId: suspendedTenant.id, domain: 'suspendedco.ventia.localhost', isPrimary: true } });
+  // On a plan that includes AI messages, with a named agent — the storefront
+  // reads both off this endpoint to decide whether to mount the chat widget.
+  const agentTenant = await prisma.tenant.create({
+    data: {
+      slug: 'chatco',
+      name: 'ChatCo',
+      status: 'live',
+      agentConfig: { agentName: 'Valentina', storeSummary: 'interno', policiesSummary: 'interno' },
+      limits: { create: { productsMax: 100, aiMessagesMonth: 500, staffSeats: 2 } },
+    },
+  });
+  await prisma.tenantDomain.create({ data: { tenantId: agentTenant.id, domain: 'chatco.ventia.localhost', isPrimary: true } });
   await prisma.$disconnect();
 
   const { createApp } = await import('../src/main');
@@ -102,5 +114,43 @@ describe('GET /v1/tenant', () => {
       .set('Host', 'suspendedco.ventia.localhost');
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('TENANT_SUSPENDED');
+  });
+});
+
+/**
+ * What the storefront needs to decide whether to offer the AI chat widget.
+ *
+ * This is a display hint only — the real cap is `AgentBudgetService`, which
+ * holds no matter what any client believes. But getting it wrong is still
+ * user-visible: a store with no AI allowance that shows a launcher answers
+ * every shopper with "no puedo responderte por chat".
+ */
+describe('GET /v1/tenant — the agent hints', () => {
+  it('reports agentEnabled and the agent name for a store on an AI plan', async () => {
+    const res = await request(app.getHttpServer()).get('/v1/tenant').set('Host', 'chatco.ventia.localhost');
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentEnabled).toBe(true);
+    expect(res.body.agentName).toBe('Valentina');
+  });
+
+  it('reports agentEnabled false for a store with no plan row', async () => {
+    // `demo` was created without TenantLimits — unprovisioned, which the
+    // budget service treats as zero, so the widget must stay hidden.
+    const res = await request(app.getHttpServer()).get('/v1/tenant').set('Host', 'demo.ventia.localhost');
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentEnabled).toBe(false);
+  });
+
+  it('exposes ONLY the agent name from agentConfig, never the merchant\'s operating text', async () => {
+    // `storeSummary`/`policiesSummary` shape the system prompt. They are the
+    // merchant's own notes about how to sell, and this endpoint is public.
+    const res = await request(app.getHttpServer()).get('/v1/tenant').set('Host', 'chatco.ventia.localhost');
+
+    const body = JSON.stringify(res.body);
+    expect(body).not.toContain('storeSummary');
+    expect(body).not.toContain('policiesSummary');
+    expect(body).not.toContain('interno');
   });
 });

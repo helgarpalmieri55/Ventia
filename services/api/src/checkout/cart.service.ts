@@ -61,6 +61,36 @@ export class CartService {
     return this.buildDto(tenantId, cart.cookieKey, cart.items);
   }
 
+  /**
+   * Hands the shopper a cart the AGENT built, so the `/carrito?c=…` link
+   * `create_cart_link` returns actually opens something.
+   *
+   * ## Why only `source: 'agent'` carts can be adopted this way
+   *
+   * A cookie key IS the bearer token for a cart — that is what the
+   * `ventia_cart` cookie holds — so adopting one by URL is no weaker than
+   * having the cookie. But a URL is far more likely to leak than an HttpOnly
+   * cookie: it lands in browser history, in a shared WhatsApp message, in a
+   * referrer header. Restricting adoption to carts the agent itself created
+   * means a key that escapes some OTHER way (a log line, a copied cookie)
+   * still cannot be turned into a working link. Nothing is lost by the
+   * restriction: agent carts are the only ones a link is ever emitted for.
+   *
+   * Returns `null` when there is nothing to adopt — a stale link, a key from
+   * another store, or a shopper's own web cart. The caller renders that as
+   * "this link expired" rather than an error, and importantly does NOT clear
+   * whatever cart the shopper already had.
+   */
+  async adopt(tenantId: string, cookieKey: string): Promise<CartDto | null> {
+    const db = tenantDb(tenantId);
+    const cart = await db.cart.findFirst({
+      where: { tenantId, cookieKey, source: 'agent' },
+      include: { items: true },
+    });
+    if (!cart) return null;
+    return this.buildDto(tenantId, cart.cookieKey, cart.items);
+  }
+
   async addItem(
     tenantId: string,
     cookieKey: string | null,

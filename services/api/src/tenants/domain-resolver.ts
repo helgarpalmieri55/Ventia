@@ -35,6 +35,34 @@ export interface ResolvedTenant {
   // addition doesn't force an unrelated update there. Real resolves always
   // populate it from the tenant row.
   theme?: unknown;
+  /**
+   * Whether this store's chat widget should be offered at all — true only
+   * when the tenant's plan actually includes AI messages.
+   *
+   * Without it the storefront would render a launcher for a store with no AI
+   * allowance, and every shopper who used it would get the budget-exhausted
+   * sentence. A store that cannot answer is better off not appearing to
+   * offer to.
+   *
+   * This is a display hint, NOT the enforcement: the hard cap lives in
+   * `AgentBudgetService` and holds regardless of what any client believes.
+   */
+  agentEnabled?: boolean;
+  /** The agent's public display name, from the tenant's `agentConfig`. The
+   * only field of that blob exposed publicly — the rest (`storeSummary`,
+   * `policiesSummary`) is merchant-authored operating text that shapes the
+   * system prompt and has no business being readable from the storefront. */
+  agentName?: string;
+}
+
+/** Reads just `agentName` out of the tenant's operator-edited `agentConfig`
+ * JSON. Defensive for the same reason `agent/system-prompt.ts#parseAgentConfig`
+ * is — a malformed blob must not break tenant resolution, which every public
+ * request depends on. */
+function readAgentName(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const name = (raw as Record<string, unknown>).agentName;
+  return typeof name === 'string' && name.trim().length > 0 ? name.trim() : undefined;
 }
 
 export function normalizeHost(host: string | undefined): string | null {
@@ -69,7 +97,9 @@ export class DomainResolver {
 
     const row = await this.db.tenantDomain.findUnique({
       where: { domain: host },
-      include: { tenant: true },
+      // `limits` joined for `agentEnabled` below. One extra join on a lookup
+      // that is Redis-cached for 60s and already loads the whole tenant row.
+      include: { tenant: { include: { limits: true } } },
     });
     const resolved: ResolvedTenant | null = row
       ? {
@@ -78,6 +108,11 @@ export class DomainResolver {
           name: row.tenant.name,
           status: row.tenant.status,
           theme: row.tenant.theme,
+          // No `TenantLimits` row means the tenant is not provisioned onto a
+          // plan, which `AgentBudgetService` treats as zero budget — so the
+          // widget stays hidden, matching what the server would actually do.
+          agentEnabled: (row.tenant.limits?.aiMessagesMonth ?? 0) > 0,
+          agentName: readAgentName(row.tenant.agentConfig),
           // The DB's own value, not the request-supplied `host` — see the
           // field's doc comment on why that distinction is load-bearing.
           domain: row.domain,

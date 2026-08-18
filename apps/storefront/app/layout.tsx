@@ -5,6 +5,7 @@ import { buildThemeVars, type TenantTheme } from '../lib/theme';
 import { fontVariables } from '../lib/fonts';
 import { CartProvider } from '../lib/cart-context';
 import { CartDrawer } from '../components/cart-drawer';
+import { ChatWidget } from '../components/chat-widget';
 
 export const metadata = { title: 'Ventia' };
 
@@ -40,6 +41,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <CartProvider>
           <CartDrawer />
           {children}
+          {/* Only for a store whose plan actually includes AI messages — see
+              `agentEnabled` on the tenant resolve. Offering a chat that can
+              only answer "no puedo responderte por chat" is worse than
+              offering none. */}
+          {tenant?.agentEnabled ? <ChatWidget agentName={tenant.agentName} /> : null}
         </CartProvider>
       </body>
     </html>

@@ -409,7 +409,14 @@ export class CheckoutService {
             subtotalCents,
             taxCents,
             totalCents,
-            source: 'web',
+            // Inherited from the cart, not hardcoded: SPEC.md §7's attribution
+            // rule is that a cart the agent built (`create_cart_link` sets
+            // `source: 'agent'`) produces an order the merchant can see was
+            // AI-assisted, which is what the "ventas asistidas por IA" KPI
+            // counts. Every ordinary cart is already `web` by column default,
+            // so this reads as `'web'` for all non-agent traffic exactly as
+            // the literal did.
+            source: cart.source,
             ...(input.paymentMethod !== 'cod'
               ? {
                   paymentProvider: input.paymentMethod,
