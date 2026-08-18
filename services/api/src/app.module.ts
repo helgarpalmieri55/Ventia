@@ -2,6 +2,7 @@ import { Inject, MiddlewareConsumer, Module, NestModule, OnApplicationShutdown }
 import Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
 import { AdminModule } from './admin/admin.module';
+import { AgentModule } from './agent/agent.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { CheckoutModule } from './checkout/checkout.module';
 import { HealthController } from './health/health.controller';
@@ -20,6 +21,7 @@ export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
 @Module({
   imports: [
     AdminModule,
+    AgentModule,
     CatalogModule,
     CheckoutModule,
     OnboardingModule,

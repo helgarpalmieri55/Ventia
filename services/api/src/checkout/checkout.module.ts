@@ -6,6 +6,7 @@ import { CartService } from './cart.service';
 import { CheckoutController } from './checkout.controller';
 import { CheckoutService } from './checkout.service';
 import { OrderTrackingController } from './order-tracking.controller';
+import { OrderTrackingService } from './order-tracking.service';
 import { ShippingService } from './shipping.service';
 
 // PaymentsModule is NOT @Global() (see payments.module.ts's own doc comment)
@@ -16,6 +17,9 @@ import { ShippingService } from './shipping.service';
 @Module({
   imports: [PaymentsModule],
   controllers: [CartController, CheckoutController, OrderTrackingController],
-  providers: [CartCookieGuard, CartService, ShippingService, CheckoutService],
+  providers: [CartCookieGuard, CartService, ShippingService, CheckoutService, OrderTrackingService],
+  // Exported for the agent's `get_order_status` tool — one implementation of
+  // the double-factor lookup, shared with the public tracking endpoint.
+  exports: [OrderTrackingService],
 })
 export class CheckoutModule {}
