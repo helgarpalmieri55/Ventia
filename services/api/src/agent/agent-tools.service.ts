@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { tenantDb } from '@ventia/db';
 import {
   createCartLinkInput,
+  escalateToHumanInput,
   getOrderStatusInput,
   getProductInput,
   getStoreInfoInput,
@@ -12,6 +13,8 @@ import {
 } from '@ventia/core';
 import { StorefrontProductsService } from '../storefront/products.service';
 import { OrderTrackingService } from '../checkout/order-tracking.service';
+import { MAILER, type Mailer } from '../mailer/mailer';
+import { sendHandoffEmail } from '../mailer/agent-emails';
 
 /**
  * Server-side execution of the AI sales agent's tools (docs/SPEC.md §7).
@@ -59,16 +62,39 @@ function fail(error: string): AgentToolResult {
   return { ok: false, error };
 }
 
+/**
+ * Everything an executor may know about the turn it is running in.
+ *
+ * A context object rather than a bare `tenantId` because the set is going to
+ * grow — `escalate_to_human` needs the conversation, and P5's WhatsApp channel
+ * will need to know which channel it is answering on. `tenantId` is the only
+ * field every executor uses, and the only one that must never come from the
+ * model.
+ */
+export interface AgentToolContext {
+  tenantId: string;
+  /** Absent only where a tool is exercised outside a conversation (tests, and
+   * any future non-conversational caller). `escalate_to_human` is the one tool
+   * that cannot work without it. */
+  conversationId?: string;
+  /** Whether this tenant's plan includes human handoff
+   * (`TenantLimits.humanHandoff`). Carried in rather than re-read here: the
+   * loop has already loaded the plan row for the budget check. */
+  handoffEnabled?: boolean;
+}
+
 @Injectable()
 export class AgentToolsService {
   constructor(
     @Inject(StorefrontProductsService) private readonly products: StorefrontProductsService,
     @Inject(OrderTrackingService) private readonly tracking: OrderTrackingService,
+    @Inject(MAILER) private readonly mailer: Mailer,
   ) {}
 
   /** Dispatch by name. Unknown names are an error result rather than a throw,
    * because the model can emit one and the conversation should survive it. */
-  async execute(tenantId: string, name: string, rawInput: unknown): Promise<AgentToolResult> {
+  async execute(ctx: AgentToolContext, name: string, rawInput: unknown): Promise<AgentToolResult> {
+    const { tenantId } = ctx;
     switch (name as AgentToolName) {
       case 'search_products':
         return this.searchProducts(tenantId, rawInput);
@@ -82,6 +108,8 @@ export class AgentToolsService {
         return this.getOrderStatus(tenantId, rawInput);
       case 'get_store_info':
         return this.getStoreInfo(tenantId, rawInput);
+      case 'escalate_to_human':
+        return this.escalateToHuman(ctx, rawInput);
       default:
         return fail(`herramienta desconocida: ${String(name)}`);
     }
@@ -337,4 +365,93 @@ export class AgentToolsService {
 
     return { ok: true, data: { topic: parsed.data.topic, title: content.title, body: content.bodyMd } };
   }
+
+  /**
+   * Hands the conversation to a person (SPEC.md §7 rule 7).
+   *
+   * Three things happen, in this order, and the order is the design:
+   *
+   *  1. The conversation is marked `escalated` — a durable fact the merchant's
+   *     admin reads, independent of whether any notification is delivered.
+   *  2. The merchant is emailed. Fire-and-forget: a mail transport that is
+   *     briefly down must not become an error the shopper sees, because step 1
+   *     already happened and is what the merchant actually works from.
+   *  3. The store's own contact details go back to the model, so it can tell
+   *     the shopper how to reach a human RIGHT NOW rather than only that
+   *     someone will be in touch eventually.
+   *
+   * Already-escalated conversations return success without re-notifying. A
+   * model that calls this twice in one conversation is not a reason to mail a
+   * merchant twice about the same customer.
+   */
+  private async escalateToHuman(ctx: AgentToolContext, rawInput: unknown): Promise<AgentToolResult> {
+    // The plan gate. Returned as an ERROR result rather than silently
+    // succeeding, because the difference matters to what the model says next:
+    // a store without handoff should hear "I can't transfer you" and fall back
+    // to offering contact details, not promise a callback nobody will make.
+    // The tool is also filtered out of the array for such a store, so reaching
+    // this line means the model invented the call.
+    if (!ctx.handoffEnabled) {
+      return fail('esta tienda no tiene habilitada la atención humana por chat');
+    }
+    if (!ctx.conversationId) {
+      return fail('no hay una conversación activa para escalar');
+    }
+
+    const parsed = escalateToHumanInput.safeParse(rawInput);
+    if (!parsed.success) return fail('parámetros inválidos para escalate_to_human');
+
+    const db = tenantDb(ctx.tenantId);
+    const conversation = await db.conversation.findFirst({
+      where: { id: ctx.conversationId, tenantId: ctx.tenantId },
+    });
+    if (!conversation) return fail('no encontré esa conversación');
+
+    const tenant = await db.tenant.findUniqueOrThrow({ where: { id: ctx.tenantId } });
+    const storeInfo = asRecord(asRecord(tenant.settings).storeInfo);
+    const contactEmail = typeof storeInfo.contactEmail === 'string' ? storeInfo.contactEmail : null;
+    const contactPhone = typeof storeInfo.contactPhone === 'string' ? storeInfo.contactPhone : null;
+
+    const alreadyEscalated = conversation.status === 'escalated';
+    if (!alreadyEscalated) {
+      await db.conversation.update({ where: { id: conversation.id }, data: { status: 'escalated' } });
+
+      if (contactEmail) {
+        void sendHandoffEmail(this.mailer, {
+          merchantContactEmail: contactEmail,
+          tenantName: tenant.name,
+          reason: parsed.data.reason,
+          transcriptSummary: parsed.data.transcript_summary,
+          shopperRef: conversation.shopperRef,
+          conversationId: conversation.id,
+        }).catch((err: unknown) => {
+          console.error('[agent] handoff email failed', {
+            conversationId: conversation.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      } else {
+        // Worth a log rather than a silent pass: the escalation is recorded and
+        // the shopper is told, but nobody was actively told to look.
+        console.warn('[agent] escalated with no merchant contact email', { tenantId: ctx.tenantId });
+      }
+    }
+
+    return {
+      ok: true,
+      data: {
+        escalated: true,
+        // So the model can say "mientras tanto, escríbenos a…" rather than
+        // leaving the shopper with nothing to do.
+        contact_email: contactEmail,
+        contact_phone: contactPhone,
+      },
+    };
+  }
+}
+
+/** Same defensive read of the loosely-typed `settings` JSON as everywhere else
+ * that touches it — an absent or malformed shape is "nothing configured". */
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }

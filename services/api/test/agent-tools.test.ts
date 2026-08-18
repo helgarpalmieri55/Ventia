@@ -121,7 +121,7 @@ describe('agent tools — tenant scoping', () => {
     // The whole trust model: `tenantId` comes from the conversation, never
     // from the model. A tool input naming another store's product finds
     // nothing rather than describing it.
-    const res = await tools.execute(tenantAId, 'get_product', { product_id: productBId });
+    const res = await tools.execute({ tenantId: tenantAId }, 'get_product', { product_id: productBId });
 
     expect(res.ok).toBe(false);
     expect(JSON.stringify(res)).not.toContain('Producto Secreto de B');
@@ -129,14 +129,14 @@ describe('agent tools — tenant scoping', () => {
   });
 
   it('cannot search up another tenant\'s catalogue', async () => {
-    const res = await tools.execute(tenantAId, 'search_products', { query: 'Secreto', limit: 5 });
+    const res = await tools.execute({ tenantId: tenantAId }, 'search_products', { query: 'Secreto', limit: 5 });
 
     expect(res.ok).toBe(true);
     expect(JSON.stringify(res)).not.toContain('Producto Secreto de B');
   });
 
   it('cannot build a cart from another tenant\'s variant', async () => {
-    const res = await tools.execute(tenantAId, 'create_cart_link', {
+    const res = await tools.execute({ tenantId: tenantAId }, 'create_cart_link', {
       items: [{ variant_id: variantBId, qty: 1 }],
     });
 
@@ -148,7 +148,7 @@ describe('agent tools — tenant scoping', () => {
 
 describe('agent tools — get_order_status double factor', () => {
   it('returns the order for the right number AND contact', async () => {
-    const res = await tools.execute(tenantAId, 'get_order_status', {
+    const res = await tools.execute({ tenantId: tenantAId }, 'get_order_status', {
       order_number: '4242',
       email_or_phone: SHOPPER_EMAIL,
     });
@@ -158,7 +158,7 @@ describe('agent tools — get_order_status double factor', () => {
   });
 
   it('accepts the phone as the second factor too', async () => {
-    const res = await tools.execute(tenantAId, 'get_order_status', {
+    const res = await tools.execute({ tenantId: tenantAId }, 'get_order_status', {
       order_number: '4242',
       email_or_phone: SHOPPER_PHONE,
     });
@@ -171,11 +171,11 @@ describe('agent tools — get_order_status double factor', () => {
     // from revealing which numbers are real. If these two diverged — different
     // wording, different shape — the agent would happily narrate the
     // difference to whoever asked.
-    const wrongContact = await tools.execute(tenantAId, 'get_order_status', {
+    const wrongContact = await tools.execute({ tenantId: tenantAId }, 'get_order_status', {
       order_number: '4242',
       email_or_phone: 'noesmio@example.com',
     });
-    const noSuchOrder = await tools.execute(tenantAId, 'get_order_status', {
+    const noSuchOrder = await tools.execute({ tenantId: tenantAId }, 'get_order_status', {
       order_number: '999999',
       email_or_phone: SHOPPER_EMAIL,
     });
@@ -190,7 +190,7 @@ describe('agent tools — get_order_status double factor', () => {
     // passed the double factor — a chat transcript is a leakier surface than
     // the order page, and it can be screenshotted, forwarded, or read over a
     // shoulder.
-    const res = await tools.execute(tenantAId, 'get_order_status', {
+    const res = await tools.execute({ tenantId: tenantAId }, 'get_order_status', {
       order_number: '4242',
       email_or_phone: SHOPPER_EMAIL,
     });
@@ -206,7 +206,7 @@ describe('agent tools — get_order_status double factor', () => {
   });
 
   it('cannot read an order belonging to another tenant', async () => {
-    const res = await tools.execute(tenantBId, 'get_order_status', {
+    const res = await tools.execute({ tenantId: tenantBId }, 'get_order_status', {
       order_number: '4242',
       email_or_phone: SHOPPER_EMAIL,
     });
@@ -217,14 +217,14 @@ describe('agent tools — get_order_status double factor', () => {
 
 describe('agent tools — what the model may not sell', () => {
   it('refuses to describe a non-active product', async () => {
-    const res = await tools.execute(tenantAId, 'get_product', { product_id: archivedProductId });
+    const res = await tools.execute({ tenantId: tenantAId }, 'get_product', { product_id: archivedProductId });
     expect(res.ok).toBe(false);
   });
 
   it('refuses to build a cart from an archived product', async () => {
     // Reachable for real: a product can be archived mid-conversation, after
     // the agent already mentioned it.
-    const res = await tools.execute(tenantAId, 'create_cart_link', {
+    const res = await tools.execute({ tenantId: tenantAId }, 'create_cart_link', {
       items: [{ variant_id: archivedVariantId, qty: 1 }],
     });
 
@@ -236,7 +236,7 @@ describe('agent tools — what the model may not sell', () => {
     // qty 10 against a variant holding 5: inside the schema's per-line cap, so
     // this genuinely reaches the stock check rather than being turned away as
     // malformed input (which is what a larger number would do, and did).
-    const res = await tools.execute(tenantAId, 'create_cart_link', {
+    const res = await tools.execute({ tenantId: tenantAId }, 'create_cart_link', {
       items: [{ variant_id: variantAId, qty: 10 }],
     });
 
@@ -247,14 +247,14 @@ describe('agent tools — what the model may not sell', () => {
   it('says so when the merchant has not published a policy, rather than inventing one', async () => {
     // The failure this prevents is the agent confabulating a returns policy.
     // An explicit "not published" is something the model can repeat honestly.
-    const res = await tools.execute(tenantAId, 'get_store_info', { topic: 'returns' });
+    const res = await tools.execute({ tenantId: tenantAId }, 'get_store_info', { topic: 'returns' });
 
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/todavía no/i);
   });
 
   it('returns the merchant\'s own words when they HAVE published', async () => {
-    const res = await tools.execute(tenantAId, 'get_store_info', { topic: 'shipping' });
+    const res = await tools.execute({ tenantId: tenantAId }, 'get_store_info', { topic: 'shipping' });
 
     expect(res.ok).toBe(true);
     expect((res.data as { body: string }).body).toContain('3 días');
@@ -263,7 +263,7 @@ describe('agent tools — what the model may not sell', () => {
 
 describe('agent tools — cart creation', () => {
   it('creates an agent-sourced cart, which is what the AI-assisted-sales KPI counts', async () => {
-    const res = await tools.execute(tenantAId, 'create_cart_link', {
+    const res = await tools.execute({ tenantId: tenantAId }, 'create_cart_link', {
       items: [{ variant_id: variantAId, qty: 2 }],
     });
 
@@ -286,7 +286,7 @@ describe('agent tools — cart creation', () => {
       data: { tenantId: tenantAId, cookieKey: `shopper-own-${Date.now()}`, source: 'web' },
     });
 
-    await tools.execute(tenantAId, 'create_cart_link', { items: [{ variant_id: variantAId, qty: 1 }] });
+    await tools.execute({ tenantId: tenantAId }, 'create_cart_link', { items: [{ variant_id: variantAId, qty: 1 }] });
 
     const after = await prisma.cart.findUnique({ where: { id: existing.id }, include: { items: true } });
     expect(after?.source).toBe('web');
@@ -298,11 +298,11 @@ describe('agent tools — input handling', () => {
   it('rejects malformed input instead of coercing it', async () => {
     // Tool inputs are model-generated text reacting to whatever a shopper
     // typed. Every executor parses before it queries.
-    const badUuid = await tools.execute(tenantAId, 'get_product', { product_id: 'not-a-uuid' });
-    const negativeQty = await tools.execute(tenantAId, 'create_cart_link', {
+    const badUuid = await tools.execute({ tenantId: tenantAId }, 'get_product', { product_id: 'not-a-uuid' });
+    const negativeQty = await tools.execute({ tenantId: tenantAId }, 'create_cart_link', {
       items: [{ variant_id: variantAId, qty: -5 }],
     });
-    const missingField = await tools.execute(tenantAId, 'get_order_status', { order_number: '4242' });
+    const missingField = await tools.execute({ tenantId: tenantAId }, 'get_order_status', { order_number: '4242' });
 
     expect(badUuid.ok).toBe(false);
     expect(negativeQty.ok).toBe(false);
@@ -312,13 +312,13 @@ describe('agent tools — input handling', () => {
   it('returns an error result for an unknown tool rather than throwing', async () => {
     // The model can emit a name that does not exist; the conversation should
     // survive that, not 500.
-    const res = await tools.execute(tenantAId, 'delete_everything', {});
+    const res = await tools.execute({ tenantId: tenantAId }, 'delete_everything', {});
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/desconocida/i);
   });
 
   it('never leaks a raw database error into a model-facing string', async () => {
-    const res = await tools.execute(tenantAId, 'get_product', { product_id: 'not-a-uuid' });
+    const res = await tools.execute({ tenantId: tenantAId }, 'get_product', { product_id: 'not-a-uuid' });
     expect(res.error).not.toMatch(/prisma|invalid `|postgres|column/i);
   });
 });

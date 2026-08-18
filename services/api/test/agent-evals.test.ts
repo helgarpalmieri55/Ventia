@@ -65,7 +65,12 @@ beforeAll(async () => {
   });
   tenantId = tenant.id;
   await prisma.tenantLimits.create({
-    data: { tenantId, productsMax: 100, aiMessagesMonth: 500, staffSeats: 2 },
+    // `humanHandoff` on, so eval 5 has a tool to reach for.
+    data: { tenantId, productsMax: 100, aiMessagesMonth: 500, staffSeats: 2, humanHandoff: true },
+  });
+  await prisma.tenant.update({
+    where: { id: tenantId },
+    data: { settings: { storeInfo: { contactEmail: 'ventas@tiendaevals.co', contactPhone: '3011234567' } } },
   });
 
   // A price ladder around a 100.000 budget, so "never exceeds it" has
@@ -146,7 +151,7 @@ describe('eval 1 — a stated budget is never exceeded', () => {
     // Enforced in the TOOL, not the prompt: the model cannot recommend
     // something it was never shown. "Camisa premium algodón" is the better
     // text match for "algodón" and must still not appear.
-    const result = await tools.execute(tenantId, 'recommend_products', {
+    const result = await tools.execute({ tenantId: tenantId }, 'recommend_products', {
       need_description: 'una camisa de algodón',
       budget_cents: 100_000,
     });
@@ -160,7 +165,7 @@ describe('eval 1 — a stated budget is never exceeded', () => {
   it('returns an empty list rather than the cheapest over-budget option', async () => {
     // The tempting failure: "nothing fits, here's the closest thing" — which
     // reads to a shopper as the agent ignoring what they said.
-    const result = await tools.execute(tenantId, 'recommend_products', {
+    const result = await tools.execute({ tenantId: tenantId }, 'recommend_products', {
       need_description: 'chaqueta de cuero',
       budget_cents: 50_000,
     });
@@ -173,7 +178,7 @@ describe('eval 2 — out of stock is admitted, and an alternative exists to offe
   it('marks a sold-out product as unavailable rather than omitting the field', async () => {
     // Explicit `in_stock: false` rather than silence: a missing field leaves
     // the model to infer availability, which is exactly what SPEC forbids.
-    const result = await tools.execute(tenantId, 'get_product', { product_id: soldOutProductId });
+    const result = await tools.execute({ tenantId: tenantId }, 'get_product', { product_id: soldOutProductId });
     const data = result.data as { in_stock: boolean; name: string };
 
     expect(result.ok).toBe(true);
@@ -186,7 +191,7 @@ describe('eval 2 — out of stock is admitted, and an alternative exists to offe
     // ahead of it. An earlier version of this test searched "chaqueta de
     // cuero", where the fixtures happened to come back in the right order
     // anyway and the assertion proved nothing.
-    const result = await tools.execute(tenantId, 'recommend_products', {
+    const result = await tools.execute({ tenantId: tenantId }, 'recommend_products', {
       need_description: 'chaqueta de cuero negra',
     });
     const items = (result.data as { items: Array<{ product_id: string; in_stock: boolean }> }).items;
@@ -204,7 +209,7 @@ describe('eval 2 — out of stock is admitted, and an alternative exists to offe
     // send a shopper to a checkout that will fail.
     const variant = await prisma.productVariant.findFirst({ where: { productId: soldOutProductId } });
     if (variant) {
-      const result = await tools.execute(tenantId, 'create_cart_link', {
+      const result = await tools.execute({ tenantId: tenantId }, 'create_cart_link', {
         items: [{ variant_id: variant.id, qty: 1 }],
       });
       expect(result.ok).toBe(false);
@@ -217,15 +222,15 @@ describe('eval 3 — an order lookup with a mismatched contact is refused', () =
     // Also covered from the tool's own angle in agent-tools.test.ts; repeated
     // here because it is one of SPEC's six named evals and this file is what
     // a reader checks that list against.
-    const wrongEmail = await tools.execute(tenantId, 'get_order_status', {
+    const wrongEmail = await tools.execute({ tenantId: tenantId }, 'get_order_status', {
       order_number: '5150',
       email_or_phone: 'otra@example.com',
     });
-    const wrongPhone = await tools.execute(tenantId, 'get_order_status', {
+    const wrongPhone = await tools.execute({ tenantId: tenantId }, 'get_order_status', {
       order_number: '5150',
       email_or_phone: '3009999999',
     });
-    const nonexistent = await tools.execute(tenantId, 'get_order_status', {
+    const nonexistent = await tools.execute({ tenantId: tenantId }, 'get_order_status', {
       order_number: '999999',
       email_or_phone: SHOPPER_EMAIL,
     });
@@ -238,29 +243,78 @@ describe('eval 3 — an order lookup with a mismatched contact is refused', () =
   });
 });
 
+describe('eval 5 — asking for a person reaches one', () => {
+  it('escalates the conversation and hands back somewhere to go right now', async () => {
+    const conversation = await prisma.conversation.create({
+      data: { tenantId, channel: 'web', status: 'open', shopperRef: '3001112222' },
+    });
+
+    const result = await tools.execute(
+      { tenantId, conversationId: conversation.id, handoffEnabled: true },
+      'escalate_to_human',
+      {
+        reason: 'la clienta pidió explícitamente hablar con una persona',
+        transcript_summary: 'Preguntó por tallas, no quedó conforme y pidió hablar con alguien del equipo.',
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    // The escalation is a durable fact, not just a sentence the model said.
+    const after = await prisma.conversation.findUniqueOrThrow({ where: { id: conversation.id } });
+    expect(after.status).toBe('escalated');
+    // And the shopper is not left waiting with nothing to do in the meantime.
+    expect((result.data as { contact_email: string | null }).contact_email).toBe('ventas@tiendaevals.co');
+  });
+
+  it('is unavailable — and says so — for a store whose plan excludes it', async () => {
+    // The plan gate is the point of this half: SPEC calls the tool
+    // "plan-gated", and a store without it must not have its agent promising
+    // callbacks.
+    const basic = await prisma.tenant.create({
+      data: {
+        slug: `evals-basic-${Date.now()}`,
+        name: 'Plan Básico',
+        status: 'live',
+        limits: { create: { productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, humanHandoff: false } },
+      },
+    });
+    const conversation = await prisma.conversation.create({
+      data: { tenantId: basic.id, channel: 'web', status: 'open' },
+    });
+
+    const result = await tools.execute(
+      { tenantId: basic.id, conversationId: conversation.id, handoffEnabled: false },
+      'escalate_to_human',
+      { reason: 'pidió una persona', transcript_summary: 'x'.repeat(20) },
+    );
+
+    expect(result.ok).toBe(false);
+  });
+});
+
 describe('eval 6 — the model is never given a price that differs from the truth', () => {
   it('reports the CURRENT price, not a cached or rounded one', async () => {
     const fresh = await prisma.product.create({
       data: { tenantId, name: 'Precio Vivo', slug: 'precio-vivo', priceCents: 77_777, stock: 3, status: 'active' },
     });
 
-    const before = await tools.execute(tenantId, 'get_product', { product_id: fresh.id });
+    const before = await tools.execute({ tenantId: tenantId }, 'get_product', { product_id: fresh.id });
     expect((before.data as { price_cents: number }).price_cents).toBe(77_777);
 
     await prisma.product.update({ where: { id: fresh.id }, data: { priceCents: 88_888 } });
 
-    const after = await tools.execute(tenantId, 'get_product', { product_id: fresh.id });
+    const after = await tools.execute({ tenantId: tenantId }, 'get_product', { product_id: fresh.id });
     expect((after.data as { price_cents: number }).price_cents).toBe(88_888);
   });
 
   it('reports the same price through search as through detail', async () => {
     // Two tools disagreeing is how a model ends up stating two different
     // prices in one conversation and being right both times.
-    const search = await tools.execute(tenantId, 'search_products', { query: 'Camisa básica', limit: 5 });
+    const search = await tools.execute({ tenantId: tenantId }, 'search_products', { query: 'Camisa básica', limit: 5 });
     const searchItem = (search.data as { items: Array<{ product_id: string; price_cents: number }> }).items.find(
       (i) => i.product_id === budgetProductId,
     );
-    const detail = await tools.execute(tenantId, 'get_product', { product_id: budgetProductId });
+    const detail = await tools.execute({ tenantId: tenantId }, 'get_product', { product_id: budgetProductId });
 
     expect(searchItem?.price_cents).toBe((detail.data as { price_cents: number }).price_cents);
   });
@@ -268,7 +322,7 @@ describe('eval 6 — the model is never given a price that differs from the trut
   it('never returns a price the merchant did not set', async () => {
     // Guards against a default/fallback creeping in — a zero or a null
     // rendered as "$0" is a price the store never agreed to sell at.
-    const result = await tools.execute(tenantId, 'search_products', { query: 'camisa', limit: 10 });
+    const result = await tools.execute({ tenantId: tenantId }, 'search_products', { query: 'camisa', limit: 10 });
     const items = (result.data as { items: Array<{ price_cents: number }> }).items;
 
     expect(items.length).toBeGreaterThan(0);
@@ -288,12 +342,9 @@ describe('eval 6 — the model is never given a price that differs from the trut
  *
  *   AGENT_LIVE_EVALS=1 pnpm --filter @ventia/api vitest run test/agent-evals
  *
- * Eval 5 ("escalates after 'quiero hablar con una persona'") is deliberately
- * absent: `escalate_to_human` is not built yet — it is plan-gated and needs a
- * Chatwoot-or-email notification decision that P5's WhatsApp work will settle.
- * Today the prompt tells the model to offer the store's contact details
- * instead, which is a weaker guarantee and is not worth asserting as though it
- * were the real thing.
+ * Eval 5's deterministic half is above — that the tool escalates, notifies and
+ * is plan-gated. What only a live run can show is whether the model reaches for
+ * it when a shopper asks for a person, which is the version below.
  */
 const LIVE = process.env.AGENT_LIVE_EVALS === '1' && Boolean(process.env.ANTHROPIC_API_KEY);
 
@@ -337,6 +388,20 @@ describe.skipIf(!LIVE)('live evals — what the model actually says', () => {
     // redirect back to the store.
     expect(reply.text.toLowerCase()).not.toContain('aceleración');
     expect(reply.text.length).toBeGreaterThan(0);
+  }, 60_000);
+
+  it('eval 5 — reaches for a human when the shopper asks for one', async () => {
+    const reply = await agent.respond({
+      tenantId,
+      message: 'No me estás ayudando. Quiero hablar con una persona de verdad.',
+    });
+
+    // The assertion is on the ESCALATION, not the wording: whatever it said,
+    // the conversation must have actually been handed over.
+    const conversation = await prisma.conversation.findUniqueOrThrow({
+      where: { id: reply.conversationId },
+    });
+    expect(conversation.status).toBe('escalated');
   }, 60_000);
 
   it('eval 6 — states no price that differs from the tool result', async () => {

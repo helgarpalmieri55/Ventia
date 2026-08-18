@@ -281,6 +281,59 @@ describe('agent loop — the budget hard cap', () => {
   });
 });
 
+describe('agent loop — the plan decides which tools exist', () => {
+  it('does not offer escalate_to_human to a store without handoff', async () => {
+    // The fixture tenant's TenantLimits leaves `humanHandoff` at its default
+    // of false. Offering the tool and then refusing the call would teach the
+    // model to promise a shopper a callback that is never coming.
+    scripted = [textResponse('hola')];
+
+    await agent.respond({ tenantId, message: 'quiero hablar con una persona' });
+
+    const tools = createCalls[0].tools as Array<{ name: string }>;
+    expect(tools.map((t) => t.name)).not.toContain('escalate_to_human');
+    // The other six are still there — this filters one tool, not the array.
+    expect(tools).toHaveLength(6);
+  });
+
+  it('offers it once the plan includes handoff', async () => {
+    const withHandoff = await prisma.tenant.create({
+      data: {
+        slug: `agent-handoff-${Date.now()}`,
+        name: 'Con Handoff',
+        status: 'live',
+        limits: { create: { productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, humanHandoff: true } },
+      },
+    });
+    scripted = [textResponse('hola')];
+
+    await agent.respond({ tenantId: withHandoff.id, message: 'quiero hablar con una persona' });
+
+    const tools = createCalls[0].tools as Array<{ name: string }>;
+    expect(tools.map((t) => t.name)).toContain('escalate_to_human');
+  });
+
+  it('tells the model to USE the tool only when it has it', async () => {
+    // The prompt and the tool array must agree, or the model is being told to
+    // call something that is not there.
+    const withHandoff = await prisma.tenant.create({
+      data: {
+        slug: `agent-handoff2-${Date.now()}`,
+        name: 'Con Handoff 2',
+        status: 'live',
+        limits: { create: { productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, humanHandoff: true } },
+      },
+    });
+    scripted = [textResponse('a'), textResponse('b')];
+
+    await agent.respond({ tenantId, message: 'hola' });
+    await agent.respond({ tenantId: withHandoff.id, message: 'hola' });
+
+    expect(createCalls[0].system as string).not.toContain('escalate_to_human');
+    expect(createCalls[1].system as string).toContain('escalate_to_human');
+  });
+});
+
 describe('agent loop — conversation continuity', () => {
   it('continues an existing conversation rather than starting a new one', async () => {
     scripted = [textResponse('primera'), textResponse('segunda')];

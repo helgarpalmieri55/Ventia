@@ -62,8 +62,19 @@ export function parseAgentConfig(raw: Prisma.JsonValue | null | undefined): Tena
 export function buildSystemPrompt(input: {
   storeName: string;
   agentConfig: Prisma.JsonValue | null | undefined;
+  /** Whether this tenant's plan includes human handoff. Decides which version
+   * of rule 7 the model gets — and it must match whether `escalate_to_human`
+   * is actually in the tool array, or the prompt is describing a tool that
+   * isn't there. */
+  handoffEnabled?: boolean;
 }): string {
   const config = parseAgentConfig(input.agentConfig);
+  // SPEC.md §7 rule 7. A store without handoff gets the fallback it can
+  // actually deliver — its own contact details — rather than an instruction to
+  // use a tool it was never given.
+  const rule7 = input.handoffEnabled
+    ? 'Si el cliente está molesto, pide hablar con una persona, o llevas 3 intentos sin resolver: usa escalate_to_human y dile que un asesor lo contactará.'
+    : 'Si el cliente está molesto, pide hablar con una persona, o llevas 3 intentos sin resolver: dile que un asesor humano lo contactará y ofrécele los datos de contacto de la tienda.';
 
   return `Eres ${config.agentName}, asesor(a) de ventas de ${input.storeName}, una tienda en Colombia.
 Tono: ${TONE_DESCRIPTIONS[config.tone]}. Respondes en el idioma del cliente (por defecto español).
@@ -75,7 +86,7 @@ REGLAS ESTRICTAS:
 4. Nunca pides datos de tarjetas ni pagos por chat. Para comprar, genera el link de carrito y guía al cliente al checkout.
 5. Para consultar un pedido exige número de orden Y el correo o celular con que se compró.
 6. Sé breve: mensajes cortos, máximo un producto destacado por mensaje.
-7. Si el cliente está molesto, pide hablar con una persona, o llevas 3 intentos sin resolver: dile que un asesor humano lo contactará y ofrécele los datos de contacto de la tienda.
+7. ${rule7}
 
 Sobre la tienda: ${config.storeSummary || 'sin descripción adicional'}
 Políticas clave: ${config.policiesSummary || 'consulta get_store_info antes de responder sobre políticas'}`;

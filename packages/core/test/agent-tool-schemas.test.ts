@@ -4,6 +4,7 @@ import {
   AGENT_TOOL_JSON_SCHEMAS,
   AGENT_TOOL_NAMES,
   createCartLinkInput,
+  escalateToHumanInput,
   getOrderStatusInput,
   getProductInput,
   getStoreInfoInput,
@@ -32,6 +33,7 @@ const ZOD_SCHEMAS: Record<string, z.ZodObject<z.ZodRawShape>> = {
   create_cart_link: createCartLinkInput,
   get_order_status: getOrderStatusInput,
   get_store_info: getStoreInfoInput,
+  escalate_to_human: escalateToHumanInput,
 };
 
 /** A Zod field is optional to the MODEL if it may be omitted from input —

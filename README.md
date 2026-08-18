@@ -279,8 +279,11 @@ message. Both call the same conversation loop, so tenant scoping, throttling and
 decided in exactly one place. The tenant comes from the request's domain via `PublicTenantGuard`,
 never from the body. Six tools run server-side against that tenant only — `search_products`,
 `get_product`, `recommend_products`, `create_cart_link`, `get_order_status`, `get_store_info`.
-`escalate_to_human` is not built yet (it is plan-gated and needs a notification decision that P5
-will settle).
+`escalate_to_human` is plan-gated on `TenantLimits.humanHandoff` and is filtered out of the tool
+array — and out of the prompt's rule 7 — for a store without it, so the model is never told to reach
+for something it does not have. It marks the conversation `escalated` and emails the merchant; SPEC's
+Chatwoot conversation is a P5 line item that will become a second notifier alongside the email rather
+than a replacement.
 
 Three independent limits, deliberately not one:
 
@@ -302,8 +305,8 @@ plan includes AI messages.
 **Evals** (`services/api/test/agent-evals.test.ts`) cover SPEC §7's six scenarios in two halves. The
 deterministic half runs on every `pnpm test` and pins the properties the system guarantees whatever
 the model says — a budget is never exceeded because over-budget products are never returned, a
-mismatched order contact is indistinguishable from a nonexistent order, a price comes from the
-current row. The live half asks the real model and is skipped by default:
+mismatched order contact is indistinguishable from a nonexistent order, an escalation is a durable
+status change and not just a sentence, a price comes from the current row. The live half asks the real model and is skipped by default:
 
 ```bash
 AGENT_LIVE_EVALS=1 ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @ventia/api vitest run test/agent-evals

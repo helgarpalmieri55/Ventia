@@ -83,10 +83,18 @@ export type AgentEvent =
   | { type: 'tool'; name: string; result: unknown }
   | { type: 'message'; text: string };
 
-/** The tool list handed to the model. Schemas come from `@ventia/core`, next
- * to the Zod schemas the executors validate against — see that file for why
- * the two are written side by side and how a test keeps them in step. */
-function buildToolDefinitions(): Anthropic.Tool[] {
+/**
+ * The tool list handed to the model. Schemas come from `@ventia/core`, next to
+ * the Zod schemas the executors validate against — see that file for why the
+ * two are written side by side and how a test keeps them in step.
+ *
+ * `escalate_to_human` is filtered out for a store whose plan does not include
+ * handoff. Offering a tool and then refusing the call would teach the model to
+ * promise a shopper a callback that is never coming; not offering it leaves the
+ * prompt's fallback (give the store's contact details) as the only path, which
+ * is what such a store can actually deliver.
+ */
+function buildToolDefinitions(handoffEnabled: boolean): Anthropic.Tool[] {
   const descriptions: Record<(typeof AGENT_TOOL_NAMES)[number], string> = {
     search_products: 'Busca productos de esta tienda por texto. Úsala siempre antes de mencionar un precio.',
     get_product: 'Trae el detalle completo de un producto, incluidas sus variantes y disponibilidad.',
@@ -97,9 +105,11 @@ function buildToolDefinitions(): Anthropic.Tool[] {
     get_order_status:
       'Consulta el estado de un pedido. Exige el número de pedido Y el correo o celular con que se compró.',
     get_store_info: 'Responde sobre envíos, devoluciones, pagos, contacto o la tienda, con la información publicada.',
+    escalate_to_human:
+      'Pasa la conversación a una persona del equipo. Úsala si el cliente está molesto, pide hablar con alguien, o llevas 3 intentos sin resolver.',
   };
 
-  return AGENT_TOOL_NAMES.map((name) => ({
+  return AGENT_TOOL_NAMES.filter((name) => handoffEnabled || name !== 'escalate_to_human').map((name) => ({
     name,
     description: descriptions[name],
     input_schema: AGENT_TOOL_JSON_SCHEMAS[name] as unknown as Anthropic.Tool.InputSchema,
@@ -108,7 +118,10 @@ function buildToolDefinitions(): Anthropic.Tool[] {
 
 @Injectable()
 export class AgentService {
-  private readonly tools = buildToolDefinitions();
+  // Both variants built once. Which one a turn gets depends on the tenant's
+  // plan, read alongside the budget below.
+  private readonly toolsWithHandoff = buildToolDefinitions(true);
+  private readonly toolsWithoutHandoff = buildToolDefinitions(false);
 
   constructor(
     @Inject(ANTHROPIC_CLIENT) private readonly anthropic: Anthropic,
@@ -207,7 +220,12 @@ export class AgentService {
     }
 
     const tenant = await platformDb.tenant.findUniqueOrThrow({ where: { id: tenantId } });
-    const system = buildSystemPrompt({ storeName: tenant.name, agentConfig: tenant.agentConfig });
+    const system = buildSystemPrompt({
+      storeName: tenant.name,
+      agentConfig: tenant.agentConfig,
+      handoffEnabled: budget.handoffEnabled,
+    });
+    const tools = budget.handoffEnabled ? this.toolsWithHandoff : this.toolsWithoutHandoff;
 
     const history = await this.loadHistory(tenantId, conversation.id);
     const messages: Anthropic.MessageParam[] = [...history];
@@ -229,7 +247,7 @@ export class AgentService {
         thinking: { type: 'adaptive' },
         output_config: { effort: 'low' },
         system,
-        tools: this.tools,
+        tools,
         messages,
       });
 
@@ -258,7 +276,14 @@ export class AgentService {
       // model out of asking for tools in parallel.
       const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
       for (const toolUse of toolUses) {
-        const result = await this.toolExecutor.execute(tenantId, toolUse.name, toolUse.input);
+        const result = await this.toolExecutor.execute(
+          // The tenant and the conversation come from THIS request, never from
+          // anything the model produced — that is what keeps every tool scoped
+          // to the store the shopper is actually talking to.
+          { tenantId, conversationId: conversation.id, handoffEnabled: budget.handoffEnabled },
+          toolUse.name,
+          toolUse.input,
+        );
         toolResults.push({ name: toolUse.name, result });
         emit({ type: 'tool', name: toolUse.name, result });
         resultBlocks.push({

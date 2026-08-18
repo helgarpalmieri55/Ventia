@@ -46,6 +46,17 @@ export interface BudgetStatus {
   /** True from 90% of the limit onward — the merchant-warning threshold. Still
    * `allowed`; this is a signal to surface, not a block. */
   warning: boolean;
+  /**
+   * Whether this tenant's plan includes human handoff
+   * (`TenantLimits.humanHandoff`), which decides whether `escalate_to_human` is
+   * offered to the model at all.
+   *
+   * Not a budget concern, and it is here for one reason: this method already
+   * reads the `TenantLimits` row on every single turn, and a second query for
+   * one boolean off the same row would be pure waste. The name of the method
+   * is the only thing that suffers.
+   */
+  handoffEnabled: boolean;
 }
 
 /** The one thing the agent says when a store is out of budget. Fixed text, not
@@ -86,6 +97,9 @@ export class AgentBudgetService {
       used,
       limit,
       warning: limit > 0 && used >= Math.floor(limit * WARNING_THRESHOLD),
+      // Same posture as the budget itself: no plan row means not provisioned,
+      // which is `false` rather than a permissive default.
+      handoffEnabled: limits?.humanHandoff ?? false,
     };
   }
 

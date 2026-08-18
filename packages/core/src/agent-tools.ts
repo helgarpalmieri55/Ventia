@@ -83,9 +83,29 @@ export const getStoreInfoInput = z.object({
 });
 export type GetStoreInfoInput = z.infer<typeof getStoreInfoInput>;
 
+/**
+ * Hands the conversation to a person (docs/SPEC.md §7 rule 7: the shopper is
+ * upset, asked for a human, or three attempts have not resolved it).
+ *
+ * Both fields are written BY the model about the conversation it is in, which
+ * makes this the one tool whose input is prose rather than an identifier. The
+ * caps are what stop a confused model from mailing a merchant the entire
+ * transcript; the executor never echoes either field back to the shopper.
+ */
+export const escalateToHumanInput = z.object({
+  reason: z.string().min(3).max(200),
+  transcript_summary: z.string().min(3).max(1000),
+});
+export type EscalateToHumanInput = z.infer<typeof escalateToHumanInput>;
+
 /** Every tool the agent may be offered. The executor map is keyed by this, so
  * adding a name here without an executor fails at compile time rather than at
- * the moment a shopper triggers it. */
+ * the moment a shopper triggers it.
+ *
+ * Being in this list is not the same as being OFFERED: `escalate_to_human` is
+ * plan-gated (`TenantLimits.humanHandoff`) and is filtered out of the tool
+ * array for a store without it, so the model is never shown a tool it cannot
+ * use. */
 export const AGENT_TOOL_NAMES = [
   'search_products',
   'get_product',
@@ -93,6 +113,7 @@ export const AGENT_TOOL_NAMES = [
   'create_cart_link',
   'get_order_status',
   'get_store_info',
+  'escalate_to_human',
 ] as const;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
@@ -208,6 +229,23 @@ export const AGENT_TOOL_JSON_SCHEMAS: Record<AgentToolName, AgentToolJsonSchema>
       },
     },
     required: ['topic'],
+    additionalProperties: false,
+  },
+  escalate_to_human: {
+    type: 'object',
+    properties: {
+      reason: {
+        type: 'string',
+        description:
+          'Por qué necesita un humano, en una frase. Ej: "cliente molesto por un pedido que no llegó", "pide una excepción a la política de cambios".',
+      },
+      transcript_summary: {
+        type: 'string',
+        description:
+          'Resumen de la conversación para que la persona que responda no tenga que leerla completa: qué pidió el cliente, qué intentaste y qué quedó sin resolver. Incluye número de pedido o producto si aplica.',
+      },
+    },
+    required: ['reason', 'transcript_summary'],
     additionalProperties: false,
   },
 };

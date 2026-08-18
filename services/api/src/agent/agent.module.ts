@@ -8,6 +8,7 @@ import { AgentAdminController } from './agent-admin.controller';
 import { AgentService, ANTHROPIC_CLIENT } from './agent.service';
 import { RedisModule } from '../common/redis.module';
 import { AdminModule } from '../admin/admin.module';
+import { MailerModule } from '../mailer/mailer.module';
 import { StorefrontModule } from '../storefront/storefront.module';
 import { CheckoutModule } from '../checkout/checkout.module';
 
@@ -27,7 +28,7 @@ import { CheckoutModule } from '../checkout/checkout.module';
  * traffic should not be unable to serve its catalogue).
  */
 @Module({
-  imports: [RedisModule, StorefrontModule, CheckoutModule, AdminModule],
+  imports: [RedisModule, StorefrontModule, CheckoutModule, AdminModule, MailerModule],
   controllers: [AgentController, AgentAdminController],
   providers: [
     AgentToolsService,
