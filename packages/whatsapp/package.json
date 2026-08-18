@@ -1,0 +1,15 @@
+{
+  "name": "@ventia/whatsapp",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src test",
+    "test": "vitest run"
+  },
+  "devDependencies": { "@types/node": "^22.0.0", "vitest": "^2.1.0" }
+}

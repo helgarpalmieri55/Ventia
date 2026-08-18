@@ -179,6 +179,15 @@ importers:
         specifier: ^19.0.0
         version: 19.2.8(react@19.2.8)
 
+  packages/whatsapp:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.20.1)(lightningcss@1.32.0)
+
   services/api:
     dependencies:
       '@anthropic-ai/sdk':
