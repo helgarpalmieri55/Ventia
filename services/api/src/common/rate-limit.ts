@@ -3,8 +3,16 @@ import type Redis from 'ioredis';
 
 /**
  * Redis-backed request rate limiting, required by `docs/SPEC.md` §9
- * ("rate limiting (Redis) on auth, checkout, agent, webhooks"). The `agent`
- * surface does not exist yet (P4); the other three are wired in `main.ts`.
+ * ("rate limiting (Redis) on auth, checkout, agent, webhooks"). All four are
+ * wired in `main.ts`.
+ *
+ * The agent surface carries a SECOND limit that does not live here — a
+ * per-conversation one, in `agent/agent-throttle.service.ts`. The two answer
+ * different questions: this file bounds how much one ADDRESS can ask for,
+ * which is what stops a script from opening ten thousand conversations; that
+ * one bounds how fast a single CONVERSATION can spend the merchant's AI
+ * budget, which is what an IP key cannot express when a whole carrier sits
+ * behind one address.
  *
  * ## Express middleware, not a Nest guard
  *
@@ -91,6 +99,12 @@ export function clientIp(req: Request): string {
  *  - `checkout` 60/min — each accepted request decrements stock and holds it
  *    for 15 minutes, so this bounds inventory-exhaustion; 60 is well above
  *    what a NAT'd office or a carrier gateway produces legitimately.
+ *  - `agent` 30/min — each accepted request can cost a model call against the
+ *    merchant's monthly AI allowance, so this is the tightest of the four.
+ *    Still well above a human conversation's pace (a shopper types a message
+ *    every few seconds at most), and the per-conversation throttle is what
+ *    actually shapes a single chat; this exists so one address cannot fan out
+ *    across fresh conversations to escape that throttle.
  *  - `webhooks` 600/min PER TENANT — deliberately far above any real store's
  *    settlement rate. A 429 here is a delivery refused, i.e. a payment whose
  *    settle is postponed to the gateway's retry, so this exists only to stop a
@@ -119,6 +133,7 @@ function envLimit(name: string, fallback: number): number {
 export const RATE_LIMITS = {
   auth: () => envLimit('auth', 60),
   checkout: () => envLimit('checkout', 60),
+  agent: () => envLimit('agent', 30),
   webhooks: () => envLimit('webhooks', 600),
 };
 

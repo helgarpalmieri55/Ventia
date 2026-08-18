@@ -75,6 +75,23 @@ export async function createApp(): Promise<INestApplication> {
     }),
   );
 
+  // Agent: the only surface where an accepted request spends the MERCHANT's
+  // money rather than ours — every turn can be a model call against their
+  // monthly AI allowance. The per-conversation throttle
+  // (agent/agent-throttle.service.ts) is what shapes a single chat; this
+  // address-keyed limit is what stops a script from evading that throttle by
+  // starting a fresh conversation for every message.
+  httpAdapter.use(
+    '/v1/storefront/agent',
+    createRateLimiter(redis, {
+      name: 'agent',
+      limit: RATE_LIMITS.agent(),
+      windowSeconds: 60,
+      key: clientIp,
+      errorCode: 'TOO_MANY_REQUESTS',
+    }),
+  );
+
   // Webhooks: limited LAST and most cautiously, because the failure mode here
   // is not a slow attacker, it is a dropped payment. A 429 to a gateway is a
   // delivery we refused; gateways retry, but a settle delayed is a shopper

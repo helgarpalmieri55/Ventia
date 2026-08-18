@@ -1,5 +1,5 @@
 import { Inject, MiddlewareConsumer, Module, NestModule, OnApplicationShutdown } from '@nestjs/common';
-import Redis from 'ioredis';
+import type Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
 import { AdminModule } from './admin/admin.module';
 import { AgentModule } from './agent/agent.module';
@@ -12,14 +12,18 @@ import { PaymentAlertsModule } from './payment-alerts/payment-alerts.module';
 import { SettingsModule } from './settings/settings.module';
 import { StaffModule } from './staff/staff.module';
 import { StorefrontModule } from './storefront/storefront.module';
+import { RedisModule, REDIS_CLIENT } from './common/redis.module';
 import { DomainResolver } from './tenants/domain-resolver';
 import { TenantMiddleware } from './tenants/tenant.middleware';
 import { TenantController } from './tenants/tenant.controller';
 
-export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
+// Re-exported from its own module (see common/redis.module.ts for why it moved)
+// so `main.ts` and existing imports keep the same source.
+export { REDIS_CLIENT };
 
 @Module({
   imports: [
+    RedisModule,
     AdminModule,
     AgentModule,
     CatalogModule,
@@ -33,17 +37,6 @@ export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
   ],
   controllers: [HealthController, TenantController],
   providers: [
-    {
-      provide: REDIS_CLIENT,
-      useFactory: () => {
-        const client = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
-        // Without this listener, ioredis logs unhandled "error" events straight
-        // to stderr (e.g. connection-refused noise in tests) and, on some
-        // versions/paths, an unhandled 'error' event with no listener can throw.
-        client.on('error', (err) => console.error('[redis]', err.message));
-        return client;
-      },
-    },
     {
       provide: DomainResolver,
       useFactory: (redis: Redis) => new DomainResolver(redis, platformDb),
