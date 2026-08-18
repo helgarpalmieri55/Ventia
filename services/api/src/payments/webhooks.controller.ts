@@ -1,6 +1,7 @@
 import { Controller, HttpCode, HttpException, Inject, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Prisma, platformDb, tenantDb } from '@ventia/db';
+import { isOrderReference } from '@ventia/core';
 import { WebhookVerificationUnavailableError } from '@ventia/payments';
 import type { NormalizedPaymentEvent, PaymentProviderId, RawRequest } from '@ventia/payments';
 import { ORDER_CURRENCY, PROVIDERS } from './provider-registry';
@@ -302,9 +303,25 @@ export class WebhooksController {
     // THROWING — i.e. an all-digits-but-huge reference would 500 the request
     // in exactly the same place, and with exactly the same consequence, as
     // the `NaN` this guard was written for.
+    //
+    // ---- Two accepted reference forms, since per-order references landed.
+    //
+    // CURRENT: `Order.reference` — a `vr_`-prefixed random token, globally
+    // unique, resolved below without consulting the URL's tenant at all (the
+    // resolved order's OWN tenant is then checked against it).
+    //
+    // TRANSITIONAL: a bare order number, which is what sessions created before
+    // that change sent. Those webhooks may still arrive after the deploy, and
+    // rejecting them would strand exactly the shopper this codebase works
+    // hardest to protect — mid-payment, charged, no order. Resolved the old
+    // way (order number scoped to the URL tenant), with the old, weaker
+    // guarantee. The window closes on its own: every such order is inside its
+    // 15-minute stock hold, so nothing older can still be legitimately in
+    // flight, and the two forms can never be confused because a current
+    // reference is never all-digits.
     const referenceIsPlainOrderNumber =
       /^\d+$/.test(event.reference) && Number(event.reference) <= 2_147_483_647;
-    if (!referenceIsPlainOrderNumber) {
+    if (!isOrderReference(event.reference) && !referenceIsPlainOrderNumber) {
       console.error('[webhooks] verified event carries a non-numeric reference — recorded, not processed', {
         provider: providerId,
         tenantId,
@@ -398,13 +415,59 @@ export class WebhooksController {
       }
     }
 
-    // Resolve which of this tenant's orders this event is about. The
-    // reference was proven above to be a plain, in-int4-range non-negative
-    // integer string, so `Number(...)` here can neither produce `NaN` nor a
-    // value Prisma refuses to fit into the `Order.number` column.
-    const order = await tenantDb(tenantId).order.findFirst({
-      where: { tenantId, number: Number(event.reference) },
-    });
+    // Resolve which order this event is about.
+    //
+    // ---- The current path: resolve GLOBALLY, then check the tenant.
+    //
+    // `Order.reference` is unique across the whole platform, so this lookup
+    // does not need — and deliberately does not use — the tenant from the URL
+    // to FIND the order. It then asserts the order it found belongs to that
+    // tenant.
+    //
+    // That ordering is the entire fix. Two tenants may share one gateway
+    // merchant account, so one signed delivery verifies at either tenant's
+    // webhook URL, and `Order.number` is per-tenant. Resolving by number
+    // WITHIN the URL's tenant meant a delivery about tenant B's order 1001,
+    // POSTed to tenant A's URL, found A's order 1001 — with only the amount
+    // check standing between that and settling A's order using B's shopper's
+    // money, which stops standing the moment the two totals match. Resolving
+    // globally finds B's order wherever the delivery lands, and the tenant
+    // check then refuses it rather than settling the wrong one.
+    //
+    // Goes through `platformDb` precisely BECAUSE it must be able to see
+    // another tenant's order — that is what makes the mismatch detectable at
+    // all. `tenantDb` would simply return nothing, which looks identical to
+    // "no such order" and would silently degrade this into the weaker check.
+    let order: Awaited<ReturnType<ReturnType<typeof tenantDb>['order']['findFirst']>> = null;
+
+    if (isOrderReference(event.reference)) {
+      const globalMatch = await platformDb.order.findUnique({ where: { reference: event.reference } });
+      if (globalMatch && globalMatch.tenantId !== tenantId) {
+        // A real order, but not this endpoint's tenant's. Loud, because it is
+        // either a misconfigured account-wide confirmation URL or someone
+        // replaying another tenant's delivery — and both need a human.
+        console.error('[webhooks] verified event names an order belonging to a DIFFERENT tenant — refusing', {
+          provider: providerId,
+          urlTenantId: tenantId,
+          orderTenantId: globalMatch.tenantId,
+          eventId: event.eventId,
+        });
+        await markProcessed('cross_tenant_reference');
+        return { ok: true };
+      }
+      order = globalMatch;
+    } else {
+      // ---- The transitional path: a bare order number, scoped to the URL's
+      // tenant, exactly as before. Proven above to be a plain, in-int4-range
+      // integer string, so `Number(...)` can neither produce `NaN` nor a value
+      // Prisma refuses for the `Order.number` column. Carries the OLD, weaker
+      // guarantee (the amount check alone) and exists only so a session
+      // created before per-order references still settles; see the reference
+      // guard above for why that window closes on its own.
+      order = await tenantDb(tenantId).order.findFirst({
+        where: { tenantId, number: Number(event.reference) },
+      });
+    }
 
     // Every `markProcessed` call from here down records this link. Set once,
     // immediately after the lookup that establishes it, rather than at each

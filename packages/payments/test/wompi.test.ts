@@ -18,6 +18,10 @@ const cfg: TenantProviderConfig = {
 const order: OrderForPayment = {
   orderId: 'ord_1',
   orderNumber: 'ORD-0001',
+  // Distinct from orderNumber on purpose: these tests assert which of the two
+  // reaches the gateway's reference field and which reaches a shopper-facing
+  // URL, and identical values would hide a swap.
+  gatewayReference: 'vr_testreference0001',
   totalCents: 4990000,
   customerEmail: 'shopper@example.com',
   // Per-tenant, and REQUIRED (multi-tenancy fix) — this replaced the single
@@ -36,14 +40,14 @@ describe('WompiProvider.createCheckoutSession', () => {
     // integritySecret)), NOT by calling any internal helper of the
     // implementation — this way the test fails if the implementation's
     // algorithm is subtly wrong (wrong field order, missing field, etc.).
-    const expectedSignature = sha256Hex(`ORD-0001${4990000}COP${cfg.integritySecret}`);
+    const expectedSignature = sha256Hex(`vr_testreference0001${4990000}COP${cfg.integritySecret}`);
 
     const url = new URL(redirectUrl);
     expect(url.origin + url.pathname).toBe('https://checkout.wompi.co/p/');
     expect(url.searchParams.get('public-key')).toBe('pub_test_abc123');
     expect(url.searchParams.get('currency')).toBe('COP');
     expect(url.searchParams.get('amount-in-cents')).toBe('4990000');
-    expect(url.searchParams.get('reference')).toBe('ORD-0001');
+    expect(url.searchParams.get('reference')).toBe('vr_testreference0001');
     expect(url.searchParams.get('signature:integrity')).toBe(expectedSignature);
     // Sanity: the expected digest is a real 64-char SHA256 hex string, so a
     // typo in the hand-computed expectation itself would also be caught.
@@ -63,6 +67,8 @@ describe('WompiProvider.createCheckoutSession', () => {
       const { redirectUrl } = await provider.createCheckoutSession(order, cfg);
 
       const redirect = new URL(redirectUrl).searchParams.get('redirect-url');
+      // The redirect path carries the HUMAN order number, not the gateway
+      // reference — the storefront return route parses it back out.
       expect(redirect).toBe('https://tienda.example.com/pago/wompi-retorno/ORD-0001');
       // The whole point of the path-based shape: Wompi appends `?id={txId}`
       // to whatever it is given, and its docs only ever show that appended
@@ -141,9 +147,9 @@ describe('WompiProvider.createCheckoutSession', () => {
       // formula has no redirect-url term, so it must be byte-identical to
       // what the pre-P3c adapter produced.
       expect(url.searchParams.get('signature:integrity')).toBe(
-        sha256Hex(`ORD-0001${4990000}COP${cfg.integritySecret}`),
+        sha256Hex(`vr_testreference0001${4990000}COP${cfg.integritySecret}`),
       );
-      expect(url.searchParams.get('reference')).toBe('ORD-0001');
+      expect(url.searchParams.get('reference')).toBe('vr_testreference0001');
       expect(url.searchParams.get('amount-in-cents')).toBe('4990000');
       expect(url.searchParams.get('currency')).toBe('COP');
       expect(url.searchParams.get('public-key')).toBe('pub_test_abc123');

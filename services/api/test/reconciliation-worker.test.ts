@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { generateOrderReference } from '@ventia/core';
 import { randomUUID } from 'node:crypto';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import type { INestApplication } from '@nestjs/common';
@@ -136,12 +137,17 @@ interface SeedOrderOpts {
 async function seedOnlineOrder(
   tenantId: string,
   opts: SeedOrderOpts,
-): Promise<{ orderId: string; number: number }> {
+): Promise<{ orderId: string; number: number; reference: string }> {
   const now = Date.now();
+  // The gateway reference is `Order.reference`, not the order number — the
+  // binding check compares against it, so these tests must echo back the same
+  // value a real gateway would have been given.
+  const reference = generateOrderReference();
   const order = await prisma.order.create({
     data: {
       tenantId,
       number: orderNumberSeq++,
+      reference,
       status: opts.status ?? 'PENDING',
       paymentStatus: opts.paymentStatus ?? 'PENDING',
       paymentProvider: opts.provider,
@@ -172,7 +178,7 @@ async function seedOnlineOrder(
       },
     });
   }
-  return { orderId: order.id, number: order.number };
+  return { orderId: order.id, number: order.number, reference };
 }
 
 /** Builds a fake `PaymentProvider` with only the two methods this worker ever
@@ -226,7 +232,7 @@ describe('reconcilePendingPayments — (a) a known providerRef the gateway repor
   it('settles the order to CONFIRMED/PAID, clears the reservation, and does so EXACTLY ONCE across two sweeps', async () => {
     const { tenantId } = await signUpWithTenant('recon-paid@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_real_paid_1',
       ageMinutes: 6,
@@ -235,7 +241,7 @@ describe('reconcilePendingPayments — (a) a known providerRef the gateway repor
     });
 
     const getTransactionStatus = vi.fn(async () =>
-      status('PAID', { reference: String(number), amountCents: 25_000 }),
+      status('PAID', { reference, amountCents: 25_000 }),
     );
     const markPaidSpy = vi.spyOn(paymentsService, 'markPaid');
 
@@ -274,7 +280,7 @@ describe('reconcilePendingPayments — (b) a known providerRef the gateway repor
   it("sets paymentStatus FAILED and leaves status/stockReservedUntil untouched (markFailed's existing contract)", async () => {
     const { tenantId } = await signUpWithTenant('recon-failed@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_declined_1',
       ageMinutes: 6,
@@ -283,7 +289,7 @@ describe('reconcilePendingPayments — (b) a known providerRef the gateway repor
 
     await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => status('FAILED', { reference: String(number), amountCents: 25_000 }),
+        getTransactionStatus: async () => status('FAILED', { reference, amountCents: 25_000 }),
       }),
     );
 
@@ -308,7 +314,7 @@ describe('reconcilePendingPayments — (b) a known providerRef the gateway repor
   it("records an EXPIRED gateway status (MP's refunded/charged_back) in the payment_failed event, while still settling to FAILED", async () => {
     const { tenantId } = await signUpWithTenant('recon-expired-audit@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'mercadopago',
       providerRef: 'mp-payment-refunded-99',
       ageMinutes: 6,
@@ -318,7 +324,7 @@ describe('reconcilePendingPayments — (b) a known providerRef the gateway repor
     await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('mercadopago', {
         getTransactionStatus: async () =>
-          status('EXPIRED', { reference: String(number), amountCents: 25_000 }),
+          status('EXPIRED', { reference, amountCents: 25_000 }),
       }),
     );
 
@@ -343,14 +349,14 @@ describe('reconcilePendingPayments — (c) an order younger than the 5-minute fl
   it('is not selected at all: no gateway call, no state change', async () => {
     const { tenantId } = await signUpWithTenant('recon-too-young@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_young_1',
       ageMinutes: 1, // real timestamp, 1 minute old — well inside the 5-minute floor
       reservedForMinutes: 14,
     });
 
-    const getTransactionStatus = vi.fn(async () => status('PAID', { reference: String(number) }));
+    const getTransactionStatus = vi.fn(async () => status('PAID', { reference }));
     await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', { getTransactionStatus }),
     );
@@ -367,7 +373,7 @@ describe('reconcilePendingPayments — (d) mercadopago with no providerRef falls
   it('queries by OUR order number, uses the returned providerRef/status, and settles to PAID', async () => {
     const { tenantId } = await signUpWithTenant('recon-mp-search@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, number, reference } = await seedOnlineOrder(tenantId, {
       provider: 'mercadopago',
       providerRef: null,
       ageMinutes: 7,
@@ -380,7 +386,7 @@ describe('reconcilePendingPayments — (d) mercadopago with no providerRef falls
     const searchByReference = vi.fn(async () => ({
       providerRef: 'mp-payment-112233',
       status: 'PAID' as const,
-      reference: String(number),
+      reference,
       amountCents: 25_000,
       currency: 'COP',
     }));
@@ -607,7 +613,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
   it('a MATCHING reference but a mismatched amountCents settles nothing', async () => {
     const { tenantId } = await signUpWithTenant('recon-bind-wrong-amount@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_wrong_amount',
       ageMinutes: 6,
@@ -622,7 +628,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
       fakeProvider('wompi', {
         // Right order, wrong money: 1.000 COP paid against a 250.000 COP order.
         getTransactionStatus: async () =>
-          status('PAID', { reference: String(number), amountCents: 100_000 }),
+          status('PAID', { reference, amountCents: 100_000 }),
       }),
     );
 
@@ -654,7 +660,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
   it('a search result whose reference is for a DIFFERENT order settles nothing', async () => {
     const { tenantId } = await signUpWithTenant('recon-bind-search-wrong-ref@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'mercadopago',
       providerRef: null,
       ageMinutes: 7,
@@ -673,7 +679,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
         searchByReference: async () => ({
           providerRef: 'mp-payment-belonging-to-another-order',
           status: 'PAID' as const,
-          reference: `${number}2`,
+          reference: `${reference}-wrong`,
           amountCents: 25_000,
           currency: 'COP',
         }),
@@ -725,7 +731,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
   it('a search result with a MATCHING reference but a mismatched amountCents settles nothing', async () => {
     const { tenantId } = await signUpWithTenant('recon-bind-search-wrong-amount@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'mercadopago',
       providerRef: null,
       ageMinutes: 7,
@@ -743,7 +749,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
         searchByReference: async () => ({
           providerRef: 'mp-payment-underpaid',
           status: 'PAID' as const,
-          reference: String(number),
+          reference,
           amountCents: 100_000,
           currency: 'COP',
         }),
@@ -761,7 +767,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
   it('a search result whose OWN reference and amount both match does settle', async () => {
     const { tenantId } = await signUpWithTenant('recon-bind-search-ok@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'mercadopago',
       providerRef: null,
       ageMinutes: 7,
@@ -774,7 +780,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
         searchByReference: async () => ({
           providerRef: 'mp-payment-445566',
           status: 'PAID' as const,
-          reference: String(number),
+          reference,
           amountCents: 25_000,
           currency: 'COP',
         }),
@@ -791,7 +797,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
   it('a matching reference with NO amountCents at all still settles (the amount check only binds when available)', async () => {
     const { tenantId } = await signUpWithTenant('recon-bind-no-amount@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_no_amount',
       ageMinutes: 6,
@@ -800,7 +806,7 @@ describe('reconcilePendingPayments — (e2) THE ORDER-BINDING SAFETY CLAIM', () 
 
     await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => status('PAID', { reference: String(number) }),
+        getTransactionStatus: async () => status('PAID', { reference }),
       }),
     );
 
@@ -836,7 +842,7 @@ describe('reconcilePendingPayments — (f) a gateway call that throws', () => {
           if (providerRef === 'wompi_txn_gateway_down') {
             throw new Error('simulated gateway failure: getaddrinfo ENOTFOUND');
           }
-          return status('PAID', { reference: String(healthy.number), amountCents: 25_000 });
+          return status('PAID', { reference: healthy.reference, amountCents: 25_000 });
         },
       }),
     );
@@ -862,7 +868,7 @@ describe('reconcilePendingPayments — (g) threshold ordering vs. the 15-minute 
     const { tenantId } = await signUpWithTenant('recon-threshold-order@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
     const product = await seedProduct(tenantId, 6); // checkout already took 10 -> 6 for qty 4
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_threshold',
       // 6 minutes old: PAST the 5-minute reconciliation floor...
@@ -884,7 +890,7 @@ describe('reconcilePendingPayments — (g) threshold ordering vs. the 15-minute 
     // 2. Reconciliation, at that same instant, DOES reach it and settles it.
     await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => status('PAID', { reference: String(number), amountCents: 25_000 }),
+        getTransactionStatus: async () => status('PAID', { reference, amountCents: 25_000 }),
       }),
     );
     const afterRecon = await prisma.order.findUnique({ where: { id: orderId } });
@@ -951,6 +957,7 @@ describe('reconcilePendingPayments — (h) the candidate query is bounded and de
       data: Array.from({ length: total }, (_, i) => ({
         tenantId,
         number: orderNumberSeq++,
+        reference: generateOrderReference(),
         status: 'PENDING' as const,
         paymentStatus: 'PENDING' as const,
         paymentProvider: 'wompi',
@@ -1045,7 +1052,7 @@ describe('reconcilePendingPayments — FIX 1: a DECLINED-then-retried order stay
   it('a PENDING/FAILED order is still a candidate and recovers to CONFIRMED/PAID', async () => {
     const { tenantId } = await signUpWithTenant('recon-failed-retry@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       // Attempt 1's ref, stamped by its (genuine) FAILED webhook.
       providerRef: 'wompi_txn_attempt_1_declined',
@@ -1057,7 +1064,7 @@ describe('reconcilePendingPayments — FIX 1: a DECLINED-then-retried order stay
 
     const getTransactionStatus = vi.fn(async () =>
       // Attempt 2 went through; Wompi says so when asked.
-      status('PAID', { reference: String(number), amountCents: 25_000 }),
+      status('PAID', { reference, amountCents: 25_000 }),
     );
 
     const settled = await reconcilePendingPayments(paymentsService, () =>
@@ -1076,7 +1083,7 @@ describe('reconcilePendingPayments — FIX 1: a DECLINED-then-retried order stay
   it('a FAILED order the gateway still calls FAILED is left exactly as it was (no churn, no second event)', async () => {
     const { tenantId } = await signUpWithTenant('recon-failed-stays-failed@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_still_declined',
       ageMinutes: 6,
@@ -1087,7 +1094,7 @@ describe('reconcilePendingPayments — FIX 1: a DECLINED-then-retried order stay
 
     await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => status('FAILED', { reference: String(number), amountCents: 25_000 }),
+        getTransactionStatus: async () => status('FAILED', { reference, amountCents: 25_000 }),
       }),
     );
 
@@ -1109,7 +1116,7 @@ describe('reconcilePendingPayments — the returned count is TRANSITIONS, not se
   it('an already-FAILED order the gateway still calls FAILED is NOT counted (markFailed no-ops)', async () => {
     const { tenantId } = await signUpWithTenant('recon-count-noop-failed@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_count_still_declined',
       ageMinutes: 6,
@@ -1123,7 +1130,7 @@ describe('reconcilePendingPayments — the returned count is TRANSITIONS, not se
 
     const settled = await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => status('FAILED', { reference: String(number), amountCents: 25_000 }),
+        getTransactionStatus: async () => status('FAILED', { reference, amountCents: 25_000 }),
       }),
     );
 
@@ -1136,7 +1143,7 @@ describe('reconcilePendingPayments — the returned count is TRANSITIONS, not se
   it('a settle that really transitions the order IS counted (the count still counts)', async () => {
     const { tenantId } = await signUpWithTenant('recon-count-real@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_count_real',
       ageMinutes: 6,
@@ -1146,7 +1153,7 @@ describe('reconcilePendingPayments — the returned count is TRANSITIONS, not se
 
     const settled = await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => status('PAID', { reference: String(number), amountCents: 25_000 }),
+        getTransactionStatus: async () => status('PAID', { reference, amountCents: 25_000 }),
       }),
     );
 
@@ -1161,7 +1168,7 @@ describe('reconcilePendingPayments — the returned count is TRANSITIONS, not se
     // `markPaid` correctly no-ops; the count must not claim otherwise.
     const { tenantId } = await signUpWithTenant('recon-count-race@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_count_race',
       ageMinutes: 6,
@@ -1173,7 +1180,7 @@ describe('reconcilePendingPayments — the returned count is TRANSITIONS, not se
 
     const settled = await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => status('PAID', { reference: String(number), amountCents: 25_000 }),
+        getTransactionStatus: async () => status('PAID', { reference, amountCents: 25_000 }),
       }),
     );
 
@@ -1222,7 +1229,7 @@ describe('reconcilePendingPayments — FIX 3a: the CURRENCY binding', () => {
   it('a matching reference and amount in a DIFFERENT currency settles nothing', async () => {
     const { tenantId } = await signUpWithTenant('recon-currency-usd@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_usd',
       ageMinutes: 6,
@@ -1237,7 +1244,7 @@ describe('reconcilePendingPayments — FIX 3a: the CURRENCY binding', () => {
       fakeProvider('wompi', {
         // 250,00 USD against a 250.000 COP order: same number, ~4.000x the money.
         getTransactionStatus: async () =>
-          status('PAID', { reference: String(number), amountCents: 25_000, currency: 'USD' }),
+          status('PAID', { reference, amountCents: 25_000, currency: 'USD' }),
       }),
     );
 
@@ -1251,7 +1258,7 @@ describe('reconcilePendingPayments — FIX 3a: the CURRENCY binding', () => {
   it('an amount with NO currency at all settles nothing (unverifiable is not a pass)', async () => {
     const { tenantId } = await signUpWithTenant('recon-currency-missing@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_no_currency',
       ageMinutes: 6,
@@ -1266,7 +1273,7 @@ describe('reconcilePendingPayments — FIX 3a: the CURRENCY binding', () => {
       fakeProvider('wompi', {
         getTransactionStatus: async () => ({
           status: 'PAID' as const,
-          reference: String(number),
+          reference,
           amountCents: 25_000,
           // currency deliberately absent
         }),
@@ -1280,7 +1287,7 @@ describe('reconcilePendingPayments — FIX 3a: the CURRENCY binding', () => {
   it('a result with NO amount at all is still bound by reference alone, currency or not (unchanged behavior)', async () => {
     const { tenantId } = await signUpWithTenant('recon-currency-no-amount@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_no_amount_no_currency',
       ageMinutes: 6,
@@ -1289,7 +1296,7 @@ describe('reconcilePendingPayments — FIX 3a: the CURRENCY binding', () => {
 
     await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => ({ status: 'PAID' as const, reference: String(number) }),
+        getTransactionStatus: async () => ({ status: 'PAID' as const, reference }),
       }),
     );
 
@@ -1314,7 +1321,7 @@ describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a n
     async (providerId, creds) => {
       const { tenantId } = await signUpWithTenant(`recon-hint-${providerId}@demo.co`, 'owner');
       await paymentsService.saveProviderCredentials(tenantId, providerId, creds);
-      const { orderId, number } = await seedOnlineOrder(tenantId, {
+      const { orderId, reference } = await seedOnlineOrder(tenantId, {
         provider: providerId,
         providerRef: 'attacker_planted_txn_paid_into_their_own_account',
         providerRefSource: 'hint',
@@ -1328,7 +1335,7 @@ describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a n
       const getTransactionStatus = vi.fn(async () =>
         // Everything matches. That is the whole point — the values are the
         // attacker's to choose.
-        status('PAID', { reference: String(number), amountCents: 25_000, currency: 'COP' }),
+        status('PAID', { reference, amountCents: 25_000, currency: 'COP' }),
       );
 
       await reconcilePendingPayments(paymentsService, () =>
@@ -1347,7 +1354,7 @@ describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a n
   it('a NULL providerRefSource (a pre-migration row of unknown provenance) is treated as untrusted too', async () => {
     const { tenantId } = await signUpWithTenant('recon-hint-null-source@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'ref_of_unknown_provenance',
       providerRefSource: null,
@@ -1358,7 +1365,7 @@ describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a n
 
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const getTransactionStatus = vi.fn(async () =>
-      status('PAID', { reference: String(number), amountCents: 25_000 }),
+      status('PAID', { reference, amountCents: 25_000 }),
     );
 
     await reconcilePendingPayments(paymentsService, () =>
@@ -1372,7 +1379,7 @@ describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a n
   it("a webhook-VERIFIED ref on the same provider still settles — this gate is about provenance, not about wompi", async () => {
     const { tenantId } = await signUpWithTenant('recon-verified-still-works@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_WOMPI_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'wompi',
       providerRef: 'wompi_txn_stamped_by_a_real_webhook',
       providerRefSource: 'verified',
@@ -1383,7 +1390,7 @@ describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a n
 
     await reconcilePendingPayments(paymentsService, () =>
       fakeProvider('wompi', {
-        getTransactionStatus: async () => status('PAID', { reference: String(number), amountCents: 25_000 }),
+        getTransactionStatus: async () => status('PAID', { reference, amountCents: 25_000 }),
       }),
     );
 
@@ -1395,7 +1402,7 @@ describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a n
   it('mercadopago IS account-scoped, so a hinted ref there is still looked up by id', async () => {
     const { tenantId } = await signUpWithTenant('recon-hint-mp-allowed@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'mercadopago',
       providerRef: 'mp-payment-from-the-return-page',
       providerRefSource: 'hint',
@@ -1405,7 +1412,7 @@ describe('reconcilePendingPayments — FIX 3b: a HINT-sourced providerRef on a n
     });
 
     const getTransactionStatus = vi.fn(async () =>
-      status('PAID', { reference: String(number), amountCents: 25_000 }),
+      status('PAID', { reference, amountCents: 25_000 }),
     );
 
     await reconcilePendingPayments(paymentsService, () =>
@@ -1430,7 +1437,7 @@ describe('reconcilePendingPayments — FIX 4: a planted bogus ref no longer supp
   it('a by-id lookup that fails to bind falls back to searchByReference and settles', async () => {
     const { tenantId } = await signUpWithTenant('recon-fallback-search@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, number, reference } = await seedOnlineOrder(tenantId, {
       provider: 'mercadopago',
       providerRef: 'bogus-ref-planted-by-an-attacker',
       providerRefSource: 'hint',
@@ -1447,7 +1454,7 @@ describe('reconcilePendingPayments — FIX 4: a planted bogus ref no longer supp
     const searchByReference = vi.fn(async () => ({
       providerRef: 'mp-payment-the-shopper-actually-made',
       status: 'PAID' as const,
-      reference: String(number),
+      reference,
       amountCents: 25_000,
       currency: 'COP',
     }));
@@ -1469,7 +1476,7 @@ describe('reconcilePendingPayments — FIX 4: a planted bogus ref no longer supp
   it('the same fallback runs when the by-id lookup was REFUSED for provenance (search, then settle)', async () => {
     const { tenantId } = await signUpWithTenant('recon-fallback-after-refusal@demo.co', 'owner');
     await paymentsService.saveProviderCredentials(tenantId, 'mercadopago', FAKE_MP_CREDS);
-    const { orderId, number } = await seedOnlineOrder(tenantId, {
+    const { orderId, reference } = await seedOnlineOrder(tenantId, {
       provider: 'mercadopago',
       providerRef: 'planted',
       providerRefSource: 'hint',
@@ -1485,7 +1492,7 @@ describe('reconcilePendingPayments — FIX 4: a planted bogus ref no longer supp
     const searchByReference = vi.fn(async () => ({
       providerRef: 'mp-payment-real',
       status: 'PAID' as const,
-      reference: String(number),
+      reference,
       amountCents: 25_000,
       currency: 'COP',
     }));

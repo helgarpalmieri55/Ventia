@@ -19,6 +19,10 @@ const cfg: TenantProviderConfig = {
 const order: OrderForPayment = {
   orderId: 'ord_1',
   orderNumber: 'ORD-0001',
+  // Distinct from orderNumber on purpose: these tests assert which of the two
+  // reaches the gateway's reference field and which reaches a shopper-facing
+  // URL, and identical values would hide a swap.
+  gatewayReference: 'vr_testreference0001',
   totalCents: 4990000,
   customerEmail: 'shopper@example.com',
   // Per-tenant, and REQUIRED (multi-tenancy fix) — this replaced the single
@@ -73,7 +77,7 @@ describe('EpaycoProvider.createCheckoutSession', () => {
     expect(sessionBody.amount).toBe(49900);
     // extras.extra1 is the SAME slot verifyAndParseWebhook reads back as
     // x_extra1 — this is the sending side of that contract.
-    expect(sessionBody.extras.extra1).toBe('ORD-0001');
+    expect(sessionBody.extras.extra1).toBe('vr_testreference0001');
     // `response` — the shopper's browser return URL, now populated per tenant.
     // Verified against ePayco's own docs (checkout-implementacion's verbatim
     // session-create example carries `"response": "https://mysite.com"`;

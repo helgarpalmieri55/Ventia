@@ -82,6 +82,7 @@ test('pagos por revisar: per-cause guidance, untrusted refs, and the review flow
       data: {
         tenantId: tenant.id,
         number,
+        reference: `vr_e2e${ts}${number}`,
         email: 'comprador@example.com',
         phone: '3001234567',
         shippingAddress: {},

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { generateOrderReference } from '@ventia/core';
 import request from 'supertest';
 import Redis from 'ioredis';
 import type { INestApplication } from '@nestjs/common';
@@ -50,6 +51,7 @@ async function seedOrder(
     data: {
       tenantId,
       number,
+      reference: generateOrderReference(),
       status: 'PENDING',
       paymentStatus: 'PENDING',
       paymentProvider: 'wompi',

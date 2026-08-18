@@ -231,7 +231,10 @@ export class WompiProvider implements PaymentProvider {
     // computed): a missing/malformed per-tenant base must fail this call
     // outright, never degrade into a redirect pointing somewhere else.
     const storefrontBase = requireStorefrontBaseUrl(order.storefrontBaseUrl, 'wompi');
-    const reference = order.orderNumber;
+    // The gateway reference is `Order.reference`, NOT the order number:
+    // order numbers are per-tenant, so two tenants sharing one merchant
+    // account can have the same one. See OrderForPayment.gatewayReference.
+    const reference = order.gatewayReference;
     const amountInCents = order.totalCents;
     const signature = sha256Hex(`${reference}${amountInCents}${CHECKOUT_CURRENCY}${integritySecret}`);
 
@@ -247,7 +250,12 @@ export class WompiProvider implements PaymentProvider {
       // has no redirect-url term, so this addition cannot and does not
       // change any previously-produced signature. See buildRedirectUrl's doc
       // comment for why the order number rides in the path, not a query param.
-      'redirect-url': buildRedirectUrl(storefrontBase, reference),
+      // The HUMAN-facing order number, NOT the gateway reference: this is a
+      // path segment on a first-party storefront route
+      // (`/pago/wompi-retorno/[orderNumber]`) that the return page parses back
+      // out and shows the shopper. The two were the same string until
+      // per-order references landed; they are not any more.
+      'redirect-url': buildRedirectUrl(storefrontBase, order.orderNumber),
     });
 
     return { redirectUrl: `${CHECKOUT_URL}?${params.toString()}` };

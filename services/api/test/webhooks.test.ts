@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { generateOrderReference } from '@ventia/core';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
@@ -240,6 +241,7 @@ async function seedOrderWithProduct(
     data: {
       tenantId,
       number: orderNumber,
+      reference: generateOrderReference(),
       status: 'PENDING',
       paymentStatus: 'PENDING',
       paymentProvider: 'wompi',
@@ -294,6 +296,7 @@ async function seedOrderWithNumberAndTotal(
     data: {
       tenantId,
       number: opts.number,
+      reference: generateOrderReference(),
       status: opts.status ?? 'PENDING',
       paymentStatus: opts.paymentStatus ?? 'PENDING',
       paymentProvider: 'wompi',
@@ -1139,6 +1142,7 @@ describe('a valid payment landing on an order that can no longer be settled (wav
     // Exactly what the 15-minute stock-reservation expiry worker leaves behind.
     const { orderId } = await seedOrderWithNumberAndTotal(tenantId, {
       number: 7001,
+      reference: generateOrderReference(),
       totalCents: 30_000,
       status: 'CANCELLED',
       paymentStatus: 'EXPIRED',
@@ -1189,6 +1193,7 @@ describe('a valid payment landing on an order that can no longer be settled (wav
     await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
     const { orderId } = await seedOrderWithNumberAndTotal(tenantId, {
       number: 7002,
+      reference: generateOrderReference(),
       totalCents: 30_000,
       status: 'CONFIRMED',
       paymentStatus: 'PAID',
@@ -1730,5 +1735,121 @@ describe('an unreachable gateway is 503, not a bogus 401 (ePayco re-verification
 
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('WEBHOOK_INVALID_SIGNATURE');
+  });
+});
+
+describe('cross-tenant settle collision (per-order gateway references)', () => {
+  it('refuses a delivery naming another tenant\'s order, at an identical total', async () => {
+    // The reproduction. Two tenants sharing one gateway merchant account share
+    // its eventsSecret, so one signed delivery verifies at EITHER tenant's
+    // webhook URL — and `Order.number` is per-tenant, so order 5150 exists in
+    // both. Give the two orders the SAME total and the unconditional amount
+    // check, which is what used to stand here, agrees.
+    //
+    // Before per-order references this settled tenant A's order using tenant
+    // B's shopper's money: B's shopper charged with no order, A shipping goods
+    // nobody paid them for.
+    const a = await signUpWithTenant('webhooks-collision-a@demo.co', 'owner');
+    const b = await signUpWithTenant('webhooks-collision-b@demo.co', 'owner');
+    // The SAME credentials on both tenants — a shared merchant account.
+    await paymentsService.saveProviderCredentials(a.tenantId, 'wompi', FAKE_CREDS);
+    await paymentsService.saveProviderCredentials(b.tenantId, 'wompi', FAKE_CREDS);
+
+    const SHARED_NUMBER = 5150;
+    const SHARED_TOTAL = 30_000;
+    const orderA = await seedOrderWithNumberAndTotal(a.tenantId, {
+      number: SHARED_NUMBER,
+      totalCents: SHARED_TOTAL,
+    });
+    const orderB = await seedOrderWithNumberAndTotal(b.tenantId, {
+      number: SHARED_NUMBER,
+      totalCents: SHARED_TOTAL,
+    });
+
+    const bRow = await prisma.order.findUnique({ where: { id: orderB.orderId } });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // B's delivery — carrying B's order's reference — POSTed to A's URL.
+    const payload = buildSignedWebhookPayload({
+      reference: bRow!.reference,
+      amountInCents: SHARED_TOTAL,
+      status: 'APPROVED',
+      transactionId: 'txn-collision-1',
+      timestamp: 1700900100,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+    });
+    const res = await postWebhook(a.tenantId, payload);
+
+    // Still 200 — the delivery WAS received and durably recorded; this
+    // endpoint's contract with the gateway is not "I acted on it".
+    expect(res.status).toBe(200);
+
+    // NEITHER order settles. A's is not A's payment; B's did not arrive at
+    // B's endpoint, so B's is left for the reconciliation sweep to recover.
+    const aAfter = await prisma.order.findUnique({ where: { id: orderA.orderId } });
+    expect(aAfter?.status).toBe('PENDING');
+    expect(aAfter?.paymentStatus).toBe('PENDING');
+    const bAfter = await prisma.order.findUnique({ where: { id: orderB.orderId } });
+    expect(bAfter?.status).toBe('PENDING');
+    expect(bAfter?.paymentStatus).toBe('PENDING');
+
+    // And it is recorded as what it was, not swallowed.
+    const events = await prisma.webhookEvent.findMany({ where: { tenantId: a.tenantId } });
+    expect(events).toHaveLength(1);
+    expect(events[0].result).toBe('cross_tenant_reference');
+  });
+
+  it('settles normally when the reference belongs to the URL tenant', async () => {
+    // The control: same shape, right endpoint. Without this, the test above
+    // would pass just as well if the handler had stopped settling anything.
+    const { tenantId } = await signUpWithTenant('webhooks-collision-ok@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, { number: 5151, totalCents: 30_000 });
+    const row = await prisma.order.findUnique({ where: { id: orderId } });
+
+    const payload = buildSignedWebhookPayload({
+      reference: row!.reference,
+      amountInCents: 30_000,
+      status: 'APPROVED',
+      transactionId: 'txn-collision-ok',
+      timestamp: 1700900200,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+    });
+    const res = await postWebhook(tenantId, payload);
+
+    expect(res.status).toBe(200);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PAID');
+  });
+
+  it('still settles a TRANSITIONAL bare order number, scoped to the URL tenant', async () => {
+    // A session created before per-order references sent the order number, and
+    // its webhook may land after the deploy. Rejecting it would strand a
+    // shopper mid-payment — charged, no order — which is the exact outcome
+    // this codebase works hardest to avoid.
+    const { tenantId } = await signUpWithTenant('webhooks-legacy-ref@demo.co', 'owner');
+    await paymentsService.saveProviderCredentials(tenantId, 'wompi', FAKE_CREDS);
+    const LEGACY_NUMBER = 5152;
+    const { orderId } = await seedOrderWithNumberAndTotal(tenantId, {
+      number: LEGACY_NUMBER,
+      totalCents: 30_000,
+    });
+
+    const payload = buildSignedWebhookPayload({
+      // The bare order number, as a pre-change gateway session would have sent.
+      reference: String(LEGACY_NUMBER),
+      amountInCents: 30_000,
+      status: 'APPROVED',
+      transactionId: 'txn-legacy-ref',
+      timestamp: 1700900300,
+      eventsSecret: FAKE_CREDS.eventsSecret,
+    });
+    const res = await postWebhook(tenantId, payload);
+
+    expect(res.status).toBe(200);
+    const after = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(after?.status).toBe('CONFIRMED');
+    expect(after?.paymentStatus).toBe('PAID');
   });
 });

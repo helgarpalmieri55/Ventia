@@ -8,3 +8,4 @@ export * from './staff-schemas.js';
 export * from './colombia-locations.js';
 export * from './address-schemas.js';
 export * from './shipping-schemas.js';
+export { generateOrderReference, isOrderReference, ORDER_REFERENCE_PREFIX } from './order-reference.js';

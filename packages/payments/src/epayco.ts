@@ -493,7 +493,12 @@ export class EpaycoProvider implements PaymentProvider {
         response: `${storefrontBase}/pago/epayco-retorno/${encodeURIComponent(order.orderNumber)}`,
         // Same slot `verifyAndParseWebhook` reads back as `x_extra1` — see
         // module doc comment's dedicated section on this naming asymmetry.
-        extras: { extra1: order.orderNumber },
+        // `Order.reference`, not the per-tenant order number. This slot is
+        // read back as `x_extra1` on the confirmation webhook, and it is NOT
+        // covered by ePayco's confirmation hash — which is exactly why the
+        // value must be unguessable rather than derivable from a tenant and
+        // an order number. See OrderForPayment.gatewayReference.
+        extras: { extra1: order.gatewayReference },
       }),
     });
     if (!sessionRes.ok) {

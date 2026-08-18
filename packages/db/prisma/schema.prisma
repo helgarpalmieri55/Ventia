@@ -329,6 +329,29 @@ model Order {
   id                 String        @id @default(uuid()) @db.Uuid
   tenantId           String        @db.Uuid
   number             Int
+  // The reference handed to the payment gateway, and the ONLY identifier a
+  // webhook is resolved through. GLOBALLY unique, random and unguessable —
+  // all three properties are load-bearing, see
+  // docs/superpowers/specs/2026-08-15-per-order-gateway-references.md.
+  //
+  // Distinct from `number` on purpose. `number` is per-tenant
+  // (`@@unique([tenantId, number])`), so order 1001 exists in every tenant —
+  // and two tenants are explicitly allowed to SHARE one gateway merchant
+  // account, whose deliveries then verify at either tenant's webhook URL.
+  // With the order number as the reference, a delivery about tenant B's order
+  // 1001 arriving at tenant A's URL resolved to A's order 1001; only the
+  // amount check stood between that and settling A's order with B's shopper's
+  // money, and it stops standing the moment the two totals match.
+  //
+  // Unique GLOBALLY rather than per tenant: cross-tenant ambiguity is the
+  // whole bug, so a tenant-scoped constraint would preserve it. Random rather
+  // than derived from tenant + number: a derived reference is guessable, and
+  // ePayco's `x_extra1` is not covered by its confirmation hash, so an
+  // attacker-supplied reference must not be able to name a real order.
+  //
+  // `number` remains the human-facing identifier (VNT-1001) everywhere — this
+  // is plumbing and is never rendered.
+  reference          String        @unique
   status             OrderStatus   @default(PENDING)
   paymentStatus      PaymentStatus @default(PENDING)
   paymentProvider    String?
