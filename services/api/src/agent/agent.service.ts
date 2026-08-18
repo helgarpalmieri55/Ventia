@@ -143,6 +143,16 @@ export class AgentService {
     conversationId?: string;
     shopperRef?: string;
     message: string;
+    /** The channel's own id for this inbound message, when it has one.
+     *
+     * Persisted on the user's `Message` row, where `@@unique([tenantId,
+     * externalId])` turns it into the guarantee that one delivery produces at
+     * most one turn. WhatsApp providers retry, and a retry that slips through
+     * is a second model call billed to the merchant.
+     *
+     * Absent for the web widget, which has no such id — and NULL is fine
+     * there, because Postgres treats NULLs as distinct in a unique index. */
+    externalId?: string;
     /** Called as the turn progresses, for the SSE transport. Synchronous and
      * best-effort — a caller whose connection has gone away should ignore the
      * event, not throw, since the turn is already paid for and still worth
@@ -192,7 +202,13 @@ export class AgentService {
     // merchant needs to see that happening to understand why they should
     // upgrade.
     await db.message.create({
-      data: { tenantId, conversationId: conversation.id, role: 'user', content: message },
+      data: {
+        tenantId,
+        conversationId: conversation.id,
+        role: 'user',
+        content: message,
+        externalId: input.externalId ?? null,
+      },
     });
 
     const budget = await this.budget.check(tenantId);

@@ -9,6 +9,7 @@ import { FONT_PAIR_LABELS, RADIUS_LABELS, themeToFormState } from '../../../lib/
 import { EnviosTab } from '../../../components/shipping-tab';
 import { PagosTab } from '../../../components/pagos-tab';
 import { AgenteTab } from '../../../components/agente-tab';
+import { WhatsAppTab } from '../../../components/whatsapp-tab';
 
 interface StoreInfo {
   category?: string;
@@ -57,7 +58,7 @@ export interface SettingsResponse {
   };
 }
 
-type Tab = 'tienda' | 'marca' | 'pagos' | 'envios' | 'agente';
+type Tab = 'tienda' | 'marca' | 'pagos' | 'envios' | 'agente' | 'whatsapp';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'tienda', label: 'Tienda' },
@@ -65,6 +66,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'pagos', label: 'Pagos' },
   { key: 'envios', label: 'Envíos' },
   { key: 'agente', label: 'Asistente IA' },
+  { key: 'whatsapp', label: 'WhatsApp' },
 ];
 
 /** Owner-only route (hidden from staff in the nav, enforced server-side by
@@ -155,6 +157,9 @@ export default function ConfiguracionPage() {
         </div>
         <div hidden={tab !== 'agente'}>
           <AgenteTab settings={settings} onSaved={setSettings} />
+        </div>
+        <div hidden={tab !== 'whatsapp'}>
+          <WhatsAppTab />
         </div>
       </CardContent>
     </Card>

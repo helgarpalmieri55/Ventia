@@ -172,6 +172,16 @@ async function settle(ms = 400) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Drops the agent's repeated-identical-message cool-down keys, so a test can
+ * isolate a mechanism the cool-down would otherwise mask. */
+async function clearThrottleCooldown(): Promise<void> {
+  const Redis = (await import('ioredis')).default;
+  const redis = new Redis(process.env.REDIS_URL!);
+  const keys = await redis.keys('agent:dup:*');
+  if (keys.length > 0) await redis.del(...keys);
+  await redis.quit();
+}
+
 describe('POST /webhooks/whatsapp/cloud — routing', () => {
   it('answers the tenant that owns the phone_number_id', async () => {
     scripted = [textResponse('¡Claro! Tenemos varias.')];
@@ -236,18 +246,52 @@ describe('POST /webhooks/whatsapp/cloud — routing', () => {
 });
 
 describe('POST /webhooks/whatsapp/cloud — retries and plan', () => {
-  it('answers a retried delivery exactly once', async () => {
-    // Both providers retry with the SAME message id. Without the dedupe the
+  it('answers a retried delivery exactly once, and calls the model once', async () => {
+    // Both providers retry with the SAME message id. Without dedupe the
     // merchant is billed twice and the shopper is answered twice.
+    //
+    // Two things about the shape of this test, both learned the hard way when
+    // mutation testing showed an earlier version passing with dedupe REMOVED:
+    //
+    //  1. It asserts the MODEL was not called again, not just that one row
+    //     exists. The row count alone proves nothing — the unique index would
+    //     reject the second insert anyway, AFTER a model call the merchant has
+    //     already paid for. The turn being skipped is the property worth
+    //     having.
+    //  2. The agent's repeated-identical-message cool-down (30s, in Redis)
+    //     also swallows a same-text retry, and it was what made the earlier
+    //     version pass. It is cleared between the two deliveries here so the
+    //     only thing that can absorb the second one is the dedupe under test.
+    //     A real retry arriving after the cool-down expires is exactly the
+    //     case this covers.
     const messageId = `wamid.RETRY-${Date.now()}`;
-    scripted = [textResponse('primera y única')];
+    scripted = [textResponse('primera y única'), textResponse('esto no debe enviarse')];
 
     await post(cloudPayload({ messageId, text: 'reintento' }));
     await settle();
+    expect(scripted).toHaveLength(1); // one model call consumed
+
+    await clearThrottleCooldown();
     await post(cloudPayload({ messageId, text: 'reintento' }));
     await settle();
 
+    // Still one consumed: the retry never reached the model.
+    expect(scripted).toHaveLength(1);
     const stored = await prisma.message.findMany({ where: { tenantId, content: 'reintento' } });
+    expect(stored).toHaveLength(1);
+    expect(stored[0].externalId).toBe(messageId);
+  });
+
+  it('lets a genuinely NEW message through after a retry was dropped', async () => {
+    // The failure the dedupe must not cause: a shopper's real follow-up being
+    // mistaken for a retry and silently ignored.
+    scripted = [textResponse('respuesta al seguimiento')];
+
+    await post(cloudPayload({ messageId: `wamid.NEW-${Date.now()}`, text: 'otra pregunta distinta' }));
+    await settle();
+
+    expect(scripted).toHaveLength(0);
+    const stored = await prisma.message.findMany({ where: { tenantId, content: 'otra pregunta distinta' } });
     expect(stored).toHaveLength(1);
   });
 

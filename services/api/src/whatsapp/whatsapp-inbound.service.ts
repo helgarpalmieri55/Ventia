@@ -69,6 +69,11 @@ export class WhatsAppInboundService {
         // contact to hand the merchant.
         shopperRef: message.from,
         message: message.text,
+        // Carried through so the user row records it and
+        // `@@unique([tenantId, externalId])` becomes the real guarantee. The
+        // `isDuplicate` pre-check above is the cheap path that avoids a model
+        // call; this is the one that cannot be raced.
+        externalId: message.externalId,
       });
 
       const baseUrl = await this.storefrontBaseUrl(tenantId);
@@ -92,13 +97,19 @@ export class WhatsAppInboundService {
   }
 
   /**
-   * Both providers retry, and both retry with the same message id. Without
-   * this a retried delivery is a second agent turn: the merchant is billed
-   * twice and the shopper is answered twice.
+   * A cheap pre-check for a delivery we have already answered.
    *
-   * Keyed on the message's own id recorded against the conversation's tenant.
-   * A dedicated table would be tidier; reusing `Message.externalId` keeps the
-   * fact next to the transcript that proves it.
+   * NOT the guarantee, and worth being precise about because the obvious
+   * reading is wrong: the guarantee is `@@unique([tenantId, externalId])` on
+   * `Message`, which `AgentService.respond` trips when it inserts the user row
+   * — and it inserts that row BEFORE the model call, so a retry that gets past
+   * this check still costs the merchant nothing. Mutation testing confirms it:
+   * deleting this line leaves every dedupe assertion passing, while making the
+   * insert stop recording `externalId` fails them.
+   *
+   * It stays because it is free and the index is not: without it every retry
+   * costs a conversation lookup, a failed insert and a thrown exception, and
+   * Meta retries with intent.
    */
   private async isDuplicate(tenantId: string, externalId: string): Promise<boolean> {
     const existing = await tenantDb(tenantId).message.findFirst({
