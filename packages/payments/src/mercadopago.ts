@@ -380,7 +380,9 @@ export class MercadoPagoProvider implements PaymentProvider {
           currency_id: CHECKOUT_CURRENCY,
         },
       ],
-      external_reference: order.orderNumber,
+      // `Order.reference`, not the per-tenant order number — see
+      // OrderForPayment.gatewayReference.
+      external_reference: order.gatewayReference,
     };
 
     const res = await fetchGateway(

@@ -10,6 +10,7 @@ import type {
 } from './index.js';
 import { requireStorefrontBaseUrl } from './storefront-base.js';
 import { fetchGateway } from './http.js';
+import { WebhookVerificationUnavailableError } from './errors.js';
 
 // --- Facts below are this task's own re-verification against real
 // docs.epayco.com pages (fetched directly during this task) and, where the
@@ -492,7 +493,12 @@ export class EpaycoProvider implements PaymentProvider {
         response: `${storefrontBase}/pago/epayco-retorno/${encodeURIComponent(order.orderNumber)}`,
         // Same slot `verifyAndParseWebhook` reads back as `x_extra1` — see
         // module doc comment's dedicated section on this naming asymmetry.
-        extras: { extra1: order.orderNumber },
+        // `Order.reference`, not the per-tenant order number. This slot is
+        // read back as `x_extra1` on the confirmation webhook, and it is NOT
+        // covered by ePayco's confirmation hash — which is exactly why the
+        // value must be unguessable rather than derivable from a tenant and
+        // an order number. See OrderForPayment.gatewayReference.
+        extras: { extra1: order.gatewayReference },
       }),
     });
     if (!sessionRes.ok) {
@@ -617,7 +623,30 @@ export class EpaycoProvider implements PaymentProvider {
     }
 
     // --- Re-verification against ePayco's own record (see doc comment).
-    const looked = await this.getTransactionStatus(xRefPayco, cfg, fetchImpl);
+    //
+    // Wrapped so that FAILING TO REACH the gateway is reported as a different
+    // kind of failure from failing the check. Everything above this line is a
+    // verdict about the bytes ePayco sent — permanent, and correctly a 401.
+    // This call is a network round trip, and a timeout or a 5xx on it says
+    // nothing about the signature. Answering those with "your signature was
+    // wrong" is both untrue and dangerous: a provider that sees an endpoint
+    // 401 repeatedly may disable the webhook, turning a transient blip into
+    // silently unsettled payments. See WebhookVerificationUnavailableError.
+    //
+    // Only the CALL is wrapped. The comparisons below it stay plain Errors —
+    // a lookup that succeeds and disagrees with the payload IS a verdict, and
+    // retrying it would reach the same conclusion.
+    let looked: TransactionStatusResult;
+    try {
+      looked = await this.getTransactionStatus(xRefPayco, cfg, fetchImpl);
+    } catch (err) {
+      throw new WebhookVerificationUnavailableError(
+        `epayco webhook: could not reach the gateway to verify this delivery — ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        { cause: err },
+      );
+    }
     if (looked.reference === undefined) {
       throw new Error(
         'epayco webhook: gateway lookup carries no reference — cannot verify which order this signed transaction is for',

@@ -2,7 +2,28 @@ export type PaymentProviderId = 'wompi' | 'mercadopago' | 'epayco';
 
 export interface OrderForPayment {
   orderId: string;
+  /** The HUMAN-facing order number (`1001`, rendered as `VNT-1001`). Used for
+   * shopper-visible things — the storefront return-URL path, a gateway line
+   * item's title — and NEVER as the reference the gateway echoes back. See
+   * `gatewayReference`. */
   orderNumber: string;
+  /**
+   * The reference this order is identified by AT THE GATEWAY, and the only
+   * identifier a webhook settle resolves through. `Order.reference`.
+   *
+   * Separate from `orderNumber` because the two have genuinely different
+   * jobs, and conflating them was a cross-tenant settle bug: `orderNumber` is
+   * per-tenant, so order 1001 exists in every tenant, and two tenants may
+   * share one gateway merchant account whose deliveries verify at either
+   * tenant's webhook URL. Using the number as the reference meant a delivery
+   * about tenant B's order could resolve to tenant A's same-numbered one.
+   *
+   * Adapters must send THIS as the gateway's reference field (`reference`,
+   * `external_reference`, `extras.extra1`) and must not substitute the order
+   * number — see
+   * docs/superpowers/specs/2026-08-15-per-order-gateway-references.md.
+   */
+  gatewayReference: string;
   totalCents: number;
   customerEmail: string;
   /** The PUBLIC, browser-reachable base URL of the storefront **this
@@ -302,6 +323,7 @@ export interface PaymentProvider {
  * assert against the same rules the adapters enforce, rather than discovering
  * a mismatch only when a real checkout throws. See its own doc comment for the
  * rules and for why every failure mode throws instead of degrading. */
+export { WebhookVerificationUnavailableError } from './errors.js';
 export { requireStorefrontBaseUrl } from './storefront-base.js';
 export { WompiProvider } from './wompi.js';
 export { MercadoPagoProvider } from './mercadopago.js';

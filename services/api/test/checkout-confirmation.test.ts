@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { generateOrderReference } from '@ventia/core';
 import request from 'supertest';
 import Redis from 'ioredis';
 import type { INestApplication } from '@nestjs/common';
@@ -84,6 +85,7 @@ beforeAll(async () => {
     data: {
       tenantId: tenantAId,
       number: 1,
+      reference: generateOrderReference(),
       status: 'PENDING',
       paymentStatus: 'COD',
       email: 'ana@example.com',
@@ -122,6 +124,10 @@ beforeAll(async () => {
     data: {
       tenantId: tenantBId,
       number: 1, // colliding with orderA's number on purpose
+      // ...but NOT colliding on `reference`, which is globally unique. That is
+      // the point of the column: the number may repeat across tenants, the
+      // gateway-facing reference never does.
+      reference: generateOrderReference(),
       status: 'PENDING',
       paymentStatus: 'COD',
       email: 'beto@example.com',

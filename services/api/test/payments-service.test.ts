@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { generateOrderReference } from '@ventia/core';
 import { randomUUID } from 'node:crypto';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import type { INestApplication } from '@nestjs/common';
@@ -441,6 +442,7 @@ describe('PaymentsService.markPaid', () => {
       data: {
         tenantId,
         number: orderNumberSeq++,
+        reference: generateOrderReference(),
         status,
         paymentStatus,
         paymentProvider: opts?.paymentProvider ?? 'wompi',
@@ -566,6 +568,7 @@ describe('PaymentsService.markFailed', () => {
       data: {
         tenantId,
         number: orderNumberSeq++,
+        reference: generateOrderReference(),
         status,
         paymentStatus,
         paymentProvider: opts?.paymentProvider ?? 'wompi',
@@ -652,6 +655,7 @@ describe('PaymentsService.markPaid — FIX 1: a declined attempt must not block 
       data: {
         tenantId,
         number: orderNumberSeq++,
+        reference: generateOrderReference(),
         status,
         paymentStatus,
         paymentProvider: 'wompi',

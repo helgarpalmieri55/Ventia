@@ -17,6 +17,10 @@ const cfg: TenantProviderConfig = {
 const order: OrderForPayment = {
   orderId: 'ord_1',
   orderNumber: 'ORD-0001',
+  // Distinct from orderNumber on purpose: these tests assert which of the two
+  // reaches the gateway's reference field and which reaches a shopper-facing
+  // URL, and identical values would hide a swap.
+  gatewayReference: 'vr_testreference0001',
   totalCents: 4990000,
   customerEmail: 'shopper@example.com',
   // Required on `OrderForPayment` since the multi-tenancy fix. This adapter
@@ -45,7 +49,7 @@ describe('MercadoPagoProvider.createCheckoutSession', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer APP_USR-prv-abc123');
 
     const body = JSON.parse(init.body as string);
-    expect(body.external_reference).toBe('ORD-0001');
+    expect(body.external_reference).toBe('vr_testreference0001');
     expect(body.items).toHaveLength(1);
     // 4,990,000 cents -> 49,900 pesos (major-unit decimal, NOT cents).
     expect(body.items[0].unit_price).toBe(49900);

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { generateOrderReference } from '@ventia/core';
 import { randomUUID } from 'node:crypto';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import type { INestApplication } from '@nestjs/common';
@@ -91,6 +92,7 @@ async function seedReservedOrder(
     data: {
       tenantId,
       number: orderNumberSeq++,
+      reference: generateOrderReference(),
       status: opts.status,
       paymentStatus: opts.paymentStatus,
       paymentProvider: 'wompi',

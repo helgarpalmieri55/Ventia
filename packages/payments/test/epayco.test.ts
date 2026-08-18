@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { EpaycoProvider } from '../src/epayco';
+import { WebhookVerificationUnavailableError } from '../src/errors';
 import type { NormalizedStatus, OrderForPayment, RawRequest, TenantProviderConfig } from '../src/index';
 
 function sha256Hex(input: string): string {
@@ -18,6 +19,10 @@ const cfg: TenantProviderConfig = {
 const order: OrderForPayment = {
   orderId: 'ord_1',
   orderNumber: 'ORD-0001',
+  // Distinct from orderNumber on purpose: these tests assert which of the two
+  // reaches the gateway's reference field and which reaches a shopper-facing
+  // URL, and identical values would hide a swap.
+  gatewayReference: 'vr_testreference0001',
   totalCents: 4990000,
   customerEmail: 'shopper@example.com',
   // Per-tenant, and REQUIRED (multi-tenancy fix) — this replaced the single
@@ -72,7 +77,7 @@ describe('EpaycoProvider.createCheckoutSession', () => {
     expect(sessionBody.amount).toBe(49900);
     // extras.extra1 is the SAME slot verifyAndParseWebhook reads back as
     // x_extra1 — this is the sending side of that contract.
-    expect(sessionBody.extras.extra1).toBe('ORD-0001');
+    expect(sessionBody.extras.extra1).toBe('vr_testreference0001');
     // `response` — the shopper's browser return URL, now populated per tenant.
     // Verified against ePayco's own docs (checkout-implementacion's verbatim
     // session-create example carries `"response": "https://mysite.com"`;
@@ -887,4 +892,87 @@ describe('EpaycoProvider.getTransactionStatus', () => {
     expect(result).toEqual({ status: 'PAID', reference: '1042', amountCents: 4990000, currency: 'COP' });
   });
 
+});
+
+describe('EpaycoProvider.verifyAndParseWebhook — unreachable gateway vs failed check', () => {
+  function signedRequest() {
+    return buildSignedWebhookRequest({
+      xRefPayco: 'ref-123',
+      xTransactionId: 'txn-456',
+      xAmount: '49900.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: cfg.eventsSecret!,
+    });
+  }
+
+  it('reports a lookup TIMEOUT as unavailable, not as a bad signature', async () => {
+    // The distinction this class exists for. ePayco's confirmation signature
+    // covers neither the status nor the reference, so this adapter re-reads
+    // both from ePayco's own record mid-verification — and a timeout on that
+    // call says nothing at all about the signature, which was already checked
+    // and passed before this point.
+    const provider = new EpaycoProvider();
+    const timingOut = vi.fn(async () => {
+      throw new Error('epayco getTransactionStatus: request to https://x/ timed out after 10000ms');
+    });
+
+    const err = await provider
+      .verifyAndParseWebhook(signedRequest(), cfg, timingOut as unknown as typeof fetch)
+      .catch((e: unknown) => e as Error);
+
+    expect(err).toBeInstanceOf(WebhookVerificationUnavailableError);
+    expect(err.message).toMatch(/could not reach the gateway/i);
+    // The original cause is preserved rather than flattened into a string.
+    expect((err as Error & { cause?: Error }).cause?.message).toMatch(/timed out/);
+  });
+
+  it('reports a lookup HTTP failure as unavailable too', async () => {
+    const provider = new EpaycoProvider();
+    const failing = vi.fn(async () => new Response('upstream exploded', { status: 502 }));
+
+    await expect(
+      provider.verifyAndParseWebhook(signedRequest(), cfg, failing as unknown as typeof fetch),
+    ).rejects.toBeInstanceOf(WebhookVerificationUnavailableError);
+  });
+
+  it('does NOT use it for a bad signature, which is a permanent verdict', async () => {
+    // Retrying an unsigned/tampered delivery reaches the same conclusion, so
+    // this must stay a plain rejection the controller answers with 401.
+    const provider = new EpaycoProvider();
+    const req = buildSignedWebhookRequest({
+      xRefPayco: 'ref-123',
+      xTransactionId: 'txn-456',
+      xAmount: '49900.00',
+      xCurrencyCode: 'COP',
+      xResponse: 'Aceptada',
+      xExtra1: 'ORD-0001',
+      epaycoCustomerId: cfg.epaycoCustomerId!,
+      eventsSecret: 'the-wrong-secret',
+    });
+
+    const err = await provider
+      .verifyAndParseWebhook(req, cfg, neverCalledFetch() as unknown as typeof fetch)
+      .catch((e: unknown) => e as Error);
+
+    expect(err).not.toBeInstanceOf(WebhookVerificationUnavailableError);
+    expect(err.message).toMatch(/signature mismatch/);
+  });
+
+  it('does NOT use it when the lookup SUCCEEDS but disagrees with the payload', async () => {
+    // A reachable gateway that contradicts the delivery is a verdict, not an
+    // outage — retrying would reach the same disagreement. This is the line
+    // between the two: only the CALL is wrapped, never the comparisons.
+    const provider = new EpaycoProvider();
+    const disagreeing = mockReferenceLookup({ x_extra1: 'ORD-9999' });
+
+    const err = await provider
+      .verifyAndParseWebhook(signedRequest(), cfg, disagreeing as unknown as typeof fetch)
+      .catch((e: unknown) => e as Error);
+
+    expect(err).not.toBeInstanceOf(WebhookVerificationUnavailableError);
+    expect(err.message).toMatch(/does not match/);
+  });
 });

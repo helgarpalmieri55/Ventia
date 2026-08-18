@@ -1,6 +1,11 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { Prisma, platformDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
-import { DEPARTAMENTOS, type CheckoutAddressInput, type TaxRateValue } from '@ventia/core';
+import {
+  DEPARTAMENTOS,
+  generateOrderReference,
+  type CheckoutAddressInput,
+  type TaxRateValue,
+} from '@ventia/core';
 import type { PaymentProviderId, TenantProviderConfig } from '@ventia/payments';
 import { MAILER, type Mailer } from '../mailer/mailer';
 import { sendOrderEmails, type OrderEmailContext } from '../mailer/order-emails';
@@ -79,6 +84,10 @@ export interface CheckoutResult {
 // this service.
 interface CheckoutTransactionResult extends CheckoutResult {
   orderId: string;
+  /** `Order.reference` — the gateway-facing identifier for this order. Stays
+   * internal to this service and the adapter call below; nothing shopper- or
+   * merchant-facing renders it. */
+  gatewayReference: string;
   email: string;
   phone: string;
   items: OrderEmailContext['items'];
@@ -375,6 +384,14 @@ export class CheckoutService {
           data: {
             tenantId,
             number: orderNumber,
+            // The gateway-facing identifier, generated per order. Distinct
+            // from `number` because `number` is per-tenant and two tenants may
+            // share one gateway merchant account — see
+            // docs/superpowers/specs/2026-08-15-per-order-gateway-references.md.
+            // Generated for EVERY order, COD included: it costs nothing, and a
+            // column that is only sometimes populated invites a consumer to
+            // treat null as meaningful.
+            reference: generateOrderReference(),
             status: 'PENDING',
             // `cod` keeps its original literal `'COD'`; any non-`cod`
             // payment method is `'PENDING'` (already the schema default, but
@@ -494,6 +511,7 @@ export class CheckoutService {
         return {
           orderId: order.id,
           orderNumber,
+          gatewayReference: order.reference,
           totalCents,
           email: input.email,
           phone: input.phone,
@@ -562,15 +580,18 @@ export class CheckoutService {
       const { redirectUrl } = await getProvider(input.paymentMethod).createCheckoutSession(
         {
           orderId: result.orderId,
-          // CRITICAL contract with the webhook handler (Task 4,
-          // webhooks.controller.ts): this MUST be the plain string form of
-          // the Prisma `Int` order number (`String(result.orderNumber)`,
-          // e.g. `"42"`), NEVER the `VNT-`-prefixed display string used in
-          // emails/UI. The webhook handler resolves an incoming event back to
-          // this order via `Number(event.reference)` against `Order.number`
-          // — sending the prefixed form here would silently break webhook
-          // resolution for every real order, on any online provider.
+          // The HUMAN-facing number, used for the storefront return-URL path
+          // and a gateway line item's title. Plain digits (`"42"`), never the
+          // `VNT-`-prefixed display string used in emails/UI — the return
+          // routes parse this back out of the path.
           orderNumber: String(result.orderNumber),
+          // What the gateway echoes back, and the ONLY thing the webhook
+          // handler resolves a settle through. Previously this was the order
+          // number, which is per-tenant: a delivery about another tenant's
+          // same-numbered order, arriving at this tenant's webhook URL,
+          // resolved to THIS tenant's order, with only the amount check
+          // between that and settling it with someone else's money.
+          gatewayReference: result.gatewayReference,
           totalCents: result.totalCents,
           customerEmail: result.email,
           // The PER-TENANT public storefront base, computed above from this

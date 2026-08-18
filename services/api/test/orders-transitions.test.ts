@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { generateOrderReference } from '@ventia/core';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
@@ -95,6 +96,7 @@ async function seedOrder(
     data: {
       tenantId,
       number: orderNumberSeq++,
+      reference: generateOrderReference(),
       status,
       paymentStatus: 'COD',
       email: 'comprador@example.com',
@@ -831,6 +833,7 @@ async function seedReservedOnlineOrder(
     data: {
       tenantId,
       number: orderNumberSeq++,
+      reference: generateOrderReference(),
       status: 'PENDING',
       paymentStatus: overrides.paymentStatus ?? 'PENDING',
       paymentProvider: overrides.paymentProvider ?? 'wompi',

@@ -102,6 +102,7 @@ interface CandidateOrder {
   id: string;
   tenantId: string;
   number: number;
+  reference: string;
   totalCents: number;
   paymentProvider: string | null;
   providerRef: string | null;
@@ -286,7 +287,12 @@ function isGatewayVerifiedRef(source: string | null): boolean {
  * acting on a gateway answer we have not established is about this order.
  */
 function checkOrderBinding(result: TransactionStatusResult, order: CandidateOrder): string | null {
-  const expectedReference = String(order.number);
+  // `Order.reference`, matching exactly what the adapters send as the gateway
+  // reference. Was `String(order.number)`, which is per-tenant and therefore
+  // could be satisfied by another tenant's same-numbered order on a shared
+  // merchant account — the same collision the webhook settle path closed by
+  // resolving globally. Both paths now bind on the same globally-unique value.
+  const expectedReference = order.reference;
   if (result.reference === undefined) {
     return 'gateway response carries no reference — cannot verify the transaction belongs to this order';
   }
@@ -399,6 +405,7 @@ export async function reconcilePendingPayments(
       id: true,
       tenantId: true,
       number: true,
+      reference: true,
       totalCents: true,
       paymentProvider: true,
       providerRef: true,
