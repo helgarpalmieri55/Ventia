@@ -65,6 +65,16 @@ enum ConversationChannel {
   whatsapp
 }
 
+/// Mirrors `WhatsAppProviderId` in packages/whatsapp/src/index.ts. An enum
+/// rather than a free `String` because the value selects which adapter parses
+/// an inbound delivery and signs an outbound send — a typo here would route a
+/// Cloud API payload through the Evolution parser, which returns `null`
+/// (unrecognized shape) and silently drops a shopper's message.
+enum WhatsAppProviderId {
+  evolution
+  cloud
+}
+
 enum TenantContentType {
   faq
   policy_shipping
@@ -96,6 +106,7 @@ model Tenant {
   conversations Conversation[]
   contents      TenantContent[]
   subscriptions Subscription[]
+  whatsappNumbers WhatsAppNumber[]
 }
 
 model TenantDomain {
@@ -650,9 +661,35 @@ model Message {
   inputTokens    Int          @default(0)
   outputTokens   Int          @default(0)
   createdAt      DateTime     @default(now())
+
+  /// The provider's own id for an inbound message (`InboundMessage.externalId`
+  /// in packages/whatsapp), used to drop duplicate deliveries. Both WhatsApp
+  /// providers retry, and both retry carrying the SAME id.
+  ///
+  /// NULL for every web-widget message, which has no provider id — and NULL is
+  /// why the unique index below is not a problem for them: Postgres treats
+  /// NULLs as distinct in a unique index, so any number of null rows coexist.
+  /// (Looks wrong at a glance; it is the same property `WebhookEvent` relies
+  /// on for its tenant-less rows.)
+  externalId     String?
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@index([conversationId])
+  /// Inbound dedupe, enforced by Postgres rather than a cache, because a
+  /// duplicate here costs money: a retried delivery that slips through becomes
+  /// a second agent turn — the model is called twice, the merchant's AI budget
+  /// is charged twice, and the shopper is answered twice. A cache can fail
+  /// open; a unique index cannot.
+  ///
+  /// Scoped to the tenant, NOT globally unique on `externalId`. Provider
+  /// message ids are namespaced by the provider, not by us, and two tenants
+  /// can legitimately be reached through the same provider account — under a
+  /// global key, whichever tenant was written second would have its message
+  /// permanently swallowed. That is not hypothetical: it is exactly the
+  /// shared-gateway bug fixed for `WebhookEvent` in
+  /// 20260814090000_webhook_event_tenant_scoped_unique (fix 4 in
+  /// services/api/src/payments/webhooks.controller.ts).
+  @@unique([tenantId, externalId])
 }
 
 model AgentUsage {
@@ -665,6 +702,79 @@ model AgentUsage {
   messagesCount Int    @default(0)
 
   @@unique([tenantId, month])
+}
+
+// ---- WhatsApp channel ----
+
+/// One connected WhatsApp number, per docs/superpowers/specs/2026-08-18-p5-whatsapp-design.md §1.
+///
+/// This table exists instead of another key under `Tenant.settings` for one
+/// reason: inbound routing. Every other webhook in this codebase carries the
+/// tenant in its path (`/webhooks/payments/:provider/:tenantId`), but Meta
+/// delivers ONE webhook per app covering every number under it, so the only
+/// thing identifying the tenant is `phone_number_id` inside the payload. A
+/// payload-derived value has to be looked up, so it must be a real indexed
+/// column.
+///
+/// A row here is exactly what `WhatsAppConfig` (packages/whatsapp) is
+/// assembled from: `externalId` and `verifyToken` directly, `token` /
+/// `appSecret` / `baseUrl` by decrypting `credentialsEnc` in the API.
+model WhatsAppNumber {
+  id       String             @id @default(uuid()) @db.Uuid
+  tenantId String             @db.Uuid
+  provider WhatsAppProviderId
+
+  /// THE routing key. Cloud: `phone_number_id`; Evolution: the instance name.
+  ///
+  /// Globally `@unique`, deliberately NOT `@@unique([tenantId, externalId])`.
+  /// An inbound delivery carries this value and nothing else, so if two
+  /// tenants could claim the same one the lookup would return two rows and
+  /// routing would be ambiguous — and "ambiguous" here means one store's
+  /// customers reaching another store's agent, leaking their conversation and
+  /// their order data. This is a safety property enforced by the database, not
+  /// a tidiness constraint: the application-layer check ("is this number
+  /// already registered?") is racy, a UNIQUE index is not.
+  externalId String @unique
+
+  /// Human-readable number for the admin UI ("+57 300 123 4567"). Display
+  /// only — never used for routing, which is always `externalId`.
+  displayPhone String
+
+  /// pending | connected | disabled. `pending` until the provider handshake
+  /// completes; `disabled` is how a merchant turns the channel off without
+  /// losing the credentials. Free `String` like `Order.status` and
+  /// `Conversation.status`, matching this schema's existing convention for
+  /// lifecycle fields that the admin flow owns.
+  status String @default("pending")
+
+  /// AES-256-GCM blob (`base64(iv):base64(tag):base64(ciphertext)`), the same
+  /// scheme and the same key as payment-provider credentials — see
+  /// services/api/src/payments/encryption.ts. Holds the provider token, plus
+  /// the Meta app secret (Cloud) or the instance base URL (Evolution).
+  ///
+  /// Nullable because a row is created by the admin flow BEFORE the merchant
+  /// has finished pasting credentials (`status = 'pending'`).
+  ///
+  /// NOT readable by tenant-scoped code: `ventia_app` has a column-level
+  /// SELECT grant that excludes this column and `verifyToken`. See the
+  /// migration for the full reasoning.
+  credentialsEnc String?
+
+  /// Meta's `hub.verify_token`, echoed back during the GET handshake. A shared
+  /// secret, so it lives under the same column-level revocation as
+  /// `credentialsEnc`. Null for Evolution, which has no such handshake.
+  verifyToken String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Cascade + this index: the admin "WhatsApp" tab lists a tenant's numbers,
+  /// and a deleted tenant must not leave a live routing entry behind — an
+  /// orphaned row would keep matching inbound deliveries for a store that no
+  /// longer exists.
+  @@index([tenantId])
 }
 
 // ---- Content / Notifications / Platform ----

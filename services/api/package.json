@@ -19,6 +19,7 @@
     "@ventia/core": "workspace:*",
     "@ventia/db": "workspace:*",
     "@ventia/payments": "workspace:*",
+    "@ventia/whatsapp": "workspace:*",
     "better-auth": "^1.1.0",
     "bullmq": "^5.0.0",
     "cookie-parser": "^1.4.7",

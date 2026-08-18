@@ -113,6 +113,22 @@ export async function createApp(): Promise<INestApplication> {
       key: (req) => {
         // `/webhooks/payments/:provider/:tenantId` — this middleware is mounted
         // on '/webhooks', so req.path is the remainder.
+        //
+        // `/webhooks/whatsapp/:provider` deliberately falls through to `null`
+        // (no limiting). Its tenant is only knowable from `phone_number_id`
+        // INSIDE the payload, and this middleware runs before the body is even
+        // read — so the only key available here is the client address, which
+        // for Meta is a handful of edge IPs shared by every tenant. Keying on
+        // that would let one busy store throttle every other store's inbound
+        // messages, which is precisely the failure the per-tenant key below
+        // exists to avoid.
+        //
+        // What bounds that endpoint instead, in order: the provider signature
+        // is verified before any work beyond one indexed lookup (so forged
+        // traffic costs almost nothing), `Message.externalId` dedupes retries,
+        // the per-conversation throttle caps a single shopper, and the monthly
+        // budget caps the tenant. Four layers, none of which can be evaded by
+        // volume from an address we cannot attribute.
         const parts = req.path.split('/').filter(Boolean);
         return parts.length >= 3 && parts[0] === 'payments' ? `${parts[1]}:${parts[2]}` : null;
       },

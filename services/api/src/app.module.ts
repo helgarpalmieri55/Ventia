@@ -12,6 +12,7 @@ import { PaymentAlertsModule } from './payment-alerts/payment-alerts.module';
 import { SettingsModule } from './settings/settings.module';
 import { StaffModule } from './staff/staff.module';
 import { StorefrontModule } from './storefront/storefront.module';
+import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { RedisModule, REDIS_CLIENT } from './common/redis.module';
 import { DomainResolver } from './tenants/domain-resolver';
 import { TenantMiddleware } from './tenants/tenant.middleware';
@@ -34,6 +35,7 @@ export { REDIS_CLIENT };
     SettingsModule,
     StaffModule,
     StorefrontModule,
+    WhatsAppModule,
   ],
   controllers: [HealthController, TenantController],
   providers: [

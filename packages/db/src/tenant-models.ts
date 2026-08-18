@@ -26,4 +26,18 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   // deletes one of these rows — an alert marked reviewed by mistake is
   // corrected by APPENDING a `reopened` row, never by rewriting history.
   'WebhookEventReview',
+  // READ-ONLY for tenants, and narrower than the rest: `ventia_app` holds a
+  // COLUMN-LEVEL SELECT grant that omits `credentialsEnc` and `verifyToken`
+  // (see 20260818120000_whatsapp_numbers), with no INSERT/UPDATE/DELETE at
+  // all. Listing it here injects `AND tenantId = t` on reads so the
+  // application layer agrees with the `FOR SELECT` RLS policy.
+  //
+  // Consequence worth knowing before you use it: a `tenantDb(t).whatsAppNumber
+  // .findMany()` with NO explicit `select` asks for every column, hits the two
+  // it may not read, and fails with `permission denied for table
+  // WhatsAppNumber` (SQLSTATE 42501). That is the design — it fails loudly
+  // rather than loading a Meta access token into application memory. Every
+  // real caller today reads through `platformDb` anyway, because the
+  // connection flow has to decrypt with the platform key.
+  'WhatsAppNumber',
 ]);

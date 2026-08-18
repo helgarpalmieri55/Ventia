@@ -317,6 +317,39 @@ status change and not just a sentence, a price comes from the current row. The l
 AGENT_LIVE_EVALS=1 ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @ventia/api vitest run test/agent-evals
 ```
 
+### WhatsApp channel — P5
+
+Two providers behind one interface (`packages/whatsapp`): **Evolution API** in development (self-hosted,
+QR-paired, no Meta app review needed) and **Meta WhatsApp Cloud API** in production. Both were built
+against their official docs read at implementation time, per SPEC §4 — and both are verified against
+the docs' own example payloads rather than live traffic, because no Meta app or Evolution instance was
+available. Treat the wire formats as unconfirmed until a real number has been connected once.
+
+**Routing does not use the URL.** `POST /webhooks/whatsapp/:provider` carries no tenant, because Meta
+delivers one webhook per *app* covering every number registered under it — the only discriminator is
+`phone_number_id` inside the payload. Hence `WhatsAppNumber.externalId` is globally `@unique`: the
+lookup must have exactly one answer, and two tenants claiming one id would mean a shopper reaching
+another store's agent. Evolution's instance name occupies the same column, so there is no special case.
+
+Credentials (`credentialsEnc`) and `verifyToken` are AES-256-GCM encrypted with the same key as payment
+credentials, and are **unreachable from tenant-scoped code**: `ventia_app` holds a column-level SELECT
+grant that omits both, so a `tenantDb(...).whatsAppNumber.findMany()` errors rather than quietly loading
+a token into memory. RLS is `ENABLE`, not `FORCE`, and that is load-bearing — the inbound routing lookup
+runs on `platformDb` *before* a tenant is known, so forcing the policy on the owner would drop every
+inbound message on the platform.
+
+Four independent things bound abuse on this endpoint, since its tenant is unknowable at the rate-limiter
+layer (see the comment in `main.ts`): the provider signature is verified before any work beyond one
+indexed lookup; `Message.externalId` (unique per tenant) dedupes provider retries, which would otherwise
+each be a second billed agent turn; the per-conversation throttle caps one shopper; and the monthly
+budget caps the tenant. The plan gate (`TenantLimits.whatsappChannel`) is re-checked on every inbound
+message, not just at connect time — a downgraded store keeps its number registered and Meta keeps
+delivering to it.
+
+The agent itself is unchanged: `AgentService.respond` was already channel-agnostic, so WhatsApp is a
+second transport into it, with a text-first renderer replacing the widget's product cards. Prices in
+that text come from the tool results, never from the model's prose — the same guarantee the widget has.
+
 ### Totals and IVA
 
 Colombian retail convention, per `docs/SPEC.md` §5: **catalogue prices include IVA**. An order's
