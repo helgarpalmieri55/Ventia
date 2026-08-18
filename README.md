@@ -272,6 +272,43 @@ All three share the same provider-registry/webhook-controller/stock-reservation 
   financial discrepancy can be accounted for but never erased, and an alert marked reviewed by
   mistake is corrected by appending a `reopened` row rather than by deleting anything.
 
+### AI sales agent — P4
+
+`POST /v1/storefront/agent/messages` (JSON) and `/stream` (Server-Sent Events) answer one shopper
+message. Both call the same conversation loop, so tenant scoping, throttling and the budget cap are
+decided in exactly one place. The tenant comes from the request's domain via `PublicTenantGuard`,
+never from the body. Six tools run server-side against that tenant only — `search_products`,
+`get_product`, `recommend_products`, `create_cart_link`, `get_order_status`, `get_store_info`.
+`escalate_to_human` is not built yet (it is plan-gated and needs a notification decision that P5
+will settle).
+
+Three independent limits, deliberately not one:
+
+- **Monthly plan cap** (`AgentUsage` / `TenantLimits.aiMessagesMonth`) — counts shopper turns, not
+  API calls. At 100% the agent returns a fixed sentence and makes no model call at all. A tenant
+  with no `TenantLimits` row is zero budget, not unlimited. The counter is not writable by
+  tenant-scoped code (migration `20260818090000_agent_usage`).
+- **Per conversation** — 20 messages / 5 min, plus a cool-down that answers a repeated identical
+  message from the previous reply instead of billing it again. Redis, fails open.
+- **Per address** — 30/min on `/v1/storefront/agent`, the tightest of the four request limiters,
+  because it is the only surface where an accepted request spends the *merchant's* money.
+
+A cart the agent builds carries `source = 'agent'`; the order inherits it at checkout, which is what
+`GET /v1/admin/agent/usage` counts as "ventas asistidas por IA" alongside the month's message usage.
+The merchant configures name, tone and summaries under **Configuración → Asistente IA**
+(`PATCH /v1/admin/settings/agent`, owner-only). The storefront widget mounts only for a store whose
+plan includes AI messages.
+
+**Evals** (`services/api/test/agent-evals.test.ts`) cover SPEC §7's six scenarios in two halves. The
+deterministic half runs on every `pnpm test` and pins the properties the system guarantees whatever
+the model says — a budget is never exceeded because over-budget products are never returned, a
+mismatched order contact is indistinguishable from a nonexistent order, a price comes from the
+current row. The live half asks the real model and is skipped by default:
+
+```bash
+AGENT_LIVE_EVALS=1 ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @ventia/api vitest run test/agent-evals
+```
+
 ### Onboarding, staff & launch
 
 A signed-up user provisions their tenant via `POST /v1/admin/onboarding/tenant`, then drives the
