@@ -1,13 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { FONT_PAIRS, RADIUS_OPTIONS, type FontPair, type Radius } from '@ventia/core';
+import { FONT_PAIRS, RADIUS_OPTIONS, type AgentTone, type FontPair, type Radius } from '@ventia/core';
 import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Input, Select, Spinner } from '@ventia/ui';
 import { ApiError, apiFetch } from '../../../lib/api';
 import { errorMessage, fieldErrors } from '../../../lib/errors';
 import { FONT_PAIR_LABELS, RADIUS_LABELS, themeToFormState } from '../../../lib/theme-form';
 import { EnviosTab } from '../../../components/shipping-tab';
 import { PagosTab } from '../../../components/pagos-tab';
+import { AgenteTab } from '../../../components/agente-tab';
 
 interface StoreInfo {
   category?: string;
@@ -45,15 +46,25 @@ export interface SettingsResponse {
     };
   };
   shipping: Record<string, unknown>;
+  /** The merchant's AI agent configuration (`Tenant.agentConfig`). `{}` until
+   * they have touched it — every field is optional and the server falls back
+   * to its own defaults when building the system prompt. */
+  agent: {
+    agentName?: string;
+    tone?: AgentTone;
+    storeSummary?: string;
+    policiesSummary?: string;
+  };
 }
 
-type Tab = 'tienda' | 'marca' | 'pagos' | 'envios';
+type Tab = 'tienda' | 'marca' | 'pagos' | 'envios' | 'agente';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'tienda', label: 'Tienda' },
   { key: 'marca', label: 'Marca' },
   { key: 'pagos', label: 'Pagos' },
   { key: 'envios', label: 'Envíos' },
+  { key: 'agente', label: 'Asistente IA' },
 ];
 
 /** Owner-only route (hidden from staff in the nav, enforced server-side by
@@ -61,9 +72,9 @@ const TABS: { key: Tab; label: string }[] = [
  * `/configuracion` directly gets 403 FORBIDDEN_ROLE from `GET
  * /v1/admin/settings`, surfaced by `load`'s catch below via `errorMessage`).
  *
- * Three client-side tabs (no routing — just local `tab` state, per the
- * binding contract). All three tab components are always mounted (with the
- * inactive tabs hidden via the `hidden` attribute on their containers), so
+ * Client-side tabs (no routing — just local `tab` state, per the binding
+ * contract). Every tab component is always mounted (with the inactive tabs
+ * hidden via the `hidden` attribute on their containers), so
  * each component maintains its own form state independently and switching
  * tabs never clobbers unsaved edits in another tab. */
 export default function ConfiguracionPage() {
@@ -141,6 +152,9 @@ export default function ConfiguracionPage() {
         </div>
         <div hidden={tab !== 'envios'}>
           <EnviosTab settings={settings} onSaved={setSettings} />
+        </div>
+        <div hidden={tab !== 'agente'}>
+          <AgenteTab settings={settings} onSaved={setSettings} />
         </div>
       </CardContent>
     </Card>

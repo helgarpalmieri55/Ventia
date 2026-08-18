@@ -4,8 +4,10 @@ import { AgentToolsService } from './agent-tools.service';
 import { AgentBudgetService } from './agent-budget.service';
 import { AgentThrottleService } from './agent-throttle.service';
 import { AgentController } from './agent.controller';
+import { AgentAdminController } from './agent-admin.controller';
 import { AgentService, ANTHROPIC_CLIENT } from './agent.service';
 import { RedisModule } from '../common/redis.module';
+import { AdminModule } from '../admin/admin.module';
 import { StorefrontModule } from '../storefront/storefront.module';
 import { CheckoutModule } from '../checkout/checkout.module';
 
@@ -25,8 +27,8 @@ import { CheckoutModule } from '../checkout/checkout.module';
  * traffic should not be unable to serve its catalogue).
  */
 @Module({
-  imports: [RedisModule, StorefrontModule, CheckoutModule],
-  controllers: [AgentController],
+  imports: [RedisModule, StorefrontModule, CheckoutModule, AdminModule],
+  controllers: [AgentController, AgentAdminController],
   providers: [
     AgentToolsService,
     AgentBudgetService,
