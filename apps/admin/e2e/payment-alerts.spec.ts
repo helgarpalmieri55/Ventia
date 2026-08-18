@@ -91,38 +91,46 @@ test('pagos por revisar: per-cause guidance, untrusted refs, and the review flow
       } as never,
     });
 
-  const seedEvent = (provider: string, eventId: string, payload: unknown) =>
+  // `orderId` is what the alerts list resolves through — the link the webhook
+  // handler records when it processes a delivery (WebhookEvent.orderId). It is
+  // passed explicitly here because these rows are seeded directly rather than
+  // by the handler; `null` seeds the unresolvable case on purpose.
+  const seedEvent = (provider: string, eventId: string, payload: unknown, orderId: string | null) =>
     platformDb.webhookEvent.create({
       data: {
         provider,
         eventId,
         tenantId: tenant.id,
         payload: payload as never,
+        orderId,
         processedAt: new Date(),
         result: 'paid_order_not_settleable',
       },
     });
 
   // CAUSE 1 — the expiry case: cancelled before the payment landed.
-  await seedOrder(CANCELLED_ORDER, {
+  const cancelledOrder = await seedOrder(CANCELLED_ORDER, {
     status: 'CANCELLED',
     paymentStatus: 'PENDING',
     subtotalCents: 150_000,
     totalCents: 150_000,
   });
-  await seedEvent('wompi', `e2e-cancelado-${ts}`, wompiPayload(String(CANCELLED_ORDER)));
+  await seedEvent('wompi', `e2e-cancelado-${ts}`, wompiPayload(String(CANCELLED_ORDER)), cancelledOrder.id);
 
   // CAUSE 2 — the DOUBLE CHARGE: a second PAID event on a delivered order.
-  await seedOrder(SETTLED_ORDER, {
+  const settledOrder = await seedOrder(SETTLED_ORDER, {
     status: 'DELIVERED',
     paymentStatus: 'PAID',
     subtotalCents: 240_000,
     totalCents: 240_000,
   });
-  await seedEvent('wompi', `e2e-doble-cobro-${ts}`, wompiPayload(String(SETTLED_ORDER)));
+  await seedEvent('wompi', `e2e-doble-cobro-${ts}`, wompiPayload(String(SETTLED_ORDER)), settledOrder.id);
 
   // UNTRUSTED — a hint-sourced Mercado Pago ref pointing at a big
-  // DELIVERED/PAID order. Must resolve to nothing.
+  // DELIVERED/PAID order, on an event the handler linked to NO order. Must
+  // resolve to nothing: the alerts list reads `WebhookEvent.orderId` and
+  // nothing else, so neither the payload nor `Order.providerRef` can steer
+  // which order (and therefore which remedy) the merchant is shown.
   const plantedRef = `mp-plantado-${ts}`;
   await seedOrder(PLANTED_ORDER, {
     status: 'DELIVERED',
@@ -133,7 +141,7 @@ test('pagos por revisar: per-cause guidance, untrusted refs, and the review flow
     providerRef: plantedRef,
     providerRefSource: 'hint',
   });
-  await seedEvent('mercadopago', `e2e-hint-${ts}`, { type: 'payment', data: { id: plantedRef } });
+  await seedEvent('mercadopago', `e2e-hint-${ts}`, { type: 'payment', data: { id: plantedRef } }, null);
 
   // --- the shell banner: present on a page that is not the alerts page ---
   await page.goto('/productos');

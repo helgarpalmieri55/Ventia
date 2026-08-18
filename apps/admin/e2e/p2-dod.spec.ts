@@ -275,6 +275,19 @@ test.describe('P2 Definition-of-Done', () => {
       const shippingRadio = storePage.locator(`input[type="radio"][value="${SHIPPING_METHOD_ID}"]`);
       await shippingRadio.check();
 
+      // Choose the payment method explicitly. This step did not exist when
+      // this spec was written, because COD was then effectively the only
+      // option; P3 added Wompi/Mercado Pago/ePayco alongside it, so the
+      // radiogroup now starts with NOTHING selected and the form stops at
+      // "Selecciona un método de pago." — which is the correct behaviour (a
+      // shopper should never be silently defaulted into how they pay), so the
+      // spec is what was out of date, not the app.
+      //
+      // 'cod' specifically: this test's subject is the COD vertical slice, and
+      // the online providers would redirect off-site to a gateway rather than
+      // reaching the confirmation page asserted below.
+      await storePage.locator('input[type="radio"][name="paymentMethod"][value="cod"]').check();
+
       await storePage.getByRole('button', { name: 'Confirmar pedido' }).click();
       await storePage.waitForURL(/\/checkout\/confirmacion\/\d+$/, { timeout: 20_000 });
 
