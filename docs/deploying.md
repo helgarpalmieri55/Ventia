@@ -2,19 +2,71 @@
 
 *Written 2026-08-19, at the end of P6.*
 
-Everything in this repo runs against `docker/compose.yaml` and a dev database.
-Nothing here has been deployed to a real host, and this document does not
-pretend otherwise — it is the list of things that have to be true before a real
-Colombian merchant can sell through this platform, assembled from what the code
-actually requires rather than from a general idea of what deployment involves.
+Target: **one Ubuntu 24.04 VPS**, running everything — Postgres, Redis, MinIO,
+the three Node services and Caddy — as containers, with images built on the box.
 
-Where a step was flagged during development as "we'll configure this at deploy
-time", it is here with what it actually needs.
+Nothing here has been deployed to a real host, and this document does not
+pretend otherwise. What exists is the full set of artifacts, the reasoning
+behind them, and an honest account of which parts have been executed and which
+have only been written. §0 is the short path; the sections after it are why
+each step is there.
+
+**Minimum box:** 4 GB RAM (two Next.js builds peak around 1.5–2 GB each on top
+of Postgres, Redis and MinIO), 2 vCPU, 40 GB disk. `provision-ubuntu.sh` adds
+swap sized from RAM, but swap is a safety net for a build, not a substitute for
+memory.
 
 The last P6 Definition-of-Done item is *"two pilot merchants live on custom
 domains"*. That is the only P6 item that cannot be completed from a
 development environment, because it requires real merchants, real payment
 credentials and real DNS. §8 is the checklist for it.
+
+---
+
+## 0. The short path
+
+Everything below assumes a fresh VPS, a domain whose DNS you control, and that
+you have read §1 (two secrets that cannot be regenerated) before you start.
+
+```bash
+# --- on the VPS, as root -----------------------------------------------------
+git clone <your-repo-url> /srv/ventia && cd /srv/ventia
+bash scripts/provision-ubuntu.sh --dry-run     # read what it will change
+bash scripts/provision-ubuntu.sh               # docker, swap, ufw, deploy user
+
+# --- DNS, before anything asks for a certificate -----------------------------
+#   A     yourdomain.co        -> <VPS IP>
+#   A     *.yourdomain.co      -> <VPS IP>      (tenant subdomains)
+#   A     api.yourdomain.co    -> <VPS IP>
+#   A     admin.yourdomain.co  -> <VPS IP>
+#   A     cdn.yourdomain.co    -> <VPS IP>
+# The wildcard is what makes a new merchant's store reachable the moment they
+# sign up, with no DNS change per tenant.
+
+# --- as the deploy user ------------------------------------------------------
+cp .env.production.example .env && chmod 600 .env
+openssl rand -base64 32        # -> AUTH_SECRET
+openssl rand -base64 32        # -> PAYMENTS_ENCRYPTION_KEY
+$EDITOR .env                   # fill everything; see §1-§2
+
+bash scripts/deploy.sh --check-env   # refuses on dev defaults, not just blanks
+bash scripts/deploy.sh               # backup -> build -> migrate -> up -> verify
+
+# --- make the operator real (§3) ---------------------------------------------
+# sign up at https://admin.yourdomain.co, verify the email, then:
+docker compose -f docker/compose.prod.yaml exec postgres \
+  psql -U ventia -d ventia -c \
+  "UPDATE \"User\" SET \"isPlatformAdmin\" = true WHERE email = 'ops@yourdomain.co';"
+
+# --- schedule the backups (§7) — they are not automatic ----------------------
+bash scripts/install-cron.sh
+```
+
+`deploy.sh` runs nine phases and stops on the first failure. It takes a
+`pg_dump` **before** migrating, because a migration is the most likely moment
+to need one. **It does not roll back** — its own header carries the exact
+recovery commands for a failure before and after the migrate phase. Read that
+section before you need it, not during.
 
 ---
 
@@ -109,9 +161,24 @@ Everything else is per tenant. Full walkthrough in
 
 ## 6. Custom domains and TLS
 
-`docker/Caddyfile` contains a production `on_demand_tls { ask ... }` block,
-commented out because it needs a real public hostname. Uncomment it and point
-`ask` at the API's `GET /internal/tls-ask`.
+`docker/Caddyfile.prod` is the production config — `caddy validate` clean, and
+used by `compose.prod.yaml`. It reads `PLATFORM_ROOT_DOMAIN` from the
+environment, so it is not edited per deployment; that value **must match the
+API's**, since it is what onboarding mints `${slug}.${root}` subdomains from
+and what the TLS gate recognises them by.
+
+Known hostnames (apex, `api.`, `admin.`, `cdn.`) get ordinary HTTP-01
+certificates. Tenant subdomains and merchant custom domains both go through
+on-demand issuance behind the `ask` gate.
+
+> **A bug worth knowing about, because it was invisible until this point.**
+> Every tenant gets `${slug}.${root}` at onboarding, and the gate originally
+> required the `customDomain` plan entitlement — which `basico` does not have.
+> Every basic-plan storefront would have been refused a certificate for its own
+> address. Fixed: the plan gate now applies only to domains outside our zone,
+> which is what "custom domain" means. It never appeared in development because
+> `.localhost` needs no certificate, so this endpoint's first real caller is
+> your VPS.
 
 That endpoint is the issuance gate, and it answers 200 only when **all four**
 are true: the domain is registered to a tenant, `verifiedAt` is set, the tenant
@@ -144,11 +211,29 @@ Offsite needs `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY`
 and `BACKUP_S3_SECRET_KEY` — an R2 bucket and an API token pair. The upload
 refuses to run half-configured rather than silently skipping.
 
-> **A backup whose failures go to a logfile nobody reads is a backup nobody
-> has.** Neither the cron nor any alerting on it has been set up or tested
-> here. Whatever you use to watch the rest of the box needs to watch these two
-> exit codes. This is the single most likely thing on this page to be skipped
-> and the single most expensive one to have skipped.
+`scripts/install-cron.sh` installs all of it, and **refuses to install without
+a notification channel** unless you explicitly override — because a backup
+whose failures go to a logfile nobody reads is a backup nobody has. Configure
+`VENTIA_ALERT_COMMAND` (any command) or `VENTIA_ALERT_WEBHOOK_URL`. When
+notification itself fails, the wrapper prints `ALERT NOT DELIVERED — this
+failure reached nobody`, so "the job failed" and "the job failed and nobody
+heard" never look alike.
+
+**Product images are backed up separately**, by `scripts/backup-objects.mjs`.
+`backup.sh` dumps Postgres only, and with MinIO on this same box that would
+mean a recovery where every order, price and customer is intact and every
+product renders a broken image. The nightly chain runs both, `&&`-joined so a
+failed dump is never followed by an upload that makes a bad run look good.
+
+> **Not exercised.** The cron itself, on a real box. The scripts and both
+> restore drills have been run end to end here (see `docs/operations.md`), but
+> `install-cron.sh` writing a crontab that then actually fires at 03:15 on your
+> VPS is unverified. Check the first morning.
+
+> **Offsite still needs somewhere that is not this VPS.** `BACKUP_S3_*` can
+> point at any S3-compatible target. Pointing it at the MinIO running on this
+> same box is not a backup — the uploader refuses that exact case for the
+> object archive, but nothing stops you doing it for the database dump.
 
 There is no WAL archiving and no point-in-time recovery. **RPO is one nightly
 dump** — up to 24 hours of orders. That may be acceptable for a pilot; it
@@ -182,10 +267,11 @@ For each of the two or three pilot merchants:
 
 ## 9. What is still missing, stated plainly
 
-- **No CI/CD.** There is no deployment pipeline, no container image for the
-  three services, and no migration-on-deploy step. `pnpm --filter @ventia/db
-  migrate:deploy` has to run before the new API starts, and nothing enforces
-  that ordering.
+- **No CI/CD.** There is no pipeline and no registry; `deploy.sh` builds on the
+  box. Migration ordering, which this section used to list as unenforced, IS
+  now enforced — `compose.prod.yaml`'s `migrate` service gates the API on
+  `service_completed_successfully`, so a failed migration leaves the old API
+  running rather than starting a new one against a schema it does not match.
 - **No staging environment**, so the first time this runs anywhere but a
   laptop is production.
 - **No load testing above 100 concurrent checkouts**, and none at all against
