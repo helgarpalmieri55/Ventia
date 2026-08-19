@@ -814,6 +814,10 @@ model Conversation {
   messages   Message[]
 
   @@index([tenantId, startedAt])
+  // Serves the platform-wide retention sweep, which does not constrain
+  // tenantId and so cannot use the index above. See
+  // migrations/20260819150000_conversation_retention_indexes.
+  @@index([startedAt], map: "Conversation_retention_sweep_idx")
 }
 
 model Message {
@@ -839,7 +843,12 @@ model Message {
   externalId     String?
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
-  @@index([conversationId])
+  // `createdAt` second so the retention sweep's "any message since the
+  // cutoff?" anti-join is a range probe that stops at the first hit, rather
+  // than a read of every message in a long-running thread. Serves plain
+  // conversationId lookups too — a composite index answers any prefix of its
+  // own key.
+  @@index([conversationId, createdAt])
   /// Inbound dedupe, enforced by Postgres rather than a cache, because a
   /// duplicate here costs money: a retried delivery that slips through becomes
   /// a second agent turn — the model is called twice, the merchant's AI budget

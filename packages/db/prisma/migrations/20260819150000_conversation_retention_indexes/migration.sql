@@ -1,0 +1,66 @@
+-- Indexes for the nightly conversation-retention sweep
+-- (services/api/src/agent/conversation-retention.worker.ts, SPEC.md §9).
+--
+-- The sweep runs platform-wide on `platformDb` with NO tenant filter — it is
+-- the system's own job, not a tenant-scoped read. Its candidate query is:
+--
+--   WHERE "startedAt" < cutoff
+--     AND status <> 'escalated'
+--     AND NOT EXISTS (SELECT 1 FROM "Message" m
+--                     WHERE m."conversationId" = c.id AND m."createdAt" >= cutoff)
+--   ORDER BY "startedAt" ASC
+--
+-- The only index on "Conversation" was ("tenantId", "startedAt"), and a query
+-- that does not constrain `tenantId` cannot use an index whose leading column
+-- it is — the identical problem 20260815180000_order_sweep_indexes fixed for
+-- the two "Order" sweeps. So this was a sequential scan of every conversation
+-- ever held, plus a per-candidate lookup into "Message", every night.
+--
+-- Measured on a scratch database seeded with 60 000 conversations across 20
+-- tenants (one message each, ages spread over 900 days), taking one 200-row
+-- batch:
+--
+--   before  40.8 ms  Seq Scan "Conversation" (34 881 rows) + Seq Scan
+--                    "Message" (24 521 rows) -> Hash Anti Join -> top-N
+--                    heapsort over 34 814 rows, to return 200
+--   after    1.3 ms  Index Scan "Conversation_retention_sweep_idx" (stops at
+--                    200, no sort) -> Index Only Scan
+--                    "Message_conversationId_createdAt_idx" per row
+--
+-- ~31x here, and the ratio grows with the table: the seq-scan path costs
+-- O(every conversation ever held) while the index path costs O(batch).
+
+-- Leading on `startedAt` serves both the range predicate and the ORDER BY, so
+-- the batched sweep takes its oldest N without sorting the whole candidate set.
+--
+-- NOT partial, unlike the "Order" sweep indexes, and the difference is worth
+-- stating. Those cover a self-draining slice: an order leaves
+-- `status = 'PENDING' AND "stockReservedUntil" IS NOT NULL` within fifteen
+-- minutes, so the index stays the size of "orders currently mid-payment" no
+-- matter how large the table grows. Conversations have no such slice — EVERY
+-- conversation eventually becomes a purge candidate, that being the entire
+-- point of a retention policy — so a partial index would converge on a full
+-- one while also carrying the cost of rows moving in and out of its predicate.
+--
+-- `status` is deliberately left out for the reason the reconciliation index
+-- gives for `paymentStatus`: it is mutable (a conversation becomes
+-- 'escalated' mid-life, and 'resolved' when the merchant closes it), and a
+-- mutable column in a partial predicate means every such change moves the row
+-- out of and back into the index. It stays an ordinary filter applied to the
+-- far smaller set this index returns.
+CREATE INDEX "Conversation_retention_sweep_idx" ON "Conversation" ("startedAt");
+
+-- Serves the anti-join. `Message` already had ("conversationId"), which finds
+-- a conversation's messages but then has to read every one of them to answer
+-- "is any newer than the cutoff" — and a long-running WhatsApp thread, the
+-- exact case the activity check exists to protect, is precisely where that
+-- list is longest. Adding `createdAt` as the second column turns it into an
+-- index-only range probe that stops at the first hit.
+--
+-- Replaces rather than supplements the single-column index: ("conversationId",
+-- "createdAt") serves every lookup ("conversationId") alone served, since a
+-- composite index answers any prefix of its own key. Keeping both would be
+-- paying twice for one capability on the highest-write table in the agent
+-- path.
+DROP INDEX "Message_conversationId_idx";
+CREATE INDEX "Message_conversationId_createdAt_idx" ON "Message" ("conversationId", "createdAt");
