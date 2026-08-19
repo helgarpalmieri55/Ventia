@@ -39,6 +39,31 @@ export const VERIFICATION_HOST_PREFIX = '_ventia-verify';
 /** Injectable so tests exercise the real verification logic without DNS. */
 export type TxtResolver = (hostname: string) => Promise<string[][]>;
 
+/**
+ * The platform's own zone, e.g. `ventia.co`. Same default and same env var as
+ * `onboarding.service.ts`, which is what mints the subdomains this recognises;
+ * if the two ever disagreed, tenants would be issued addresses the TLS gate
+ * would then refuse.
+ */
+function platformRootDomain(): string {
+  return (process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost').trim().toLowerCase();
+}
+
+/**
+ * Whether `domain` is inside the platform's own zone — the free
+ * `${slug}.${root}` address every tenant gets — rather than a domain the
+ * merchant owns and pointed at us.
+ *
+ * `endsWith('.' + root)` with the dot, deliberately: without it,
+ * `evilventia.co` matches `ventia.co` and an attacker who registered a
+ * lookalike domain would be treated as living in our zone, skipping the plan
+ * gate. The apex itself counts too — it serves the platform landing page and,
+ * if it were ever registered as a TenantDomain, is certainly ours.
+ */
+export function isPlatformSubdomain(domain: string, root: string = platformRootDomain()): boolean {
+  return domain === root || domain.endsWith(`.${root}`);
+}
+
 @Injectable()
 export class CustomDomainsService {
   /**
@@ -59,15 +84,30 @@ export class CustomDomainsService {
     // 1. Registered at all.
     if (!row) return false;
     // 2. DNS-verified. An unverified row is a hostname somebody typed.
+    //    (A platform subdomain is verified at creation by
+    //    onboarding.service.ts — we own the zone, so there is nothing to
+    //    prove — which is why this check does not need an exemption below.)
     if (!row.verifiedAt) return false;
     // 3. The tenant is actually live. A draft store has nothing to serve, and
     //    a suspended one is suspended precisely so it stops being served —
     //    issuing it a fresh certificate would work against that.
     if (row.tenant.status !== 'live') return false;
-    // 4. The plan includes custom domains. Otherwise the entitlement is
-    //    decorative: a downgraded store keeps its certificate renewing
-    //    forever.
-    if (!row.tenant.limits?.customDomain) return false;
+    // 4. The plan includes custom domains — BUT ONLY FOR A CUSTOM DOMAIN.
+    //
+    //    Every tenant is given `${slug}.${PLATFORM_ROOT_DOMAIN}` at
+    //    onboarding (onboarding.service.ts), verified, `isPrimary: true`. That
+    //    subdomain is not an entitlement, it is the product: it is the only
+    //    address a `basico` store has, and `basico.customDomain` is `false`.
+    //
+    //    Applying the plan gate to it refuses a certificate for the store's
+    //    own address, so every basic-plan storefront has no HTTPS and is
+    //    simply unreachable. That never showed up in development because
+    //    `.localhost` needs no certificate — this endpoint's first real
+    //    caller is production.
+    //
+    //    So the gate applies to domains OUTSIDE our own zone, which is what
+    //    "custom domain" means and what the plan is actually selling.
+    if (!isPlatformSubdomain(domain) && !row.tenant.limits?.customDomain) return false;
 
     return true;
   }

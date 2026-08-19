@@ -1,0 +1,136 @@
+# Production reverse proxy — Ubuntu 24.04 VPS, single box.
+#
+# Everything reaches the internet through this file. The three Node services,
+# Postgres, Redis and MinIO publish NO ports of their own (see
+# compose.prod.yaml); they are reachable only on the compose network, by name.
+#
+# `{$PLATFORM_ROOT_DOMAIN}` is read from the environment at start-up, so this
+# file is not edited per deployment. It must match the API's own
+# PLATFORM_ROOT_DOMAIN exactly: that is the value onboarding uses to mint
+# `${slug}.${root}` subdomains, and the value the TLS gate uses to recognise
+# them as ours.
+{
+	email {$ACME_EMAIL}
+
+	# ---- On-demand TLS, for hostnames that cannot be known in advance -----
+	#
+	# Two kinds arrive here: a tenant's own `${slug}.{$PLATFORM_ROOT_DOMAIN}`
+	# (minted at onboarding, so unknowable when this file is written) and a
+	# merchant's custom domain. Both are certificated the same way.
+	#
+	# `ask` is the entire security boundary. Caddy issues only on a 2xx, and
+	# the endpoint refuses unless the hostname is registered, DNS-verified and
+	# owned by a LIVE tenant — plus, for a domain OUTSIDE our zone, on a plan
+	# that includes custom domains. See custom-domains.service.ts, where every
+	# one of those conditions is separately mutation-tested.
+	#
+	# Without `ask`, anyone who points DNS at this box makes Caddy request a
+	# certificate on our behalf. The damage is not that they obtain one for
+	# their own domain — they could do that anywhere — it is that they exhaust
+	# the SHARED Let's Encrypt rate limit and block renewal for every real
+	# tenant.
+	# NOTE: current Caddy has removed the `interval`/`burst` rate limit that
+	# used to sit here as a second, independent bound. `ask` is now the ONLY
+	# thing between a stranger's DNS record and an ACME request made in our
+	# name — which raises the stakes on the endpoint rather than lowering
+	# them. If it ever starts answering 200 too freely, nothing downstream
+	# will catch it.
+	on_demand_tls {
+		ask http://api:4000/internal/tls-ask
+	}
+
+	servers {
+		# Caddy is the only thing facing the internet, so it is the only place
+		# a client IP is trustworthy at all. The rate limiters key on it.
+		trusted_proxies static private_ranges
+	}
+}
+
+# Applied to every site below.
+(common) {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+	}
+}
+
+# ---- API -------------------------------------------------------------------
+#
+# Public on purpose: payment gateways and Meta deliver webhooks here, and both
+# storefront and admin call it from the browser.
+api.{$PLATFORM_ROOT_DOMAIN} {
+	import common
+
+	# `/internal/*` is NOT public. `tls-ask` lives there and is deliberately
+	# unauthenticated — Caddy calls it mid-handshake, before any session could
+	# exist — so the only thing keeping it private is that nothing proxies it.
+	# Caddy reaches it over the compose network as `http://api:4000`, which
+	# never passes through this site block.
+	handle /internal/* {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy api:4000
+	}
+}
+
+# ---- Merchant admin --------------------------------------------------------
+admin.{$PLATFORM_ROOT_DOMAIN} {
+	import common
+	reverse_proxy admin:3001
+}
+
+# ---- Product images --------------------------------------------------------
+#
+# MinIO runs on this box (the user's choice), so shopper-facing image URLs
+# terminate here. S3_PUBLIC_URL must be `https://cdn.{$PLATFORM_ROOT_DOMAIN}/<bucket>`
+# for these to resolve.
+#
+# Read-only by construction: only GET/HEAD are proxied, so the S3 write API is
+# not exposed to the internet even though the same port serves it internally.
+# Presigned uploads from the admin go to this same hostname and DO need PUT —
+# see the note in docs/deploying.md if you enable them from the browser.
+cdn.{$PLATFORM_ROOT_DOMAIN} {
+	import common
+	@writes not method GET HEAD
+	respond @writes 405
+	reverse_proxy minio:9000
+}
+
+# ---- Platform landing page -------------------------------------------------
+#
+# The apex is a known hostname, so it gets an ordinary HTTP-01 certificate and
+# never touches on-demand issuance.
+{$PLATFORM_ROOT_DOMAIN} {
+	import common
+	reverse_proxy storefront:3000
+}
+
+# ---- Every tenant storefront ----------------------------------------------
+#
+# The catch-all: `${slug}.{$PLATFORM_ROOT_DOMAIN}` and every verified custom
+# domain. Both render the same app, which resolves the tenant from the Host
+# header (tenant.middleware.ts → DomainResolver), so this block deliberately
+# does not enumerate anything.
+#
+# It must come LAST: Caddy matches the most specific site block first, so the
+# named hosts above win over this one regardless of file order, but keeping it
+# last is what makes that obvious to a reader.
+https:// {
+	import common
+	tls {
+		on_demand
+	}
+	reverse_proxy storefront:3000
+}

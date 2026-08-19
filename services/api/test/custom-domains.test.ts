@@ -143,6 +143,51 @@ describe('GET /internal/tls-ask — the issuance gate', () => {
     expect(res.status).toBe(403);
   });
 
+  it('AUTHORIZES a basic-plan tenant\'s OWN platform subdomain', async () => {
+    // The bug this pins, found while preparing the first real deploy and
+    // never reachable in development because `.localhost` needs no
+    // certificate.
+    //
+    // onboarding.service.ts gives every tenant `${slug}.${PLATFORM_ROOT_DOMAIN}`,
+    // verified and primary. `basico.customDomain` is false. With the plan gate
+    // applied to that row, Caddy is refused a certificate for the store's own
+    // address — so every basic-plan storefront has no HTTPS and is simply
+    // unreachable. The plan sells CUSTOM domains; the free subdomain is the
+    // product.
+    const root = process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost';
+    const { tenantId: basicId } = await signUpWithTenant('domains-own-subdomain@demo.co', 'owner');
+    await prisma.tenantLimits.upsert({
+      where: { tenantId: basicId },
+      create: { tenantId: basicId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: false },
+      update: { customDomain: false },
+    });
+    await prisma.tenantDomain.create({
+      data: { tenantId: basicId, domain: `mitienda.${root}`, isPrimary: true, verifiedAt: new Date() },
+    });
+
+    const res = await request(app.getHttpServer()).get('/internal/tls-ask').query({ domain: `mitienda.${root}` });
+    expect(res.status).toBe(200);
+  });
+
+  it('does NOT treat a lookalike domain as being in our zone', async () => {
+    // `endsWith(root)` without the leading dot would match `evilventia.co`
+    // against `ventia.co`, letting anyone who registers a lookalike skip the
+    // plan gate by living in a zone that is not ours.
+    const root = process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost';
+    const { tenantId: lookalikeId } = await signUpWithTenant('domains-lookalike@demo.co', 'owner');
+    await prisma.tenantLimits.upsert({
+      where: { tenantId: lookalikeId },
+      create: { tenantId: lookalikeId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: false },
+      update: { customDomain: false },
+    });
+    await prisma.tenantDomain.create({
+      data: { tenantId: lookalikeId, domain: `evil${root}`, isPrimary: false, verifiedAt: new Date() },
+    });
+
+    const res = await request(app.getHttpServer()).get('/internal/tls-ask').query({ domain: `evil${root}` });
+    expect(res.status).toBe(403);
+  });
+
   it('REFUSES a missing or malformed domain parameter rather than erroring', async () => {
     // Caddy treats any non-2xx as refusal, so failing closed here is correct
     // AND must not 500 — a 500 in this path is a certificate outage.
