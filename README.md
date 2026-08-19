@@ -321,9 +321,10 @@ AGENT_LIVE_EVALS=1 ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @ventia/api vitest
 
 Two providers behind one interface (`packages/whatsapp`): **Evolution API** in development (self-hosted,
 QR-paired, no Meta app review needed) and **Meta WhatsApp Cloud API** in production. Both were built
-against their official docs read at implementation time, per SPEC §4 — and both are verified against
-the docs' own example payloads rather than live traffic, because no Meta app or Evolution instance was
-available. Treat the wire formats as unconfirmed until a real number has been connected once.
+against their official docs read at implementation time, per SPEC §4, and are verified against the
+docs' own example payloads rather than live traffic — no Meta app or Evolution instance was available
+during development. **See `docs/deploying-whatsapp.md`** for connecting a real app, including an
+ordered list of which assumptions are most likely to need adjusting on first contact.
 
 **Routing does not use the URL.** `POST /webhooks/whatsapp/:provider` carries no tenant, because Meta
 delivers one webhook per *app* covering every number registered under it — the only discriminator is
