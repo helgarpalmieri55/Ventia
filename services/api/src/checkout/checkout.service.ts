@@ -211,6 +211,27 @@ export class CheckoutService {
       }
     }
 
+    // Read the tenant's shipping config BEFORE opening the transaction.
+    //
+    // The two questions asked of it (`isCodAllowedIn`, `priceForIn`) are still
+    // asked from exactly where they were, in exactly the same order, and still
+    // throw the same 400s at the same point — only the DATABASE READ behind
+    // them moved out here. It had to: those calls used to run on `tenantDb`
+    // from inside `platformDb.$transaction()`, which means asking the Prisma
+    // pool for a SECOND connection while this request is already holding one.
+    // A burst of concurrent checkouts wider than the pool then deadlocks —
+    // every connection parked inside a transaction, waiting for a connection
+    // only a parked transaction can free — until Prisma's transaction timeout
+    // fires and the whole batch returns bare 500s. `scripts/load-test.mjs`
+    // reproduces it at 100 concurrent checkouts (see docs/operations.md); the
+    // failure is invisible below the pool size and total above it.
+    //
+    // Reading it a few milliseconds earlier is not a semantic change: this is
+    // committed data read outside the transaction either way (the transaction
+    // is on `platformDb`, `tenantDb` never joined it), so it was never
+    // transactionally consistent with the order write to begin with.
+    const shippingConfig = await this.shippingService.loadConfig(tenantId);
+
     const result = await platformDb.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
         // Manual RLS transaction escape (same pattern as
@@ -325,11 +346,9 @@ export class CheckoutService {
           });
         }
 
-        // ShippingService's methods run on plain tenantDb (each a read of
-        // Tenant.settings, committed independently of this transaction) —
-        // calling them from inside our transaction is safe since they don't
-        // need transactional consistency with the order write below, and
-        // they never touch Cart/Order/Customer rows themselves.
+        // Both calls below are pure functions over `shippingConfig`, loaded
+        // before this transaction opened — no database access from in here.
+        // See the note at the `loadConfig` call site.
         //
         // `isCodAllowed` is a COD-only concept (design doc decision 8) — any
         // non-COD checkout (wompi, mercadopago, epayco, ...) skips this check
@@ -338,14 +357,14 @@ export class CheckoutService {
         // rather than unconditionally reached; their own content/behavior for
         // an actual `cod` checkout is unchanged.
         if (input.paymentMethod === 'cod') {
-          const codAllowed = await this.shippingService.isCodAllowed(tenantId, input.address.departamentoCode);
+          const codAllowed = this.shippingService.isCodAllowedIn(shippingConfig, input.address.departamentoCode);
           if (!codAllowed) {
             throw new HttpException({ error: 'SHIPPING_METHOD_UNAVAILABLE' }, 400);
           }
         }
 
-        const shippingCents = await this.shippingService.priceFor(
-          tenantId,
+        const shippingCents = this.shippingService.priceForIn(
+          shippingConfig,
           input.shippingMethodId,
           input.address.departamentoCode,
           subtotalCents,

@@ -333,6 +333,16 @@ export class OrdersService {
     payload: ShippedPayload | CancelPayload | undefined,
     actorUserId: string,
   ): Promise<OrderDetail> {
+    // Loaded before the transaction opens, for the reason documented on
+    // ShippingConfig: a `tenantDb` read issued from inside an open
+    // `platformDb.$transaction` needs a second Prisma pool connection while
+    // this request already holds one, which deadlocks under a burst wider
+    // than the pool. Lower-traffic path than checkout — a merchant clicking
+    // through the admin, not a hundred shoppers at once — but the same shape,
+    // and this call site's own comment used to cite checkout's (now removed)
+    // precedent as its justification.
+    const shippingConfig = await this.shippingService.loadConfig(tenantId);
+
     const result = await platformDb.$transaction(async (tx): Promise<TransitionTransactionResult> => {
       await tx.$executeRawUnsafe('SET LOCAL ROLE ventia_app');
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
@@ -557,18 +567,14 @@ export class OrdersService {
       // second round trip after commit.
       const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId } });
 
-      // ShippingService.findMethodLabel runs on plain tenantDb (a read of
-      // Tenant.settings, independent of this transaction) — calling it from
-      // inside our transaction is safe for the identical reason
-      // checkout.service.ts's own isCodAllowed/priceFor calls already
-      // document: it doesn't need transactional consistency with the writes
-      // above and never touches Order/OrderItem/Shipment rows itself. Kept
+      // Resolved from `shippingConfig`, read before this transaction opened —
+      // a pure lookup with no database access from in here. Kept
       // in sync with findOne()'s identical resolution so the admin UI's
       // "re-set state directly from the mutation's own response" pattern
       // (see orders.controller.ts's doc comment) never shows a stale/missing
       // label after an action, only after a fresh GET.
       const shippingMethodLabel = updated!.shippingMethod
-        ? await this.shippingService.findMethodLabel(tenantId, updated!.shippingMethod)
+        ? this.shippingService.findMethodLabelIn(shippingConfig, updated!.shippingMethod)
         : null;
 
       return { ...toOrderDetail(updated!, shippingMethodLabel), tenantName: tenant.name };

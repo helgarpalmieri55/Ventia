@@ -575,3 +575,64 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
 - **P4 — AI Agent (web)** ⬜
 - **P5 — WhatsApp + Human handoff** ⬜
 - **P6 — Platform Admin + Hardening + Pilot** ⬜
+
+## Operations: backups, restore drill & load test
+
+Full runbook — including everything that was written but **not** exercised — in
+[`docs/operations.md`](docs/operations.md). Three local-run scripts, none of them
+part of `pnpm turbo run test`/CI:
+
+```bash
+bash scripts/backup.sh          # pg_dump + pg_dumpall globals + manifest + sha256
+bash scripts/restore-drill.sh   # restore into a scratch DB and prove it is usable
+node scripts/load-test.mjs      # 100 concurrent checkouts, invariants asserted from Postgres
+```
+
+**Backups.** `backup.sh` writes four files per run: the `--format=custom` dump,
+a `pg_dumpall --globals-only` file, a manifest (row counts, policy digest,
+migration count), and checksums. The globals file is not optional — every RLS
+policy is written against the `ventia_app` role, which `pg_dump` does not
+carry, so a dump-only restore into a fresh cluster either fails on the first
+`GRANT` or comes up with tenant isolation quietly switched off. Retention
+defaults to 30 days (SPEC.md §10). Output goes to
+`${TMPDIR:-/tmp}/ventia-backups` by default, deliberately outside the repo.
+**Nothing uploads offsite yet** — SPEC.md §10's nightly-to-R2 is still
+outstanding.
+
+**Restore drill (P6 DoD: "restore drill documented and executed").**
+`restore-drill.sh` restores a backup into a throwaway database and runs 15
+checks: row counts against the manifest, the RLS-enabled table set, an md5 over
+every policy's `USING`/`WITH CHECK` clause, `ventia_app`'s full grant matrix
+against the source, and — the one that matters — connecting **as `ventia_app`**
+to the restored data and confirming each tenant's `app.tenant_id` context sees
+exactly its own rows, zero of the other tenant's, nothing at all with no GUC
+set, and that a cross-tenant `INSERT` is refused. Executed against the dev
+database on 2026-08-19: **15 passed, 0 failed** (35 tables, 28 RLS tables, 29
+policies, 20 migrations). The checks were also verified non-vacuous against a
+deliberately sabotaged copy, where every one of them flipped red.
+
+**Load test (P6 DoD: "isolation suite green under load").** `load-test.mjs`
+seeds four throwaway tenants, drives real checkouts over HTTP, and asserts the
+outcome by reading Postgres — separating *invariants* (stock accounting, tenant
+isolation) from *capacity* (was the offered load actually served), because a
+platform that refuses work and a platform that oversells are not the same
+problem. At 100 concurrent checkouts, three consecutive green runs:
+
+| Scenario | Result | Wall | Throughput |
+| --- | --- | --- | --- |
+| Capacity — stock 100 | 100 × 201, stock → 0, order numbers dense 1..100 | 1839 ms | 54.4/s |
+| Oversell — stock 50 | exactly 50 × 201 + 50 × 400 `INSUFFICIENT_STOCK` | 1552 ms | 64.4/s |
+| Isolation — 2 tenants × 50 | 100 × 201, 50 orders each numbered 1..50, 0 cross-tenant rows under RLS | 911 ms | 109.7/s |
+
+Zero oversell at every concurrency level tested, and no invariant was violated
+in any run — including badly degraded ones. Two findings came out of it. The
+checkout rate limiter (60/IP/min) dominates any single-source load test unless
+raised — working as designed. And **checkout starved the Prisma connection
+pool**: it called `ShippingService` from inside `platformDb.$transaction()`,
+and that call needed a second connection from the same pool, so a burst larger
+than the pool wedged until Prisma's 15 s transaction timeout and returned bare
+500s. At 100 concurrent on the default pool that was **7 requests served out of
+100**. Fixed — the shipping config is now loaded before the transaction opens
+and priced from memory inside it, which takes the same run to **100/100 in
+1.9 s**. Both findings, the evidence, and the before/after are in
+[`docs/operations.md`](docs/operations.md#load-test).
