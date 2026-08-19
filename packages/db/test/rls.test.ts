@@ -235,3 +235,165 @@ describe('Message inbound dedupe (tenant-scoped externalId)', () => {
     expect(count).toBe(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Payment ledger (20260819120000_payment_ledger)
+// ---------------------------------------------------------------------------
+//
+// The `Payment` table stopped being an ordinary tenant-writable table in that
+// migration: it is now the append-only, per-attempt record of what a gateway
+// said about money, so `ventia_app` holds SELECT and nothing else, and its
+// `FOR ALL` policy was replaced with a `FOR SELECT` one to match. These tests
+// pin BOTH halves — a merchant can read their own history, and nothing running
+// under tenant credentials can write, amend, or erase it.
+describe('Payment ledger isolation and append-only privileges', () => {
+  const ORDER: Record<string, string> = {};
+
+  beforeAll(async () => {
+    // Seeded as the table owner, which bypasses RLS and holds every privilege —
+    // the point of these tests is what `ventia_app` can do, so both tenants'
+    // rows must exist first. This is also exactly how production writes them:
+    // `recordPaymentAttempt` (services/api/src/payments/payment-ledger.ts) runs
+    // on `platformDb`, the owner connection, because the tenant role has no
+    // INSERT to write them with.
+    for (const [tenantId, suffix] of [[T1, 'a'], [T2, 'b']] as const) {
+      const order = await prisma.order.create({
+        data: {
+          tenantId,
+          number: 5000,
+          reference: `vr_ledger_rls_${suffix}`,
+          email: 'comprador@example.com',
+          phone: '3000000000',
+          shippingAddress: {},
+          subtotalCents: 25_000,
+          taxCents: 0,
+          totalCents: 25_000,
+        },
+      });
+      ORDER[tenantId] = order.id;
+      await prisma.payment.create({
+        data: {
+          tenantId,
+          orderId: order.id,
+          provider: 'wompi',
+          providerRef: `wompi_txn_rls_${suffix}`,
+          amountCents: 25_000,
+          status: 'PAID',
+          raw: { source: 'test', suffix },
+        },
+      });
+    }
+  });
+
+  it('tenant 1 sees only its own payment rows', async () => {
+    const rows = await asTenant(T1, (tx) =>
+      tx.$queryRaw<{ tenantId: string; providerRef: string }[]>`
+        SELECT "tenantId", "providerRef" FROM "Payment"
+      `,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tenantId).toBe(T1);
+    expect(rows[0]!.providerRef).toBe('wompi_txn_rls_a');
+  });
+
+  it('a tenant cannot reach another tenant row even by its exact orderId', async () => {
+    // The merchant-facing read is "this order's payment history", so the
+    // orderId is the natural handle — knowing one from another tenant must
+    // still not be enough to read its money history.
+    const otherOrderId = ORDER[T2]!;
+    const rows = await asTenant(T1, (tx) =>
+      tx.$queryRaw<unknown[]>`SELECT "id" FROM "Payment" WHERE "orderId" = ${otherOrderId}::uuid`,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('no GUC set means no payment rows visible', async () => {
+    const rows = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE ventia_app`);
+      return tx.$queryRaw<unknown[]>`SELECT "id" FROM "Payment"`;
+    });
+    expect(rows).toHaveLength(0);
+  });
+
+  it('the whole row is readable — no column is withheld from the merchant', async () => {
+    // Unlike `WhatsAppNumber`, this table holds no secrets: `raw` is what a
+    // gateway said about a payment the merchant already knows about. So the
+    // grant is table-level and `SELECT *` must SUCCEED here — asserted so that
+    // narrowing it later is a deliberate act with a failing test, not a
+    // side effect.
+    const rows = await asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT * FROM "Payment"`);
+    expect(rows).toHaveLength(1);
+  });
+
+  it('ventia_app cannot append to the ledger', async () => {
+    // Writes are not blocked, only relocated: both settle paths write through
+    // `platformDb`. A tenant-scoped INSERT would let a merchant manufacture
+    // evidence that a gateway said something it never said.
+    const orderId = ORDER[T1]!;
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`
+        INSERT INTO "Payment" ("id", "tenantId", "orderId", "provider", "amountCents", "status")
+        VALUES (gen_random_uuid(), ${T1}::uuid, ${orderId}::uuid, 'wompi', 1, 'PAID')
+      `),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('ventia_app cannot amend a ledger row', async () => {
+    // The rows most worth tampering with are precisely the ones recording a
+    // charge someone would rather forget.
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`UPDATE "Payment" SET "status" = 'FAILED'`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('ventia_app cannot delete a ledger row', async () => {
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`DELETE FROM "Payment"`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('the same gateway statement cannot be recorded twice', async () => {
+    // The dedupe key is what keeps the 2-minute reconciliation sweep from
+    // appending a row per pass for an order nothing is happening to. Asserted
+    // on the OWNER connection, so this is the constraint talking, not RLS.
+    await expect(
+      prisma.payment.create({
+        data: {
+          tenantId: T1,
+          orderId: ORDER[T1]!,
+          provider: 'wompi',
+          providerRef: 'wompi_txn_rls_a',
+          amountCents: 25_000,
+          status: 'PAID',
+        },
+      }),
+    ).rejects.toThrow(/[Uu]nique constraint/);
+  });
+
+  it('a different statement about the SAME transaction is a new row', async () => {
+    // PENDING-then-PAID on one transaction is two real statements, and a
+    // partial refund is a third with a different amount. The key must dedupe
+    // re-observation without collapsing genuine history.
+    const rows = await prisma.payment.createManyAndReturn({
+      data: [
+        {
+          tenantId: T1,
+          orderId: ORDER[T1]!,
+          provider: 'wompi',
+          providerRef: 'wompi_txn_rls_a',
+          amountCents: 25_000,
+          status: 'PENDING',
+        },
+        {
+          tenantId: T1,
+          orderId: ORDER[T1]!,
+          provider: 'wompi',
+          providerRef: 'wompi_txn_rls_a',
+          amountCents: 10_000,
+          status: 'PAID',
+        },
+      ],
+    });
+    expect(rows).toHaveLength(2);
+  });
+});

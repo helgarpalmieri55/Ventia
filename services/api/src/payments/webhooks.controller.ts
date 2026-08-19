@@ -6,6 +6,7 @@ import { WebhookVerificationUnavailableError } from '@ventia/payments';
 import type { NormalizedPaymentEvent, PaymentProviderId, RawRequest } from '@ventia/payments';
 import { ORDER_CURRENCY, PROVIDERS } from './provider-registry';
 import { PaymentsService } from './payments.service';
+import { recordPaymentAttempt } from './payment-ledger';
 
 /**
  * Machine-to-machine payment-gateway webhook receiver.
@@ -77,6 +78,16 @@ import { PaymentsService } from './payments.service';
  *     otherwise this handler processes it, because the row is written before
  *     the settle and a settle that throws would otherwise leave a genuinely
  *     paid order stuck PENDING forever behind its own idempotency row.
+ *
+ * ## The payment ledger (added when `Payment` was wired up)
+ *
+ * Every event that survives all of the checks above appends one row to the
+ * `Payment` ledger before any settle is attempted — see the inline comment at
+ * that call for why it sits exactly there, why the refused branches
+ * deliberately write nothing, and why it must not move after the settle. It
+ * changes none of the five properties above: it reads no order state, gates
+ * nothing, and `Order.paymentStatus` remains the only authority on where an
+ * order stands.
  *
  * ## Known, recorded deviation from `docs/SPEC.md`
  *
@@ -604,6 +615,57 @@ export class WebhooksController {
       await markProcessed(result);
       return { ok: true };
     }
+
+    // ---- The payment ledger (docs/SPEC.md §8 `payments`).
+    //
+    // One row per gateway STATEMENT about money, appended here — after every
+    // binding check has passed, and BEFORE any settle is attempted.
+    //
+    // WHY HERE, and not at each terminal branch below: this records what the
+    // gateway said, not what this handler did about it. Every branch below
+    // (PAID that settled, PAID that could not be applied, FAILED, a
+    // non-actionable PENDING/EXPIRED) is a statement about this order's money
+    // that a merchant or a support engineer may need to see, and all four
+    // reach this line. `Order.paymentStatus` remains the sole authority on the
+    // order's current state — see `recordPaymentAttempt`'s doc comment for why
+    // nothing may read this table to decide it.
+    //
+    // WHY NOT EARLIER: the refused branches above (`invalid_reference`,
+    // `order_not_found`, `cross_tenant_reference`, `amount_mismatch`,
+    // `currency_mismatch`/`currency_unknown`) deliberately write NOTHING here.
+    // An event this handler refused is, by the very checks that refused it, not
+    // established to be about this order's money — writing a 100-COP
+    // `amount_mismatch` row into a 999.999-COP order's ledger would put the
+    // forged number the amount check exists to reject into the one table whose
+    // purpose is to be believed. Those events are already durably recorded, with
+    // their disposition, on `WebhookEvent.result`, which is where "we were told
+    // this and refused it" belongs.
+    //
+    // WHY BEFORE THE SETTLE: a throw here leaves the order untouched and this
+    // event's `WebhookEvent` row unstamped, so the gateway's retry reprocesses
+    // the delivery from a clean state (fix 5). Writing it after a successful
+    // settle would instead mean a failed insert 500s a request whose order was
+    // already settled — and the retry would then find `markPaid` no-op and
+    // record a FALSE `paid_order_not_settleable` alarm, manufacturing the exact
+    // money-losing signal that alarm exists to make trustworthy.
+    //
+    // `raw` carries a POINTER to this event's `WebhookEvent` row (unique on
+    // `(provider, tenantId, eventId)`), not a second copy of the payload: that
+    // row already stores the verified bytes, and duplicating them would create
+    // two records that can disagree after a schema change.
+    await recordPaymentAttempt({
+      tenantId,
+      orderId: order.id,
+      provider: providerId,
+      providerRef: event.providerRef,
+      // The gateway's own number, which the check above has just proven equal
+      // to `order.totalCents` — recorded as the gateway's, not the order's, so
+      // the day a gateway reports a partial amount this column is where the
+      // difference shows up rather than where it is erased.
+      amountCents: event.amountCents,
+      status: event.status,
+      raw: { source: 'webhook', provider: event.provider, eventId: event.eventId },
+    });
 
     if (event.status === 'PAID') {
       // ---- wave 3: report what actually happened, not what was attempted.
