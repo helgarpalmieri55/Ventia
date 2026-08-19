@@ -138,6 +138,21 @@ model User {
   email         String    @unique
   emailVerified Boolean   @default(false)
   image         String?
+  // Ventia operator flag — NOT a merchant role. Required IN ADDITION to the
+  // PLATFORM_ADMIN_EMAILS env allowlist, never instead of it (see
+  // services/api/src/platform/platform-admin.guard.ts): two independent
+  // controls, one in deployment config and one in the database, neither
+  // sufficient alone.
+  //
+  // Nothing in the product writes this column. better-auth is deliberately
+  // configured with no `user.additionalFields`, so it does not know the column
+  // exists and cannot set it through any sign-up or profile path; there is no
+  // API endpoint that updates it either. Granting it is a deliberate SQL
+  // statement by someone who already holds database credentials. That is the
+  // property being bought — contrast MembershipRole.platform_admin, which is
+  // reachable from the merchant-driven staff-invite path and is rejected for
+  // exactly that reason.
+  isPlatformAdmin Boolean @default(false)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   sessions      Session[]

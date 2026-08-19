@@ -1,5 +1,6 @@
 import { CanActivate, ExecutionContext, HttpException, Inject, Injectable } from '@nestjs/common';
 import type { Request } from 'express';
+import { platformDb } from '@ventia/db';
 import { AUTH_INSTANCE, type AuthInstance } from '../admin/auth-instance';
 import type { PlatformOperatorContext } from './platform-operator.decorator';
 
@@ -41,10 +42,10 @@ export function platformAdminAllowlist(env: NodeJS.ProcessEnv = process.env): Re
  * There is no platform-operator role that is safe to grant from inside the
  * product today. The three candidates, and why this one won:
  *
- * 1. **`User.isPlatformAdmin` column.** The right long-term answer: an
- *    explicit, auditable, per-user flag. It needs a schema migration, which
- *    is out of scope for this change, so it is filed as a follow-up (see the
- *    "When the column lands" note below).
+ * 1. **`User.isPlatformAdmin` column.** An explicit, auditable, per-user
+ *    flag. Now LANDED (migration `20260819140000_user_is_platform_admin`) and
+ *    required in ADDITION to the allowlist, not instead of it — see "Both, not
+ *    either" below.
  *
  * 2. **A `Membership` row with `role: 'platform_admin'`.** Representable
  *    today — `MembershipRole.platform_admin` already exists in the schema and
@@ -104,11 +105,34 @@ export function platformAdminAllowlist(env: NodeJS.ProcessEnv = process.env): Re
  * operator must not read a single byte that a merchant-facing write path can
  * influence. Session + verified email + env allowlist, nothing else.
  *
- * ## When the `User.isPlatformAdmin` column lands
+ * ## Both, not either
  *
- * Require BOTH, do not replace: the column makes operators visible to
- * queries and audit joins, while the env allowlist keeps the grant outside
- * the database. Two independent controls, neither sufficient alone.
+ * `User.isPlatformAdmin` is required IN ADDITION to the env allowlist. Each
+ * control covers the other's weakness:
+ *
+ * - The **allowlist** lives outside the database, so no application bug — not
+ *   even arbitrary writes through the ORM — can add an operator. But it names
+ *   an *address*, and an address is a claim about identity rather than
+ *   identity itself.
+ * - The **column** names a specific user row, and is invisible to every write
+ *   path the product has: better-auth is configured with no
+ *   `user.additionalFields`, so it does not know the column exists and cannot
+ *   set it during sign-up or profile update, and no endpoint updates it.
+ *   Granting it is a deliberate SQL statement by someone who already holds
+ *   database credentials. But a column alone could in principle be reached by
+ *   a future careless write, which is precisely what the allowlist backstops.
+ *
+ * Requiring both means an attacker needs to hold an allowlisted verified
+ * mailbox AND to have written a row in a database they should not be able to
+ * write. Either alone is not enough, which is the whole point.
+ *
+ * Revocation is the practical payoff: flipping the column to `false` removes
+ * an operator immediately, with a SQL statement and no deploy, while the env
+ * allowlist continues to bound the set of addresses that could ever qualify.
+ *
+ * The read is a single `platformDb` lookup by the session's own user id — no
+ * `Membership` join, nothing a merchant-facing write path influences, which
+ * keeps the "Deliberately independent of `Membership`" property above intact.
  */
 @Injectable()
 export class PlatformAdminGuard implements CanActivate {
@@ -137,10 +161,31 @@ export class PlatformAdminGuard implements CanActivate {
     }
 
     const email = session.user.email.trim().toLowerCase();
-    // Both conditions collapse into one 403 with one error code: an ordinary
-    // merchant probing this API learns only "not for you", never whether the
-    // address they tried is on the list or merely unverified.
+    // All three conditions collapse into one 403 with one error code: an
+    // ordinary merchant probing this API learns only "not for you", never
+    // whether the address they tried is on the list, merely unverified, or
+    // allowlisted-but-not-flagged.
+    //
+    // The column is read only after the first two pass, so an unauthorised
+    // probe costs no query. `select` is narrowed to the one field: this guard
+    // has no business loading a user record.
     if (!session.user.emailVerified || !allowlist.has(email)) {
+      throw new HttpException({ error: 'NOT_PLATFORM_ADMIN' }, 403);
+    }
+
+    const user = await platformDb.user.findUnique({
+      where: { id: session.user.id },
+      select: { isPlatformAdmin: true },
+    });
+    if (!user?.isPlatformAdmin) {
+      // Distinct log line, because this is the state an operator hits after
+      // the column migration lands and before anyone has run the UPDATE — and
+      // "my allowlisted, verified account gets a 403" is otherwise a genuinely
+      // confusing thing to debug. Says what to do about it.
+      console.error(
+        `[platform-admin] ${email} is allowlisted and verified but User.isPlatformAdmin is false — ` +
+          `grant it with: UPDATE "User" SET "isPlatformAdmin" = true WHERE email = '${email}';`,
+      );
       throw new HttpException({ error: 'NOT_PLATFORM_ADMIN' }, 403);
     }
 

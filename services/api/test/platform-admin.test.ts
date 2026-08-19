@@ -40,26 +40,38 @@ const OPERATOR_EMAIL = 'ops@ventia.co';
  * real allowlist is hand-edited config that will have stray spaces in it. */
 const ALLOWLIST = ` OPS@Ventia.co , second-operator@ventia.co `;
 
-/** Signs up a user, marks their email verified, and returns a session cookie.
+/** Signs up a user, grants them both operator controls, and returns a session
+ * cookie.
  *
  * Memoized per address: several tests share one operator, and
  * `signUpAndGetCookie` signs UP (which fails on a duplicate address). The
  * session outlives the file, so handing back the first cookie is both correct
  * and faster than re-authenticating.
  *
- * Verification is set directly in the DB because there is no test mailbox to
- * click a link in — the guard requires `emailVerified`, and the reason it does
- * is asserted in its own test below. */
+ * BOTH are set directly in the DB, and neither is decoration:
+ * `emailVerified` because there is no test mailbox to click a link in, and
+ * `isPlatformAdmin` because NO APPLICATION CODE PATH SETS IT — that is the
+ * column's entire purpose (see platform-admin.guard.ts). A test that could
+ * grant it through an endpoint would be evidence of a bug, not convenience.
+ * Each is independently required, and each has its own test below proving
+ * that withholding it denies. */
 const cookieCache = new Map<string, string>();
-async function operatorCookie(email: string, opts: { verified?: boolean } = {}): Promise<string> {
+async function operatorCookie(
+  email: string,
+  opts: { verified?: boolean; flagged?: boolean } = {},
+): Promise<string> {
   let cookie = cookieCache.get(email);
   if (!cookie) {
     cookie = await signUpAndGetCookie(email);
     cookieCache.set(email, cookie);
   }
-  if (opts.verified !== false) {
-    await platformDb.user.update({ where: { email }, data: { emailVerified: true } });
-  }
+  await platformDb.user.update({
+    where: { email },
+    data: {
+      emailVerified: opts.verified !== false,
+      isPlatformAdmin: opts.flagged !== false,
+    },
+  });
   return cookie;
 }
 
@@ -257,6 +269,58 @@ describe('PlatformAdminGuard', () => {
     // proving the rejection was the verification and not the allowlist.
     await platformDb.user.update({ where: { email: 'second-operator@ventia.co' }, data: { emailVerified: true } });
     expect((await call('get', '/v1/platform/tenants', undefined, cookie)).status).toBe(200);
+  });
+
+  it('rejects an allowlisted, verified operator whose User.isPlatformAdmin is false', async () => {
+    // The second of the two independent controls. This is the state a
+    // deployment is in immediately after the column migration lands and
+    // before anyone runs the UPDATE: allowlisted, verified, and still denied.
+    // Denying is the correct direction for a privilege migration to fail.
+    const cookie = await operatorCookie('second-operator@ventia.co', { flagged: false });
+    const res = await call('get', '/v1/platform/tenants', undefined, cookie);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('NOT_PLATFORM_ADMIN');
+
+    // ...and it starts working the moment the flag is set, proving the
+    // rejection was the column and not the allowlist or the verification.
+    await platformDb.user.update({
+      where: { email: 'second-operator@ventia.co' },
+      data: { isPlatformAdmin: true },
+    });
+    expect((await call('get', '/v1/platform/tenants', undefined, cookie)).status).toBe(200);
+  });
+
+  it('BOTH controls are required: neither the flag nor the allowlist suffices alone', async () => {
+    // The pair that makes "in addition to, never instead of" a tested
+    // property rather than a comment. Two directions, one test:
+    //
+    //   flag WITHOUT allowlist  — the case that would matter if someone ever
+    //     wrote to this column from application code. Flagging a user must
+    //     not admit them unless the deployment also named their address.
+    //   allowlist WITHOUT flag  — covered above, re-asserted here so the pair
+    //     reads as one claim.
+    const outsider = 'flagged-but-not-listed@ventia.co';
+    const cookie = await operatorCookie(outsider);
+    // `operatorCookie` already set isPlatformAdmin — this address is simply
+    // not in ALLOWLIST.
+    expect(
+      (await platformDb.user.findUnique({ where: { email: outsider }, select: { isPlatformAdmin: true } }))
+        ?.isPlatformAdmin,
+    ).toBe(true);
+
+    const res = await call('get', '/v1/platform/tenants', undefined, cookie);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('NOT_PLATFORM_ADMIN');
+  });
+
+  it('the flag is not reachable through sign-up — no new user gets it', async () => {
+    // The column's whole value is that no application path writes it. If
+    // better-auth ever gains a `user.additionalFields` entry for it, or an
+    // endpoint starts accepting it, this goes red.
+    const email = 'freshly-signed-up@ventia.co';
+    await signUpAndGetCookie(email);
+    const user = await platformDb.user.findUnique({ where: { email }, select: { isPlatformAdmin: true } });
+    expect(user?.isPlatformAdmin).toBe(false);
   });
 
   it('rejects a verified user who is simply not on the list', async () => {

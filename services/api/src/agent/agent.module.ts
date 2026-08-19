@@ -7,6 +7,7 @@ import { AgentController } from './agent.controller';
 import { AgentAdminController } from './agent-admin.controller';
 import { ConversationsController } from './conversations.controller';
 import { AgentService, ANTHROPIC_CLIENT } from './agent.service';
+import { ConversationRetentionWorker } from './conversation-retention.worker';
 import { RedisModule } from '../common/redis.module';
 import { AdminModule } from '../admin/admin.module';
 import { MailerModule } from '../mailer/mailer.module';
@@ -36,6 +37,11 @@ import { CheckoutModule } from '../checkout/checkout.module';
     AgentBudgetService,
     AgentThrottleService,
     AgentService,
+    // Registered here so main.ts can `app.get()` it. Registration alone starts
+    // NOTHING: the class implements no Nest lifecycle hook, so `app.init()` —
+    // which every test file in this repo calls — never touches Redis or
+    // deletes a row. See its doc comment.
+    ConversationRetentionWorker,
     { provide: ANTHROPIC_CLIENT, useFactory: () => new Anthropic() },
   ],
   exports: [AgentToolsService, AgentBudgetService, AgentService],

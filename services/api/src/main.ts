@@ -10,6 +10,7 @@ import { AUTH_INSTANCE, type AuthInstance } from './admin/auth-instance';
 import { clientIp, createRateLimiter, RATE_LIMITS } from './common/rate-limit';
 import { ReconciliationWorker } from './payments/reconciliation.worker';
 import { StockReservationWorker } from './payments/stock-reservation.worker';
+import { ConversationRetentionWorker } from './agent/conversation-retention.worker';
 
 export async function createApp(): Promise<INestApplication> {
   // bodyParser: false — better-auth's toNodeHandler needs the raw (unparsed)
@@ -206,5 +207,12 @@ if (require.main === module) {
     // own doc comment), so registering it in PaymentsModule starts nothing on
     // its own.
     await app.get(ReconciliationWorker).start();
+    // Starts the Ley 1581 conversation-retention purge (SPEC.md §9) — a third
+    // sibling of the two lines above, in this branch for the identical reason.
+    // ConversationRetentionWorker implements no Nest lifecycle hook either, so
+    // registering it in AgentModule starts nothing on its own — which matters
+    // most for THIS worker, since an accidentally-auto-started one would be
+    // deleting rows in the background of every test run in this repo.
+    await app.get(ConversationRetentionWorker).start();
   })();
 }
