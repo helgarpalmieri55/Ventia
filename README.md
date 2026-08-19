@@ -572,18 +572,43 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
       where a tampered one failed earlier with a different error); its
       `markPaid`/stock-decrement/idempotency chain rests on mocked-fetch unit tests
       (`packages/payments/test/mercadopago.test.ts`).
-- **P4 — AI Agent (web)** ⬜
-- **P5 — WhatsApp + Human handoff** ⬜
-- **P6 — Platform Admin + Hardening + Pilot** ⬜
+- **P4 — AI Agent (web)** ✅: a tool-using sales agent on the storefront widget, built on the
+  Anthropic Messages API. Seven tools (catalogue search, product detail, stock, shipping quote,
+  cart add/read, and `escalate_to_human`), a per-tenant monthly message budget read from
+  `TenantLimits.aiMessagesMonth` that fails **closed** for an unprovisioned tenant, an es-CO
+  system prompt whose handoff rule varies with the tenant's plan, and an eval suite. The agent
+  can build a cart that becomes a real, attributed order. DoD: the agent answers from the
+  merchant's own catalogue, never invents a product or a price, and stops at its budget.
+- **P5 — WhatsApp + Human handoff** ✅: `packages/whatsapp` with two providers behind one
+  interface — Meta's **WhatsApp Cloud API** (`X-Hub-Signature-256` HMAC over the raw body, the
+  `hub.challenge` handshake, Graph version pinned) and **Evolution API** — plus the inbound
+  channel in the API. One webhook per Meta *app* covers every number, so delivery is routed by
+  the `phone_number_id` in the payload against a globally-unique `WhatsAppNumber.externalId`;
+  the webhook URL carries no tenant id. Per-tenant credentials are encrypted at rest and the
+  columns holding them are withheld from `ventia_app` at the `GRANT` level. Messages are
+  deduplicated on `(tenantId, externalId)`. Human handoff marks the conversation escalated and
+  emails the merchant; the admin has a Conversaciones panel to read the transcript and resolve.
+  Merchant-side Meta app configuration is a deploy-time step — see `docs/deploying-whatsapp.md`.
+- **P6 — Platform Admin + Hardening + Pilot** 🚧: **done** — platform-operator surface behind an
+  env allowlist that fails closed and additionally requires a verified email; custom domains with
+  DNS TXT verification gating Caddy's on-demand TLS; plan limits unified behind one 402
+  `PLAN_LIMIT_EXCEEDED` shape; an append-only payment ledger; audit entries on every order
+  transition; backups + a restore drill executed for real (15/15, including tenant isolation
+  biting on restored data); and a 100-concurrent-checkout load test that found and proved a
+  connection-pool starvation bug in checkout — all three scripts and their measured results are
+  in [`docs/operations.md`](docs/operations.md). **Outstanding** — Ley 1581 (Habeas Data)
+  compliance, subscription tracking + auto-suspend, the platform-admin UI and
+  Sentry/BullMQ observability.
 
 ## Operations: backups, restore drill & load test
 
 Full runbook — including everything that was written but **not** exercised — in
-[`docs/operations.md`](docs/operations.md). Three local-run scripts, none of them
+[`docs/operations.md`](docs/operations.md). Four local-run scripts, none of them
 part of `pnpm turbo run test`/CI:
 
 ```bash
 bash scripts/backup.sh          # pg_dump + pg_dumpall globals + manifest + sha256
+node scripts/backup-upload.mjs  # copy that run offsite (S3/R2), verified by read-back
 bash scripts/restore-drill.sh   # restore into a scratch DB and prove it is usable
 node scripts/load-test.mjs      # 100 concurrent checkouts, invariants asserted from Postgres
 ```
@@ -596,8 +621,13 @@ carry, so a dump-only restore into a fresh cluster either fails on the first
 `GRANT` or comes up with tenant isolation quietly switched off. Retention
 defaults to 30 days (SPEC.md §10). Output goes to
 `${TMPDIR:-/tmp}/ventia-backups` by default, deliberately outside the repo.
-**Nothing uploads offsite yet** — SPEC.md §10's nightly-to-R2 is still
-outstanding.
+`backup-upload.mjs` copies a run offsite to S3/R2, verifying every file by
+reading it back (a `PutObject` 200 is not evidence the bytes that landed are
+the bytes you sent), and `--pull` brings one back down checked against the
+`.sha256` taken before the upload. Exercised end to end against the compose
+MinIO, and the **downloaded** copy then passed the full restore drill 15/15 —
+so the offsite copy is known-restorable, not merely present. Real R2
+credentials are a deploy-time step.
 
 **Restore drill (P6 DoD: "restore drill documented and executed").**
 `restore-drill.sh` restores a backup into a throwaway database and runs 15

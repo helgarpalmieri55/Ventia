@@ -9,15 +9,18 @@ Definition-of-Done items from [`SPEC.md` §11](SPEC.md#11-build-phases-claude-co
 [Restore drill](#restore-drill) and [Load test](#load-test) was run end to end
 on the local dev stack, and the outputs pasted below are real, unedited runs —
 not examples. Everything that was written but **not** exercised is called out
-inline in a `> **Not exercised.**` block. The two biggest ones: offsite
-(R2) upload has no implementation here at all, and the restore drill's
+inline in a `> **Not exercised.**` block. The biggest one: the restore drill's
 "recreate the roles in an empty cluster" branch never fired, because the
-cluster it ran against already had them.
+cluster it ran against already had them. Offsite upload *is* implemented and
+was exercised end to end — against the MinIO in `docker/compose.yaml` rather
+than against real Cloudflare R2, which is the one substitution to keep in mind
+(see [Offsite copies](#offsite-copies)).
 
 | Script | Purpose |
 | --- | --- |
 | [`scripts/backup.sh`](../scripts/backup.sh) | Take a verified logical backup (dump + roles + manifest + checksums). |
 | [`scripts/restore-drill.sh`](../scripts/restore-drill.sh) | Restore a backup into a scratch database and prove it is usable. |
+| [`scripts/backup-upload.mjs`](../scripts/backup-upload.mjs) | Copy a backup run offsite (S3/R2), verify it by read-back, and pull it back. |
 | [`scripts/load-test.mjs`](../scripts/load-test.mjs) | 100 concurrent checkouts; assert stock accounting and tenant isolation hold. |
 
 Prerequisites for all three: the dev stack up (`docker compose -f docker/compose.yaml up -d`),
@@ -107,13 +110,9 @@ and the manifest it produced:
 
 ### Scheduling
 
-> **Not exercised.** No scheduler and no offsite copy were set up or run.
-> SPEC.md §10 calls for a nightly `pg_dump` to R2 with 30-day retention;
-> `backup.sh` produces the artifacts and prunes them, but **nothing here
-> uploads anything anywhere**. A backup that only exists on the machine
-> running the database is not a backup of that machine. Wiring up the upload
-> (and then re-running the drill *from a downloaded copy*, which is the part
-> that actually proves the offsite copy is good) is outstanding work.
+> **Not exercised.** No scheduler was set up or run. The cron below is the
+> intended shape, not something this repo has executed. The offsite half is
+> implemented and was exercised — see [Offsite copies](#offsite-copies).
 
 The intended shape, for whoever picks it up:
 
@@ -123,6 +122,92 @@ The intended shape, for whoever picks it up:
 # Weekly drill, Sundays 04:00 UTC — non-zero exit should page someone
 0 4 * * 0 cd /srv/ventia && bash scripts/restore-drill.sh --latest >> /var/log/ventia-drill.log 2>&1
 ```
+
+Chain the offsite copy onto the nightly line rather than scheduling it
+separately — `&&`, so a failed backup is never followed by an upload that
+would make a bad run look like a good one:
+
+```cron
+15 3 * * * cd /srv/ventia && BACKUP_DIR=/var/backups/ventia bash scripts/backup.sh && node scripts/backup-upload.mjs >> /var/log/ventia-backup.log 2>&1
+```
+
+## Offsite copies
+
+```bash
+node scripts/backup-upload.mjs           # upload the newest run in BACKUP_DIR
+node scripts/backup-upload.mjs --list    # what is offsite right now
+node scripts/backup-upload.mjs --pull    # bring the newest run back down, verified
+```
+
+SPEC.md §10 asks for a nightly dump to Cloudflare R2 with 30-day retention.
+`backup-upload.mjs` is that, written against the S3 API rather than anything
+R2-specific — the only R2-shaped thing anywhere is the endpoint URL you
+configure. It uses `@aws-sdk/client-s3`, already a dependency for product-image
+storage, so there is no S3 CLI to provision on the database host.
+
+Configuration is entirely environment, and the script refuses to run rather
+than half-configuring itself:
+
+| Variable | |
+| --- | --- |
+| `BACKUP_S3_ENDPOINT` | e.g. `https://<account>.r2.cloudflarestorage.com` |
+| `BACKUP_S3_BUCKET` | e.g. `ventia-backups` |
+| `BACKUP_S3_ACCESS_KEY` / `BACKUP_S3_SECRET_KEY` | R2 API token pair |
+| `BACKUP_S3_PREFIX` | optional, default `postgres/` |
+| `BACKUP_RETENTION_DAYS` | optional, default 30 — prunes the **offsite** copies too, scoped to this script's own `ventia-*` keys |
+
+**All four files, or none.** A run is the dump, the globals, the manifest and
+the checksums; three of four offsite is a failed backup, because a dump
+restored without its globals comes up in a cluster with no `ventia_app` role
+and therefore with tenant isolation switched off. The script exits non-zero
+rather than reporting partial success, and `--list` marks any run that is not
+`4/4`.
+
+**Every upload is verified by reading it back.** A `PutObject` that returns 200
+says the request was accepted, not that the bytes that landed are the bytes you
+sent — and a silently truncated backup is indistinguishable from a good one
+until the day you need it. Each file is streamed back out of the bucket and
+re-hashed before the run is called uploaded. Proved non-vacuous: with the
+upload deliberately truncated to its first 10 bytes, the check caught it and
+refused the run.
+
+**`--pull` exists because an offsite backup nobody has ever fetched is an
+assumption.** It downloads a run and checks each file against the `.sha256`
+`backup.sh` wrote *before* the upload happened — so it verifies the whole round
+trip, not just that two numbers this script computed agree. Wrong bucket, wrong
+prefix, credentials that can PUT but not GET, an object stored but unreadable:
+every one of those presents as "everything looks fine" until an incident.
+
+### Executed, end to end
+
+Against the MinIO in `docker/compose.yaml` (S3-compatible, so the code path is
+the real one; only the endpoint differs from production R2):
+
+```
+1 run(s) offsite at http://localhost:9000/ventia/backups/postgres/
+  4/4  ventia-ventia-20260819T011638Z      104533 bytes  2026-08-19T01:17:14.553Z
+
+Pulling ventia-ventia-20260819T011638Z
+  OK   ventia-ventia-20260819T011638Z.dump          matches backup-time sha256
+  OK   ventia-ventia-20260819T011638Z.globals.sql   matches backup-time sha256
+  OK   ventia-ventia-20260819T011638Z.manifest.json matches backup-time sha256
+
+$ bash scripts/restore-drill.sh --backup /tmp/ventia-backups/pulled/ventia-ventia-20260819T011638Z.dump
+  Restore drill: 15 passed, 0 failed
+```
+
+That last line is the point of the whole section: the **downloaded** copy was
+restored and passed all 15 checks, including tenant isolation actually biting
+under RLS on the restored data. The offsite copy is not merely present, it is
+known-restorable.
+
+> **Not exercised.** Real Cloudflare R2 — no account was configured here. R2 is
+> S3-compatible and the client is configured the same way
+> `services/api/src/storage/storage.service.ts` configures its own
+> (`region: 'auto'`, `forcePathStyle: true`), so the remaining risk is
+> credentials and endpoint, not code. Also not exercised: the cron itself, and
+> any alerting on a failed nightly run — a backup script whose failures go to a
+> logfile nobody reads is a backup nobody has.
 
 ---
 
