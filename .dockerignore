@@ -1,0 +1,58 @@
+# Build context exclusions, shared by docker/Dockerfile.{api,storefront,admin}.
+#
+# Everything here is either (a) rebuilt inside the image, (b) a secret, or
+# (c) irrelevant to a runtime image. Keeping it out matters twice: the context
+# tarball is sent to the daemon on every build, and a stale host artefact
+# leaking in (a `dist/` built from different source, a `.next/` from a
+# different NODE_ENV) is the kind of difference that only shows up in
+# production.
+
+# --- Rebuilt inside the image -------------------------------------------------
+# Host node_modules are pnpm symlink farms pointing at absolute host paths;
+# copying them in produces a tree that resolves to nothing.
+node_modules
+**/node_modules
+# Compiled output. The images run `tsc` / `next build` themselves — a copied
+# `dist/` would shadow the fresh one and could predate the source beside it.
+**/dist
+**/.next
+**/.turbo
+.turbo
+**/*.tsbuildinfo
+
+# --- Secrets and local state --------------------------------------------------
+# A developer .env would otherwise be baked into the image layer, where it
+# survives every later `docker run --env-file` that was meant to replace it.
+.env
+.env.*
+!.env.production.example
+.git
+.gitignore
+
+# --- Test and CI artefacts ----------------------------------------------------
+# Also keeps test sources out of `next build`'s type-check pass, which reads
+# the app tsconfig's `include` and would otherwise typecheck Playwright specs
+# that import devDependencies the production install does not have.
+**/test
+**/e2e
+**/coverage
+**/test-results
+**/playwright-report
+**/blob-report
+**/*.spec.ts
+**/*.test.ts
+**/vitest.config.ts
+**/playwright.config.ts
+.github
+
+# --- Not needed by any image --------------------------------------------------
+docs
+README.md
+.claude
+.prettierrc.json
+eslint.config.mjs
+
+# --- Docker's own files -------------------------------------------------------
+# A change to the compose file or the Caddyfile must not invalidate the build
+# cache of three images that never read them.
+docker

@@ -1,0 +1,289 @@
+# syntax=docker/dockerfile:1
+#
+# @ventia/api — NestJS 10, compiled to CommonJS by `tsc`, run under plain node.
+#
+# Build from the REPO ROOT, not from docker/:
+#   docker build -f docker/Dockerfile.api -t ventia-api .
+#
+# Two targets:
+#   --target runner   (default) the API process. Production dependencies only.
+#   --target migrator            `prisma migrate deploy`. Carries the Prisma
+#                                CLI, which is a devDependency and therefore
+#                                deliberately absent from `runner`.
+# compose.prod.yaml builds both.
+
+# =============================================================================
+# base — toolchain, shared by every stage below and by the other two images.
+# =============================================================================
+ARG NODE_IMAGE=node:22.22-bookworm-slim
+
+# runtime-base is also the parent of `runner` and `migrator`: openssl is not a
+# build convenience, it is what the Prisma query engine links against. Without
+# it, `prisma generate` mis-detects the platform and emits
+# libquery_engine-debian-openssl-1.1.x.so.node — an engine bookworm cannot
+# load — and the failure surfaces as a cryptic engine error on the first query,
+# not at build time. (Verified: dropping this line reproduces exactly that.)
+FROM ${NODE_IMAGE} AS runtime-base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base AS base
+ENV PNPM_HOME=/pnpm \
+    PATH=/pnpm:$PATH \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    CI=1
+WORKDIR /app
+
+# Optional extra CA for the BUILD ONLY, for hosts that sit behind a
+# TLS-terminating proxy. Supplying nothing leaves an empty file, which Node
+# accepts silently — so this is a no-op on a normal machine:
+#   docker build --secret id=proxy_ca,src=/path/to/ca.pem ...
+# It is needed here because two build steps reach the network over HTTPS and
+# both are Node clients: `next/font/google` (the other two images) and the
+# Prisma engine download (this one). The secret never becomes an image layer,
+# and the stage it lands in is discarded before `runner`.
+RUN --mount=type=secret,id=proxy_ca,target=/tmp/proxy-ca.crt \
+    mkdir -p /usr/local/share/ca-certificates \
+ && if [ -s /tmp/proxy-ca.crt ]; then \
+      cp /tmp/proxy-ca.crt /usr/local/share/ca-certificates/build-proxy-ca.crt; \
+    else \
+      : > /usr/local/share/ca-certificates/build-proxy-ca.crt; \
+    fi
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/build-proxy-ca.crt
+
+# Pinned to the version in the root package.json's `packageManager` field.
+# Corepack would honour that field anyway, but only once a manifest is in the
+# image — pinning here keeps this layer independent of the manifests below.
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+
+# =============================================================================
+# fetch — the layer that exists so a code change does not re-download the world.
+#
+# `pnpm fetch` reads ONLY pnpm-lock.yaml and populates the pnpm content store.
+# It touches no package.json, so this layer is invalidated by a dependency
+# change and by nothing else. The alternative considered was `pnpm deploy
+# --filter`: it produces a smaller, self-contained tree, but it resolves the
+# dependency graph fresh (so `@prisma/client`'s peer-suffixed store directory
+# changes and the generated client no longer matches), and in pnpm 9 it copies
+# a workspace package's files through npm-packlist, which honours .gitignore —
+# and `packages/*/dist` IS gitignored here, so the built output of every
+# workspace package would be silently dropped. That is exactly the "stale or
+# missing @ventia/db build" failure this repo warns about, so: `pnpm fetch`.
+#
+# Identical instructions in all three Dockerfiles, so building the second and
+# third image reuses this layer rather than recomputing it.
+# =============================================================================
+FROM base AS fetch
+COPY pnpm-lock.yaml ./
+RUN pnpm fetch
+
+# =============================================================================
+# deps — resolve the workspace from manifests alone, still without any source.
+# =============================================================================
+FROM fetch AS deps
+COPY package.json pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+# Every workspace manifest, because --frozen-lockfile verifies the lockfile
+# against ALL importers and fails if one is missing — even though the filtered
+# install below only materialises @ventia/api's half of the graph.
+COPY packages/core/package.json      packages/core/
+COPY packages/db/package.json        packages/db/
+COPY packages/payments/package.json  packages/payments/
+COPY packages/ui/package.json        packages/ui/
+COPY packages/whatsapp/package.json  packages/whatsapp/
+COPY services/api/package.json       services/api/
+COPY apps/storefront/package.json    apps/storefront/
+COPY apps/admin/package.json         apps/admin/
+# --offline: everything is already in the store from `pnpm fetch`; if anything
+# is not, fail loudly here rather than quietly reaching the network and
+# producing a tree the lockfile does not describe.
+RUN pnpm install --frozen-lockfile --offline --filter "@ventia/api..."
+
+# =============================================================================
+# builder — Prisma client, then every workspace package @ventia/api imports.
+# =============================================================================
+FROM deps AS builder
+COPY packages/ packages/
+COPY services/api/ services/api/
+
+# Before `@ventia/db`'s tsc: its src imports `@prisma/client`, whose types do
+# not exist until the client is generated. The generated client (and the query
+# engine .node binary that ships beside it) lands inside the pnpm store entry
+# for @prisma/client and must survive into `runner` — see the prune step below.
+RUN pnpm --filter @ventia/db exec prisma generate
+
+# `@ventia/api...` = the package and its workspace dependencies, in topological
+# order: core -> db/payments/whatsapp -> api. This is what guarantees
+# @ventia/db's dist/ (and with it tenant-models.ts's TENANT_MODELS, which the
+# tenant-scoped Prisma client reads to decide what to scope) is built and
+# current before the API that imports it. @ventia/ui is correctly not built
+# here: nothing in services/api imports it.
+RUN pnpm --filter "@ventia/api..." run build
+
+# =============================================================================
+# prod-deps — a self-contained production tree for @ventia/api alone.
+#
+# Why `pnpm deploy` and not `pnpm install --prod`, which is the obvious choice:
+# pnpm's isolated virtual store is WORKSPACE-WIDE. `--prod` prunes each
+# importer's own node_modules but leaves node_modules/.pnpm untouched, so a
+# `--prod --filter @ventia/api...` install still ships vitest, tsx,
+# testcontainers, supertest AND @next/swc's 274 MB of platform binaries — all
+# measured, all in a 1.82 GB image that satisfied neither "no dev dependencies
+# in the final layer" nor any reasonable size budget. Removing importers from
+# pnpm-workspace.yaml does not help either: pnpm materialises the virtual store
+# from the LOCKFILE, not from the workspace.
+#
+# `pnpm deploy --config.node-linker=hoisted` is the one pnpm-native mechanism
+# that produces a genuinely filtered tree — flat, production-only, containing
+# exactly @ventia/api's closure. Its cost is that it RE-RESOLVES the dependency
+# graph against the registry: it honours neither --frozen-lockfile nor
+# --offline (both tried; the latter fails with ERR_PNPM_NO_OFFLINE_META), so
+# left alone it can pick a version pnpm-lock.yaml does not name. That is
+# unacceptable in an image that moves money, so it is not left alone — the
+# assertion below turns silent drift into a failed build.
+# =============================================================================
+FROM builder AS prod-deps
+
+RUN pnpm deploy --filter=@ventia/api --prod --ignore-scripts \
+      --config.node-linker=hoisted /prod
+
+# The generated Prisma client does not survive `deploy`: it lives inside the
+# pnpm store entry for @prisma/client as a plain `.prisma` directory that no
+# manifest mentions, and deploy relinks that package from the store. Copy the
+# real one — index.js, schema.prisma and libquery_engine-debian-openssl-3.0.x
+# — over whatever deploy left behind.
+RUN rm -rf /prod/node_modules/.prisma \
+ && cp -R /app/node_modules/.pnpm/@prisma+client@*/node_modules/.prisma /prod/node_modules/.prisma
+
+# Lockfile conformance, the assertion the paragraph above promised.
+# /app/node_modules/.pnpm is the tree pnpm built with --frozen-lockfile
+# --offline, so the set of name@version it contains IS the lockfile's
+# resolutions. Every third-party package in the deployed tree must be one of
+# them; anything else means `deploy` resolved a version pnpm-lock.yaml does not
+# pin, and the build stops rather than shipping an image nobody tested.
+RUN <<'CHECK'
+set -e
+node - <<'JS'
+const fs = require('node:fs'), path = require('node:path');
+
+// Read real manifests rather than parsing .pnpm's directory names: those
+// encode peer-dependency suffixes (@anthropic-ai+sdk@0.117.1_zod@4.4.3) that
+// no reasonable regex separates from the version reliably.
+const locked = new Set();
+const readManifest = (dir) => {
+  try {
+    const pj = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    if (pj.name && pj.version) locked.add(pj.name + '@' + pj.version);
+  } catch {}
+};
+for (const entry of fs.readdirSync('/app/node_modules/.pnpm')) {
+  const nm = path.join('/app/node_modules/.pnpm', entry, 'node_modules');
+  let names; try { names = fs.readdirSync(nm); } catch { continue; }
+  for (const n of names) {
+    if (n.startsWith('@')) {
+      try { for (const s of fs.readdirSync(path.join(nm, n))) readManifest(path.join(nm, n, s)); } catch {}
+    } else readManifest(path.join(nm, n));
+  }
+}
+
+const bad = [];
+const scan = (dir) => {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!e.isDirectory() || e.name === '.pnpm' || e.name === '.bin' || e.name === '.prisma') continue;
+    const p = path.join(dir, e.name);
+    if (e.name.startsWith('@')) { scan(p); continue; }
+    let pj; try { pj = JSON.parse(fs.readFileSync(path.join(p, 'package.json'), 'utf8')); } catch { continue; }
+    if (!pj.name || !pj.version) continue;
+    if (pj.name.startsWith('@ventia/')) continue;   // workspace packages, no registry version
+    if (!locked.has(pj.name + '@' + pj.version)) bad.push(pj.name + '@' + pj.version);
+    const nested = path.join(p, 'node_modules');
+    if (fs.existsSync(nested)) scan(nested);
+  }
+};
+scan('/prod/node_modules');
+
+if (bad.length) {
+  console.error('Deployed tree does not match pnpm-lock.yaml:');
+  for (const b of bad) console.error('  ' + b);
+  process.exit(1);
+}
+console.log(`lockfile conformance ok (${locked.size} locked resolutions)`);
+JS
+CHECK
+
+# Fail the BUILD, not the first request, if any of the above went wrong.
+# Importing @ventia/db constructs a PrismaClient at module scope — which throws
+# outright when the generated client is missing — and TENANT_MODELS is the set
+# the tenant-scoped client consults to decide what to scope, so a non-zero size
+# here is proof that packages/db/dist is present and current rather than a
+# leftover from an earlier build. Nothing else in this image checks that.
+RUN cd /prod \
+ && node -e "import('@ventia/db').then(m=>{if(!(m.TENANT_MODELS&&m.TENANT_MODELS.size))throw new Error('TENANT_MODELS empty');console.log('@ventia/db ok, TENANT_MODELS:',m.TENANT_MODELS.size)})" \
+ && test -d /prod/node_modules/@ventia/db/prisma/migrations \
+ && echo "migrations present: $(ls /prod/node_modules/@ventia/db/prisma/migrations | wc -l) entries"
+
+# No dev dependencies. Asserted rather than assumed, because the mechanism that
+# excludes them (deploy's --prod) is not the mechanism that excluded them in
+# the first draft of this file, and that draft shipped all four.
+RUN for p in vitest tsx testcontainers supertest typescript prisma; do \
+      if [ -e "/prod/node_modules/$p" ]; then echo "devDependency $p leaked into the runtime tree"; exit 1; fi; \
+    done && echo "no dev dependencies in the runtime tree"
+
+# =============================================================================
+# migrator — `prisma migrate deploy`, run as a one-shot before the API starts.
+#
+# A separate target rather than a separate Dockerfile: it must apply the exact
+# migrations that were built alongside the API image, and sharing every layer
+# up to `builder` is what makes that true by construction. It keeps the
+# devDependency Prisma CLI, which is precisely why `runner` below does not.
+# =============================================================================
+FROM runtime-base AS migrator
+ENV NODE_ENV=production \
+    PNPM_HOME=/pnpm \
+    PATH=/pnpm:$PATH \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+
+# The full builder tree, dev dependencies and all. This image runs for a few
+# seconds per deploy and is never exposed to the network, so its size is not
+# worth the fragility of hand-pruning around the Prisma CLI.
+COPY --from=deps  --chown=node:node /app /app
+COPY --from=builder --chown=node:node /app/packages/db/prisma /app/packages/db/prisma
+USER node
+# `migrate deploy` applies pending migrations and exits non-zero on any
+# failure — no interactive prompts, no schema drift "fixes", no data loss
+# paths. It is the only Prisma command that is safe unattended.
+CMD ["pnpm", "--filter", "@ventia/db", "migrate:deploy"]
+
+# =============================================================================
+# runner — the API process itself.
+# =============================================================================
+FROM runtime-base AS runner
+ENV NODE_ENV=production
+WORKDIR /app
+
+# `node` (uid 1000) already exists in the base image; /app is owned by it so
+# nothing runs as root. The deploy tree is self-contained — it IS the
+# @ventia/api package with a flat node_modules beside it — so there is no
+# workspace, no pnpm and no symlink farm in this image at all.
+#
+# packages/db/prisma/{schema.prisma,migrations} rides along inside
+# node_modules/@ventia/db, which is why `docker run --entrypoint ... api` can
+# inspect exactly the migrations this image was built against even though the
+# `migrator` target is what actually applies them.
+COPY --from=prod-deps --chown=node:node /prod /app
+
+USER node
+
+# API_PORT is read at RUNTIME by loadEnv() (packages/core/src/env.ts), so this
+# is documentation for `docker inspect`, not a value baked into anything.
+EXPOSE 4000
+
+# Nest's own signal handling (app.enableShutdownHooks() in main.ts) plus the
+# SIGTERM/SIGINT handlers that flush Sentry mean node-as-PID-1 shuts down
+# cleanly; compose.prod.yaml sets `init: true` for zombie reaping regardless.
+#
+# `node dist/main.js`, not `tsx src/main.ts`: tsx is a devDependency, compiles
+# on every boot, and is asserted absent from this image.
+CMD ["node", "dist/main.js"]
