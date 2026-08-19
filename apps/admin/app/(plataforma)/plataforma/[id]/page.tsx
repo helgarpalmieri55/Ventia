@@ -218,7 +218,7 @@ export default function PlataformaTenantPage() {
         </CardContent>
       </Card>
 
-      <SubscriptionPanel subscription={tenant.subscription} />
+      <SubscriptionPanel tenant={tenant} onChanged={reload} />
 
       <PlanPanel tenant={tenant} onChanged={reload} />
 

@@ -55,10 +55,19 @@ export interface PlatformSession {
   access: PlatformAccess;
   /** Best-effort: the operator's own login, shown in the console chrome so an
    * operator can see WHICH account they are acting as before they act on
-   * someone else's store. Undefined when it could not be resolved — an
-   * operator with no merchant tenant of their own gets 403 NO_TENANT from
-   * `/v1/admin/me`, which is a perfectly normal state for a Ventia employee
-   * and must not block the console. */
+   * someone else's store.
+   *
+   * Read from `GET /v1/platform/me`, the operator-identity endpoint behind
+   * the same `PlatformAdminGuard` as the rest of this surface. It used to be
+   * read from `/v1/admin/me`, which was silently useless here: that endpoint
+   * answers 403 `NO_TENANT` for a user with no merchant membership, and a
+   * Ventia employee with no store of their own is the NORMAL case for this
+   * console — so the header simply showed nothing for exactly the people it
+   * was built for.
+   *
+   * Still `undefined` on any failure. An identity the console could not
+   * resolve is a missing line of chrome, never a broken console: this value
+   * grants nothing, gates nothing, and is not on the path of any data. */
   email?: string;
 }
 
@@ -76,12 +85,32 @@ async function fetchFromApi(path: string): Promise<Response> {
   });
 }
 
+/**
+ * The `GET /v1/platform/me` body -> the operator's email, or `undefined`.
+ *
+ * Pure and exported so the degradation is TESTED rather than hoped for. The
+ * whole contract of this value is "never break the console", and the shapes
+ * that would break a naive reader — a body that is null, an `email` that is a
+ * number because a serializer changed, a 200 that is somehow an array — are
+ * the ones a running API is least likely to hand you during development and
+ * most likely to hand you in production.
+ *
+ * Whitespace-only is treated as absent: rendering `Operador:` followed by
+ * nothing is worse than rendering no line at all.
+ */
+export function operatorEmailFromBody(body: unknown): string | undefined {
+  if (typeof body !== 'object' || body === null) return undefined;
+  const email = (body as { email?: unknown }).email;
+  if (typeof email !== 'string') return undefined;
+  const trimmed = email.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
 async function fetchOperatorEmail(): Promise<string | undefined> {
   try {
-    const response = await fetchFromApi('/v1/admin/me');
+    const response = await fetchFromApi('/v1/platform/me');
     if (!response.ok) return undefined;
-    const body = (await response.json()) as { email?: unknown };
-    return typeof body.email === 'string' ? body.email : undefined;
+    return operatorEmailFromBody(await response.json());
   } catch {
     return undefined;
   }
