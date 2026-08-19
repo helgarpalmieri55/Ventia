@@ -1,3 +1,6 @@
+# Dev reverse proxy. Plain HTTP on *.ventia.localhost — `.localhost` is a
+# reserved special-use TLD (RFC 6761), so no publicly-trusted certificate
+# exists or could exist for it, and none is needed locally.
 http://api.ventia.localhost {
 	reverse_proxy host.docker.internal:4000
 }
@@ -7,3 +10,50 @@ http://admin.ventia.localhost {
 http://ventia.localhost, http://*.ventia.localhost {
 	reverse_proxy host.docker.internal:3000
 }
+
+# ---------------------------------------------------------------------------
+# Custom domains (SPEC.md §11 P6) — PRODUCTION shape, inert in dev.
+#
+# A merchant's own `tienda.example.com` cannot be enumerated ahead of time, so
+# certificates are issued on demand: Caddy sees an unknown hostname in a TLS
+# handshake and asks whether it may issue one.
+#
+# `ask` is the entire security boundary. Caddy issues only on a 2xx, and the
+# endpoint below refuses unless the domain is registered, DNS-verified, owned
+# by a LIVE tenant, and on a plan that includes custom domains — see
+# services/api/src/tenants/custom-domains.service.ts, where each of those four
+# conditions is separately mutation-tested.
+#
+# Without `ask`, anyone who points DNS at this platform makes Caddy request a
+# certificate on our behalf. The damage is not that they get a certificate for
+# their own domain — they could get that anywhere — it is that they exhaust
+# the SHARED Let's Encrypt issuance rate limit and block renewal for every
+# real tenant.
+#
+# The ask endpoint is reachable only from inside the compose network: it is
+# mounted at `/internal/*` on the API, and no public site block below proxies
+# that path. It is unauthenticated by necessity (Caddy calls it mid-handshake,
+# before any session exists) and leaks nothing beyond whether a hostname is
+# served here, which the handshake itself already reveals.
+#
+# Commented out in this dev Caddyfile because on-demand TLS needs a real
+# public hostname and a reachable ACME endpoint, neither of which exists
+# locally. Uncomment in the production Caddyfile.
+#
+# {
+# 	on_demand_tls {
+# 		ask http://api:4000/internal/tls-ask
+# 		# Caddy's own second bound, independent of ours: even a bug that made
+# 		# `ask` answer 200 for everything cannot burn the ACME budget faster
+# 		# than this.
+# 		interval 2m
+# 		burst 5
+# 	}
+# }
+#
+# https:// {
+# 	tls {
+# 		on_demand
+# 	}
+# 	reverse_proxy storefront:3000
+# }

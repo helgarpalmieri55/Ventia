@@ -1,0 +1,279 @@
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import request from 'supertest';
+import type { INestApplication } from '@nestjs/common';
+import type { PrismaClient as PrismaClientType } from '@ventia/db';
+import { startTestDb } from './helpers';
+import type { CustomDomainsService as CustomDomainsServiceType } from '../src/tenants/custom-domains.service';
+import type { signUpWithTenant as SignUpWithTenant } from './admin-helpers';
+
+/**
+ * Custom domains, and the on-demand TLS gate.
+ *
+ * The `ask` endpoint is the entire thing standing between multi-tenant custom
+ * domains and an attacker burning the platform's shared Let's Encrypt issuance
+ * budget — which would block certificate renewal for every real tenant. Every
+ * condition it checks gets its own test, because each removal is a separate
+ * way to hand out certificates for domains this platform does not serve.
+ */
+
+let db: Awaited<ReturnType<typeof startTestDb>>;
+let prisma: PrismaClientType;
+let app: INestApplication;
+let domains: CustomDomainsServiceType;
+let signUpWithTenant: typeof SignUpWithTenant;
+
+let cookie: string;
+let tenantId: string;
+
+beforeAll(async () => {
+  db = await startTestDb();
+  process.env.DATABASE_URL = db.url;
+  process.env.REDIS_URL = 'redis://localhost:6379';
+
+  const { createApp } = await import('../src/main');
+  app = await createApp();
+  await app.init();
+
+  ({ platformDb: prisma } = await import('@ventia/db'));
+  ({ signUpWithTenant } = await import('./admin-helpers'));
+  const { CustomDomainsService } = await import('../src/tenants/custom-domains.service');
+  domains = app.get(CustomDomainsService);
+
+  ({ cookie, tenantId } = await signUpWithTenant('domains-owner@demo.co', 'owner'));
+  await prisma.tenantLimits.upsert({
+    where: { tenantId },
+    create: { tenantId, productsMax: 100, aiMessagesMonth: 100, staffSeats: 2, customDomain: true },
+    update: { customDomain: true },
+  });
+}, 240_000);
+
+afterAll(async () => {
+  await app.close();
+  await db.stop();
+});
+
+/** A verified, live, entitled domain — the only combination that may issue. */
+async function seedServableDomain(domain: string) {
+  await prisma.tenantDomain.create({
+    data: { tenantId, domain, isPrimary: false, verifiedAt: new Date() },
+  });
+}
+
+describe('normalizeDomain', () => {
+  it('strips what a merchant realistically pastes', async () => {
+    const { normalizeDomain } = await import('../src/tenants/custom-domains.service');
+    expect(normalizeDomain('  HTTPS://Tienda.Example.COM/algo  ')).toBe('tienda.example.com');
+    expect(normalizeDomain('tienda.example.com.')).toBe('tienda.example.com');
+    expect(normalizeDomain('tienda.example.com:443')).toBe('tienda.example.com');
+  });
+
+  it('rejects what would loosen the certificate check', async () => {
+    // This value is compared against a DB column to decide issuance, so a
+    // loose normalizer is a way to match a row you should not.
+    const { normalizeDomain } = await import('../src/tenants/custom-domains.service');
+    expect(normalizeDomain('*.example.com')).toBeNull();
+    expect(normalizeDomain('localhost')).toBeNull(); // single label
+    expect(normalizeDomain('-bad.example.com')).toBeNull();
+    expect(normalizeDomain('exa mple.com')).toBeNull();
+    expect(normalizeDomain('')).toBeNull();
+    expect(normalizeDomain(null)).toBeNull();
+  });
+});
+
+describe('GET /internal/tls-ask — the issuance gate', () => {
+  it('authorizes a verified domain of a live, entitled tenant', async () => {
+    await seedServableDomain('servable.example.com');
+
+    const res = await request(app.getHttpServer()).get('/internal/tls-ask').query({ domain: 'servable.example.com' });
+    expect(res.status).toBe(200);
+  });
+
+  it('REFUSES a domain nobody registered', async () => {
+    const res = await request(app.getHttpServer()).get('/internal/tls-ask').query({ domain: 'attacker.example.com' });
+    expect(res.status).toBe(403);
+  });
+
+  it('REFUSES a registered but UNVERIFIED domain', async () => {
+    // A row proves nothing — a merchant can type a competitor's hostname into
+    // the form. Only DNS control proves it is theirs.
+    await prisma.tenantDomain.create({
+      data: { tenantId, domain: 'unverified.example.com', isPrimary: false },
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/internal/tls-ask')
+      .query({ domain: 'unverified.example.com' });
+    expect(res.status).toBe(403);
+  });
+
+  it('REFUSES a suspended tenant\'s domain', async () => {
+    // Suspension exists to stop serving a store; renewing its certificate
+    // works against that.
+    const { tenantId: suspendedId } = await signUpWithTenant('domains-suspended@demo.co', 'owner');
+    await prisma.tenantLimits.upsert({
+      where: { tenantId: suspendedId },
+      create: { tenantId: suspendedId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: true },
+      update: { customDomain: true },
+    });
+    await prisma.tenantDomain.create({
+      data: { tenantId: suspendedId, domain: 'suspended.example.com', isPrimary: false, verifiedAt: new Date() },
+    });
+    await prisma.tenant.update({ where: { id: suspendedId }, data: { status: 'suspended' } });
+
+    const res = await request(app.getHttpServer())
+      .get('/internal/tls-ask')
+      .query({ domain: 'suspended.example.com' });
+    expect(res.status).toBe(403);
+  });
+
+  it('REFUSES a tenant whose plan does not include custom domains', async () => {
+    // Otherwise the entitlement is decorative: a downgraded store keeps
+    // renewing forever.
+    const { tenantId: basicId } = await signUpWithTenant('domains-basic@demo.co', 'owner');
+    await prisma.tenantLimits.upsert({
+      where: { tenantId: basicId },
+      create: { tenantId: basicId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: false },
+      update: { customDomain: false },
+    });
+    await prisma.tenantDomain.create({
+      data: { tenantId: basicId, domain: 'basic.example.com', isPrimary: false, verifiedAt: new Date() },
+    });
+
+    const res = await request(app.getHttpServer()).get('/internal/tls-ask').query({ domain: 'basic.example.com' });
+    expect(res.status).toBe(403);
+  });
+
+  it('REFUSES a missing or malformed domain parameter rather than erroring', async () => {
+    // Caddy treats any non-2xx as refusal, so failing closed here is correct
+    // AND must not 500 — a 500 in this path is a certificate outage.
+    expect((await request(app.getHttpServer()).get('/internal/tls-ask')).status).toBe(403);
+    expect(
+      (await request(app.getHttpServer()).get('/internal/tls-ask').query({ domain: '*.example.com' })).status,
+    ).toBe(403);
+  });
+});
+
+describe('domain verification', () => {
+  it('marks verified when the expected TXT record is published', async () => {
+    const added = await domains.add(tenantId, 'verifyme.example.com');
+    const token = domains.verificationToken(tenantId, 'verifyme.example.com');
+    const resolver = vi.fn().mockResolvedValue([[token]]);
+
+    const ok = await domains.verify(tenantId, added.id, resolver);
+
+    expect(ok).toBe(true);
+    expect(resolver).toHaveBeenCalledWith('_ventia-verify.verifyme.example.com');
+    const row = await prisma.tenantDomain.findUniqueOrThrow({ where: { id: added.id } });
+    expect(row.verifiedAt).not.toBeNull();
+  });
+
+  it('rejoins a TXT value the DNS protocol split into chunks', async () => {
+    // Long TXT values arrive as multiple strings; comparing the first chunk
+    // alone would never match.
+    const added = await domains.add(tenantId, 'chunked.example.com');
+    const token = domains.verificationToken(tenantId, 'chunked.example.com');
+    const resolver = vi.fn().mockResolvedValue([[token.slice(0, 10), token.slice(10)]]);
+
+    expect(await domains.verify(tenantId, added.id, resolver)).toBe(true);
+  });
+
+  it('does NOT verify on a wrong token', async () => {
+    const added = await domains.add(tenantId, 'wrongtoken.example.com');
+    const resolver = vi.fn().mockResolvedValue([['not-the-token']]);
+
+    expect(await domains.verify(tenantId, added.id, resolver)).toBe(false);
+    const row = await prisma.tenantDomain.findUniqueOrThrow({ where: { id: added.id } });
+    expect(row.verifiedAt).toBeNull();
+  });
+
+  it('reports a DNS failure as "not yet", not as an error', async () => {
+    // A merchant who just added the record is genuinely in this state for
+    // minutes.
+    const added = await domains.add(tenantId, 'nxdomain.example.com');
+    const resolver = vi.fn().mockRejectedValue(new Error('ENOTFOUND'));
+
+    await expect(domains.verify(tenantId, added.id, resolver)).resolves.toBe(false);
+  });
+
+  it('cannot verify another tenant\'s domain', async () => {
+    const { tenantId: otherId } = await signUpWithTenant('domains-other@demo.co', 'owner');
+    const foreign = await prisma.tenantDomain.create({
+      data: { tenantId: otherId, domain: 'foreign.example.com', isPrimary: false },
+    });
+    const resolver = vi.fn().mockResolvedValue([[domains.verificationToken(otherId, 'foreign.example.com')]]);
+
+    expect(await domains.verify(tenantId, foreign.id, resolver)).toBe(false);
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it('issues a STABLE token, so a merchant mid-setup is not handed a new one', async () => {
+    const a = domains.verificationToken(tenantId, 'stable.example.com');
+    const b = domains.verificationToken(tenantId, 'stable.example.com');
+    expect(a).toBe(b);
+    // ...and a different one per tenant, so knowing the domain is not enough.
+    expect(domains.verificationToken('00000000-0000-0000-0000-000000000000', 'stable.example.com')).not.toBe(a);
+  });
+});
+
+describe('POST /v1/admin/domains', () => {
+  it('registers a domain and returns the record to publish', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/admin/domains')
+      .set('cookie', cookie)
+      .send({ domain: 'nueva.example.com' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.domain).toBe('nueva.example.com');
+    expect(res.body.token).toHaveLength(32);
+  });
+
+  it('409s a domain another tenant already registered', async () => {
+    // `TenantDomain.domain` is what tenant resolution keys on, so reassigning
+    // it would redirect a live storefront.
+    const { tenantId: otherId } = await signUpWithTenant('domains-taken@demo.co', 'owner');
+    await prisma.tenantDomain.create({ data: { tenantId: otherId, domain: 'taken.example.com', isPrimary: false } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/admin/domains')
+      .set('cookie', cookie)
+      .send({ domain: 'taken.example.com' });
+
+    expect(res.status).toBe(409);
+  });
+
+  it('402s a tenant whose plan excludes custom domains', async () => {
+    const { cookie: basicCookie, tenantId: basicId } = await signUpWithTenant('domains-noplan@demo.co', 'owner');
+    await prisma.tenantLimits.upsert({
+      where: { tenantId: basicId },
+      create: { tenantId: basicId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: false },
+      update: { customDomain: false },
+    });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/admin/domains')
+      .set('cookie', basicCookie)
+      .send({ domain: 'noplan.example.com' });
+
+    expect(res.status).toBe(402);
+    expect(res.body.error).toBe('PLAN_LIMIT_EXCEEDED');
+  });
+
+  it('400s a malformed domain', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/admin/domains')
+      .set('cookie', cookie)
+      .send({ domain: '*.example.com' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('403s a staff session', async () => {
+    const { cookie: staffCookie } = await signUpWithTenant('domains-staff@demo.co', 'staff');
+    const res = await request(app.getHttpServer())
+      .post('/v1/admin/domains')
+      .set('cookie', staffCookie)
+      .send({ domain: 'staff.example.com' });
+
+    expect(res.status).toBe(403);
+  });
+});

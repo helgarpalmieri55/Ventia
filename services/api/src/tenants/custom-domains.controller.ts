@@ -1,0 +1,109 @@
+import { Body, Controller, Delete, Get, HttpCode, HttpException, Inject, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { platformDb } from '@ventia/db';
+import { AdminSessionGuard } from '../admin/admin-session.guard';
+import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.decorator';
+import { writeAudit } from '../catalog/audit';
+import { CustomDomainsService, normalizeDomain } from './custom-domains.service';
+
+/**
+ * Caddy's on-demand TLS gate. `GET /internal/tls-ask?domain=<host>`.
+ *
+ * Answers 200 to authorize issuance and 403 to refuse. Caddy issues only on a
+ * 2xx, so this endpoint is the entire thing standing between "multi-tenant
+ * custom domains" and "anyone who points DNS at us can burn the platform's
+ * Let's Encrypt rate limit and take TLS down for every real tenant".
+ *
+ * Unauthenticated by necessity — Caddy calls it during a TLS handshake, before
+ * any session exists. It is therefore mounted under `/internal` and MUST NOT
+ * be exposed publicly by the reverse proxy; see docker/Caddyfile, where it is
+ * reachable only from the proxy itself. Even so it leaks nothing: the only
+ * observable is whether a hostname is served here, which a TLS handshake
+ * reveals anyway.
+ */
+@Controller('internal')
+export class TlsAskController {
+  constructor(@Inject(CustomDomainsService) private readonly domains: CustomDomainsService) {}
+
+  @Get('tls-ask')
+  @HttpCode(200)
+  async ask(@Query('domain') domain: string | undefined): Promise<string> {
+    const allowed = domain ? await this.domains.isDomainAllowed(domain) : false;
+    // 403, not 404: Caddy treats any non-2xx as a refusal, and 403 is the
+    // honest code for "we will not issue for this".
+    if (!allowed) throw new HttpException('not authorized for this domain', 403);
+    return 'ok';
+  }
+}
+
+/**
+ * The merchant's custom-domain flow (owner-only, like every other settings
+ * surface).
+ *
+ * Plan-gated on `TenantLimits.customDomain` — SPEC §5 lists it as a plan
+ * entitlement, and without the gate the tier boundary is decorative.
+ */
+@Controller('v1/admin/domains')
+@UseGuards(AdminSessionGuard)
+@Roles('owner')
+export class CustomDomainsController {
+  constructor(@Inject(CustomDomainsService) private readonly domains: CustomDomainsService) {}
+
+  @Get()
+  async list(@AdminSession() session: AdminSessionContext) {
+    const [items, limits] = await Promise.all([
+      this.domains.listForTenant(session.tenantId),
+      platformDb.tenantLimits.findUnique({ where: { tenantId: session.tenantId } }),
+    ]);
+    return {
+      items,
+      customDomainEnabled: limits?.customDomain ?? false,
+      // What the merchant must publish. Returned alongside so the UI can show
+      // the exact record rather than describing it in prose — a mistyped host
+      // is the most common reason verification never completes.
+      verificationHost: '_ventia-verify',
+    };
+  }
+
+  @Post()
+  async add(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
+    const raw = (body as { domain?: unknown })?.domain;
+    const domain = normalizeDomain(typeof raw === 'string' ? raw : null);
+    if (!domain) {
+      throw new HttpException({ error: 'VALIDATION_FAILED', details: { domain: 'dominio inválido' } }, 400);
+    }
+
+    const limits = await platformDb.tenantLimits.findUnique({ where: { tenantId: session.tenantId } });
+    if (!limits?.customDomain) {
+      throw new HttpException({ error: 'PLAN_LIMIT_EXCEEDED', details: { feature: 'customDomain' } }, 402);
+    }
+
+    // Claimed by someone else — including by this same tenant, in which case
+    // the honest answer is still "already registered". A 409 rather than a
+    // silent takeover: `TenantDomain.domain` is globally unique because it is
+    // what tenant resolution keys on, so reassigning it would redirect a live
+    // storefront.
+    const existing = await platformDb.tenantDomain.findUnique({ where: { domain } });
+    if (existing) throw new HttpException({ error: 'DOMAIN_ALREADY_REGISTERED' }, 409);
+
+    const added = await this.domains.add(session.tenantId, domain);
+    await writeAudit(session, 'domain.add', 'TenantDomain', added.id, { domain });
+    return added;
+  }
+
+  @Post(':id/verify')
+  async verify(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
+    const verified = await this.domains.verify(session.tenantId, id);
+    if (verified) await writeAudit(session, 'domain.verify', 'TenantDomain', id, {});
+    // 200 either way: "not yet" is the expected state for minutes after a
+    // merchant adds the record, and an error would read as "you did it wrong".
+    return { verified };
+  }
+
+  @Delete(':id')
+  async remove(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
+    const removed = await this.domains.remove(session.tenantId, id);
+    if (!removed) throw new HttpException({ error: 'DOMAIN_NOT_FOUND' }, 404);
+    await writeAudit(session, 'domain.remove', 'TenantDomain', id, {});
+    return { ok: true };
+  }
+}

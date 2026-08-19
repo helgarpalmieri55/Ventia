@@ -17,6 +17,8 @@ import { RedisModule, REDIS_CLIENT } from './common/redis.module';
 import { DomainResolver } from './tenants/domain-resolver';
 import { TenantMiddleware } from './tenants/tenant.middleware';
 import { TenantController } from './tenants/tenant.controller';
+import { CustomDomainsController, TlsAskController } from './tenants/custom-domains.controller';
+import { CustomDomainsService } from './tenants/custom-domains.service';
 
 // Re-exported from its own module (see common/redis.module.ts for why it moved)
 // so `main.ts` and existing imports keep the same source.
@@ -37,7 +39,7 @@ export { REDIS_CLIENT };
     StorefrontModule,
     WhatsAppModule,
   ],
-  controllers: [HealthController, TenantController],
+  controllers: [HealthController, TenantController, TlsAskController, CustomDomainsController],
   providers: [
     {
       provide: DomainResolver,
@@ -45,6 +47,7 @@ export { REDIS_CLIENT };
       inject: [REDIS_CLIENT],
     },
     TenantMiddleware,
+    CustomDomainsService,
   ],
 })
 export class AppModule implements NestModule, OnApplicationShutdown {
