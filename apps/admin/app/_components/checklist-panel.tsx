@@ -6,6 +6,7 @@ import { Alert, Badge, Button, Spinner } from '@ventia/ui';
 import { ApiError, apiFetch } from '../../lib/api';
 import { errorMessage } from '../../lib/errors';
 import { checklistItems, missingItems, type Checklist } from '../../lib/checklist';
+import { fetchContent } from '../../lib/content-api';
 
 /** `_components`: a Next.js "private folder" — never treated as a route
  * segment — living at the `app/` root (rather than under a single route
@@ -54,18 +55,30 @@ export function ChecklistPanel({ onLaunched }: ChecklistPanelProps) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
+  /** Whether this store has published its política de tratamiento de datos
+   * personales. A PROMPT, never a gate — see the advisory block below. */
+  const [hasPrivacyPolicy, setHasPrivacyPolicy] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const [onboarding, settings] = await Promise.all([
+      const [onboarding, settings, content] = await Promise.all([
         apiFetch<OnboardingGetResponse>('/v1/admin/onboarding'),
         apiFetch<SettingsResponse>('/v1/admin/settings'),
+        // Advisory only, so a failure here must never block the checklist
+        // from rendering — `null` simply means "we don't know", and the
+        // advisory is not shown.
+        fetchContent().catch(() => null),
       ]);
       setChecklist(onboarding.checklist);
       setSlug(settings.slug);
       setStatus(settings.status);
+      setHasPrivacyPolicy(
+        content === null
+          ? null
+          : (content.items.find((i) => i.type === 'policy_privacy')?.bodyMd ?? '').trim().length > 0,
+      );
     } catch (e) {
       setLoadError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
     } finally {
@@ -157,6 +170,24 @@ export function ChecklistPanel({ onLaunched }: ChecklistPanelProps) {
         </Alert>
       ) : (
         <div className="flex flex-col gap-3">
+          {/* Deliberately NOT a checklist row and NOT part of `ready`:
+              publishing a política de tratamiento is the merchant's legal
+              duty under Ley 1581, not something the platform can verify or
+              write for them, and blocking a launch on an unverifiable text
+              field would only teach merchants to paste a word into it. A
+              prompt at the moment they go live is the strongest honest
+              nudge. */}
+          {hasPrivacyPolicy === false ? (
+            <Alert variant="warning" className="flex flex-col gap-2">
+              <p className="text-sm">
+                Tu tienda todavía no ha publicado su política de tratamiento de datos personales. En Colombia es
+                obligatoria para cualquier tienda que recoja datos de sus clientes (Ley 1581 de 2012).
+              </p>
+              <a href="/configuracion" className="text-sm text-primary underline">
+                Generarla con los datos de mi tienda
+              </a>
+            </Alert>
+          ) : null}
           {launchError ? (
             <Alert variant="error" className="flex flex-col gap-2">
               <p>{launchError}</p>
