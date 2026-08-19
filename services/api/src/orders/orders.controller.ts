@@ -2,12 +2,14 @@ import { Body, Controller, Get, HttpException, Inject, Param, Patch, Query, UseG
 import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession, type AdminSessionContext } from '../admin/roles.decorator';
 import { assertUuidOr404 } from '../catalog/uuid';
+import { writeAudit } from '../catalog/audit';
 import {
   OrdersService,
   type CancelPayload,
   type OrderListQuery,
   type ShippedPayload,
 } from './orders.service';
+import type { OrderAction } from './transitions';
 
 // Small hand-rolled validators for these two action bodies, same convention
 // as cart.controller.ts's parseAddItemBody (no direct `zod` import in
@@ -70,13 +72,13 @@ export class OrdersController {
   @Patch(':id/confirm')
   async confirm(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
     assertUuidOr404(id);
-    return this.orders.transition(session.tenantId, id, 'confirm', undefined, session.userId);
+    return this.transitionAndAudit(session, id, 'confirm', undefined);
   }
 
   @Patch(':id/preparing')
   async preparing(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
     assertUuidOr404(id);
-    return this.orders.transition(session.tenantId, id, 'preparing', undefined, session.userId);
+    return this.transitionAndAudit(session, id, 'preparing', undefined);
   }
 
   @Patch(':id/shipped')
@@ -87,13 +89,13 @@ export class OrdersController {
   ) {
     assertUuidOr404(id);
     const input = parseShippedBody(body);
-    return this.orders.transition(session.tenantId, id, 'shipped', input, session.userId);
+    return this.transitionAndAudit(session, id, 'shipped', input);
   }
 
   @Patch(':id/delivered')
   async delivered(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
     assertUuidOr404(id);
-    return this.orders.transition(session.tenantId, id, 'delivered', undefined, session.userId);
+    return this.transitionAndAudit(session, id, 'delivered', undefined);
   }
 
   @Patch(':id/cancel')
@@ -104,6 +106,44 @@ export class OrdersController {
   ) {
     assertUuidOr404(id);
     const input = parseCancelBody(body);
-    return this.orders.transition(session.tenantId, id, 'cancel', input, session.userId);
+    return this.transitionAndAudit(session, id, 'cancel', input);
+  }
+
+  /**
+   * Every order transition, audited.
+   *
+   * SPEC.md §9 requires an audit row on all admin mutations, and until now
+   * these five had none — which made order state the ONE consequential
+   * merchant action with no trail. That is the wrong thing to leave
+   * unrecorded: a transition moves money and stock (confirm decrements for
+   * COD, cancel restocks and flips paymentStatus), it is the surface a
+   * dispute is argued over ("nobody cancelled that order"), and with staff
+   * seats it is routinely performed by someone other than the owner.
+   *
+   * Written AFTER the transition, deliberately: `transition` throws on an
+   * invalid state change, and an audit row for a mutation that did not happen
+   * is worse than none — it would make the log lie in exactly the situation
+   * someone consults it.
+   *
+   * `writeAudit` swallows its own failures (see catalog/audit.ts), so a
+   * logging outage cannot roll back an order the merchant has already been
+   * told succeeded.
+   */
+  private async transitionAndAudit(
+    session: AdminSessionContext,
+    id: string,
+    action: OrderAction,
+    payload: ShippedPayload | CancelPayload | undefined,
+  ) {
+    const order = await this.orders.transition(session.tenantId, id, action, payload, session.userId);
+    await writeAudit(session, `order.${action}`, 'Order', id, {
+      // The resulting state, not just the verb — so the log answers "what did
+      // this order become" without a join against a row that has since moved
+      // on again.
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      ...(payload ?? {}),
+    });
+    return order;
   }
 }
