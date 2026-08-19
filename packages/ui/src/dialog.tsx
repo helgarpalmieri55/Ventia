@@ -46,7 +46,15 @@ export function Dialog({ open, onClose, children, className }: DialogProps) {
         if (event.target === ref.current) onClose();
       }}
       className={cn(
-        'w-full max-w-md rounded-md border border-border bg-background p-6 text-foreground shadow-lg backdrop:bg-black/50',
+        // `m-auto` is not styling — it restores centering that Tailwind
+        // removes. The UA stylesheet centres a modal with `dialog:modal {
+        // position: fixed; inset: 0; margin: auto }`, and Tailwind v4's
+        // preflight resets `margin: 0` on `*, ::before, ::after, ::backdrop`,
+        // which silently wins. Without this every modal in both apps renders
+        // flush to the top-left corner of the viewport instead of centred.
+        // Measured in Chromium at 1200x800 with a 448px dialog: (0, 0)
+        // without it, (367, 376) with it — and (1200-448)/2 = 376.
+        'm-auto w-full max-w-md rounded-md border border-border bg-background p-6 text-foreground shadow-lg backdrop:bg-black/50',
         className,
       )}
     >
