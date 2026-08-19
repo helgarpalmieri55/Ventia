@@ -826,8 +826,10 @@ which case none of the counts mean anything.
    hand-rolled copy of the platform-admin check is exactly the mistake to avoid.
 2. It is **read-write by default**: its buttons retry, promote and remove jobs.
    "Retry" on `subscription-sweep` re-runs a job that *suspends tenants*.
-3. It is a UI, and there was no UI agent on this task. A JSON endpoint is
-   equally usable from `curl`, from a monitoring check, and from a test.
+3. It is a UI, and no admin-app work was in scope — a dashboard that needs a
+   front end built for it to be useful is worth less than one that does not. A
+   JSON endpoint is equally usable from `curl`, from a monitoring check, and
+   from a test.
 4. New dependency, new attack surface — rendering job data (i.e. fragments of
    gateway webhooks) as HTML inside an operator's authenticated browser session.
 

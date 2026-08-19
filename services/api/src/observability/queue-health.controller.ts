@@ -17,8 +17,9 @@ import { DEFAULT_FAILURE_LIMIT, QueueHealthService, type QueueHealthReport } fro
  * The guard is IMPORTED from `platform/`, not reimplemented here. A second
  * copy of a platform-admin check is the bug this codebase is most exposed to:
  * the copy is the one that gets forgotten when the original gains a
- * condition. (This module is separate from `PlatformModule` only because
- * another agent owns that directory concurrently.)
+ * condition. This route lives in its own module rather than inside
+ * `PlatformModule` so that observability — which must keep working while the
+ * operator console is being changed — is not coupled to it.
  *
  * Read-only by construction — there is no route here that writes anything.
  * Retrying or removing a job is a deliberate omission, not an oversight; see

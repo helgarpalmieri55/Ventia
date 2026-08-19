@@ -27,11 +27,11 @@ import { sentryStatus } from './sentry';
  *    remove jobs. "Retry" on `subscription-sweep` re-runs a job that suspends
  *    tenants. A dashboard whose default affordance is to re-trigger
  *    tenant-suspension is a bigger operational risk than having no dashboard.
- * 3. **It is a UI, and there is no UI agent on this task.** Its value is
- *    realized in a browser by a human who is signed in with a session cookie
- *    — which is precisely the request shape a mounted-router auth gap gets
- *    wrong. A JSON endpoint is equally usable from `curl`, from a monitoring
- *    check, and from a test.
+ * 3. **It is a UI, and no admin-app work was in scope.** Its value is
+ *    realized in a browser by a human signed in with a session cookie — which
+ *    is precisely the request shape a mounted-router auth gap gets wrong. A
+ *    JSON endpoint is equally usable from `curl`, from a monitoring check, and
+ *    from a test.
  * 4. **New dependency, new attack surface**, rendering server-supplied job
  *    data (i.e. gateway webhook fragments in failure messages) as HTML in an
  *    operator's authenticated browser session.
