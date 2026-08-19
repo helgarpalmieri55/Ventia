@@ -16,6 +16,14 @@ was exercised end to end — against the MinIO in `docker/compose.yaml` rather
 than against real Cloudflare R2, which is the one substitution to keep in mind
 (see [Offsite copies](#offsite-copies)).
 
+[Observability](#observability) was added afterwards for §9's remaining two
+Reliability items (Sentry alerts, BullMQ dashboards). Its queue endpoint and
+its PII scrubber were exercised against real dependencies — a live Redis, a
+real BullMQ worker failing on purpose, and the real Sentry SDK running against
+a stub transport — but **no Sentry DSN exists for this project**, so no event
+has ever been delivered to sentry.io. That substitution is the one to keep in
+mind there.
+
 | Script | Purpose |
 | --- | --- |
 | [`scripts/backup.sh`](../scripts/backup.sh) | Take a verified logical backup (dump + roles + manifest + checksums). |
@@ -633,3 +641,202 @@ so an API started the way `e2e.sh` starts it needs no extra configuration.
 > endpoints, and any form of *sustained* load — every measurement here is a
 > single burst lasting a few seconds, so nothing is known about connection
 > leaks, memory growth, or BullMQ worker behaviour over hours.
+
+---
+
+## Observability
+
+SPEC §9's last two Reliability items: *Sentry alerts* and *BullMQ dashboards*.
+Both are now wired. What follows says which parts were run and which were not.
+
+**What was executed.** The scrubber, the disabled-by-default behaviour, and the
+queue endpoint — all three against real dependencies, in
+`services/api/test/observability-*.test.ts` (48 assertions across 3 files): a
+Sentry client initialized against a **stub transport** that captures the
+envelope instead of sending it, and the queue endpoint driven over HTTP against
+a real Redis with a real BullMQ worker made to fail on purpose.
+
+> **Not exercised.** No Sentry project exists for Ventia, and no DSN was
+> available at any point. Nothing in this repo has ever delivered an event to
+> sentry.io. What is proven is everything up to the socket: that the SDK's own
+> `beforeSend` pipeline runs our scrubber, and what the resulting envelope
+> contains. Whether the DSN is correct, whether alert rules fire, and whether
+> the project's own data-scrubbing settings are configured are deployment steps
+> nobody here could take. **Do the first real deploy with a throwaway test
+> project and read one event end to end before trusting this.**
+
+### Error reporting (Sentry)
+
+| Variable | Meaning |
+| --- | --- |
+| `SENTRY_DSN` | The project DSN. **Unset ⇒ reporting is off.** |
+| `SENTRY_ENVIRONMENT` | Tag on every event. Defaults to `NODE_ENV`, then `development`. |
+| `SENTRY_RELEASE` | Optional; a git sha, so an alert names the deploy. |
+| `SENTRY_TRACES_SAMPLE_RATE` | Performance tracing. Defaults to `0` (errors only). |
+
+Unset is the normal state, not a degraded one. With no DSN,
+`services/api/src/observability/sentry.ts` returns
+`{ enabled: false, reason: 'no-dsn' }` before it imports the SDK at all — so a
+DSN-less deployment never loads `@sentry/node`'s OpenTelemetry tree, never
+patches `http`, and installs no `uncaughtException` handler. A **malformed**
+DSN logs one loud line and leaves reporting off rather than throwing: a typo in
+a telemetry variable must not take a merchant's storefront offline. That is the
+one place this deliberately differs from `PAYMENTS_ENCRYPTION_KEY`, which does
+stop the boot.
+
+Initialization happens in `main.ts`'s `require.main === module` branch, **before
+`loadEnv()` and before Nest builds a single provider**, so a crash during
+startup is reported too. Tests never reach that branch, and `initSentry()`
+additionally refuses outright when it sees `VITEST`/`NODE_ENV=test` — so a
+developer with a DSN exported in their shell cannot file their local test
+failures as production incidents.
+
+What gets reported:
+
+| Source | How |
+| --- | --- |
+| Unhandled 5xx from any controller | `SentryExceptionFilter`, a global filter that reports and then defers to Nest's own handling unchanged |
+| Errors from Express middleware (`TenantMiddleware`) | An error middleware mounted after `listen()` — the only position from which it can see them |
+| Startup failures | `try/catch` around `boot()`, flushed before exit |
+| Uncaught exceptions / unhandled rejections | The SDK's default integrations |
+
+4xx are deliberately **not** reported. A 401 from `PlatformAdminGuard` or a 400
+from a bad body is the API working correctly; reporting them would bury the
+real ones.
+
+#### PII scrubbing — a Ley 1581 requirement, not a preference
+
+A shopper never consented to their data reaching a third-party processor, so
+nothing personal may leave the process. `sendDefaultPii: false` is set and is
+nowhere near sufficient on its own, so
+`services/api/src/observability/scrub.ts` is wired into every hook the SDK runs
+before serializing an envelope (`beforeSend`, `beforeSendTransaction`,
+`beforeBreadcrumb`).
+
+It reuses `services/api/src/privacy/redact.ts` rather than being a second,
+weaker redactor: the `PII_KEYS` list is **imported** from it, so a key added
+for the Ley 1581 anonymizer is respected here automatically. Its structure is
+borrowed too — key rules plus value rules for free-form JSON, explicit
+field-by-field decisions where the schema is known (`anonymizeAddress`'s
+approach, applied to the event envelope).
+
+Concretely:
+
+- **Request bodies are dropped whole**, never scrubbed. Every checkout body is
+  a name, a phone, a cédula and a street address.
+- **Headers are allowlisted** (`content-type`, `content-length`, `accept`,
+  `accept-encoding`, `user-agent`, `x-request-id`). `cookie` and
+  `authorization` are gone by construction, and so is `referer` — it carries
+  the previous URL's query string, which is where a password-reset token lives.
+- **Query strings are cut off** the URL; the path survives.
+- **`user`** keeps only the opaque id; email, username and IP are dropped.
+- **Values are scrubbed by shape** anywhere they appear — including inside
+  exception messages and breadcrumbs: emails, Colombian mobile numbers,
+  cédula/NIT/card-length digit runs, JWTs, bearer tokens, session-cookie pairs,
+  hex secrets, and this repo's own `iv:tag:ciphertext` credential format from
+  `payments/encryption.ts`.
+- **Whole values are dropped** under credential-ish or raw-body keys —
+  `credentials`, `privateKey`, `payload`, `webhookPayload`, `rawBody`, `card`,
+  and ~40 more — rather than walked. A gateway webhook payload has no shape we
+  designed and nothing inside it worth the risk.
+- **Stack-frame locals (`vars`) are deleted** unconditionally. Sentry does not
+  capture them by default, but `localVariablesIntegration` is one line away
+  from being enabled by someone chasing a hard bug, and it would attach the
+  failing handler's entire request body.
+- **Code identifiers are left alone.** File paths, function names, line numbers
+  and source context are untouched — a scrubber that mangles stack traces
+  produces reports nobody can act on.
+- **It fails closed.** If scrubbing throws, the event is dropped rather than
+  sent unscrubbed.
+
+Tenant ids are deliberately **kept**: an alert that cannot say whether one
+store is broken or all of them is not actionable, and a tenant uuid is not a
+person.
+
+> **The known gap, stated plainly.** A shopper's *name* interpolated into free
+> prose — `Error: no se pudo crear el pedido de Ana María Gómez` — survives.
+> There is no regex for "is a person". What closes the common path is
+> structural: bodies are dropped whole, and any name under any name-ish key is
+> blanked. `redact.ts` makes the same admission about itself. The operational
+> rule that follows: **do not put customer data in exception messages.**
+> `test/observability-scrub.test.ts` pins this gap as a test, so the claim
+> cannot quietly become false in either direction.
+
+### Queue health
+
+```
+GET /v1/observability/queues[?failures=N]
+```
+
+Behind `PlatformAdminGuard` — env allowlist **and** `User.isPlatformAdmin`
+**and** a verified email, the same three independent conditions as
+`/v1/platform/*`, failing closed when `PLATFORM_ADMIN_EMAILS` is unset. Queue
+state is cross-tenant platform data: the counts aggregate every merchant, and a
+failure message can name one merchant's order to another merchant's eyes.
+
+Returns, for each of the four repeatable workers, the BullMQ counts
+(`waiting`/`active`/`completed`/`failed`/`delayed`/`paused`), the registered
+repeat schedules, and the most recent failures with their error messages
+**passed through the same scrubber** as telemetry. It also reports whether
+Sentry is enabled, because "are we blind?" is the same question an operator
+opens this endpoint to ask.
+
+```bash
+curl -s -b "$OPERATOR_COOKIE" https://api.example.co/v1/observability/queues | jq
+```
+
+```json
+{
+  "generatedAt": "2026-08-19T10:41:02.994Z",
+  "redis": { "ok": true },
+  "sentry": { "enabled": false, "reason": "no-dsn" },
+  "queues": [
+    {
+      "name": "stock-reservation-expiry",
+      "meaning": "Releases stock held by unpaid checkouts. Stalled ⇒ sellable inventory stays locked.",
+      "counts": { "waiting": 0, "active": 0, "completed": 0, "failed": 1, "delayed": 0, "paused": 0 },
+      "schedules": [],
+      "failures": [
+        {
+          "id": "1",
+          "name": "sweep",
+          "attempts": 1,
+          "at": "2026-08-19T10:41:01.612Z",
+          "reason": "no se pudo expirar el pedido de [redacted:email] (cc [redacted:id-number])"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**What to look at first.** `schedules` being empty on a queue that should have
+one is the most diagnostic field here: it means the process that calls
+`start()` never ran, so the sweep is not slow — it is absent. A rising
+`waiting` with `active: 0` means the queue is being written to and nothing is
+consuming it. `redis.ok: false` means the endpoint could not reach Redis, in
+which case none of the counts mean anything.
+
+**Why a JSON endpoint and not `bull-board`.** Four reasons that compound:
+
+1. `bull-board` mounts its **own Express router**, and Nest guards protect Nest
+   routes. Anything mounted on the Express adapter sits outside them — this
+   codebase already knows that seam, which is why the rate limiters in
+   `main.ts` live there. Protecting cross-tenant queue state with a second,
+   hand-rolled copy of the platform-admin check is exactly the mistake to avoid.
+2. It is **read-write by default**: its buttons retry, promote and remove jobs.
+   "Retry" on `subscription-sweep` re-runs a job that *suspends tenants*.
+3. It is a UI, and there was no UI agent on this task. A JSON endpoint is
+   equally usable from `curl`, from a monitoring check, and from a test.
+4. New dependency, new attack surface — rendering job data (i.e. fragments of
+   gateway webhooks) as HTML inside an operator's authenticated browser session.
+
+What is lost: charts, and one-click retry. Neither was asked for. What is
+gained: every byte this endpoint emits is produced by code in this repo, is
+scrubbed, and is asserted on by a test.
+
+**Nothing starts on its own.** `QueueHealthService` opens no Redis connection
+in its constructor and implements no `OnModuleInit` — the same discipline the
+four workers follow, for the same reason: every test file in this repo builds
+`AppModule`, and a connection opened at construction would be opened in all of
+them. The first request past the guard opens it; `OnModuleDestroy` closes it.

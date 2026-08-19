@@ -107,13 +107,58 @@ tracked and being built.
 | Nightly `pg_dump` + weekly restore drill | 🚧 Scripts in `scripts/`; see `docs/operations.md` for what was actually executed |
 | Offsite copy of the backup (SPEC §10's R2) | ✅ `scripts/backup-upload.mjs` — verified by read-back, and the *downloaded* copy passed the full restore drill 15/15. Exercised against the compose MinIO; real R2 credentials are a deploy-time step |
 | Health endpoints | ✅ `/v1/health`, deliberately excluded from tenant resolution so it does not depend on DB/Redis |
-| Sentry alerts | ❌ Not wired |
-| BullMQ dashboards | ❌ Not wired |
+| Sentry alerts | 🚧 Wired, PII-scrubbed, and disabled-by-default — but **no DSN exists**, so no event has ever reached sentry.io. See `docs/operations.md` |
+| BullMQ dashboards | ✅ `GET /v1/observability/queues` behind `PlatformAdminGuard` — counts, repeat schedules and recent (scrubbed) failures for all four workers. `test/observability-queues.test.ts` drives it against a real Redis and a real failing worker |
 
 The cron itself is not set up, and nothing alerts on a failed nightly run — a
 backup script whose failures go to a logfile nobody reads is a backup nobody
 has. That is the honest state of §10, and it is a deployment task rather than a
 code one.
+
+### Note on the two observability rows
+
+**Sentry** is wired the way the rest of this list expects: initialized before
+Nest bootstraps so startup crashes are caught, configured entirely by
+environment, and a **clean no-op when `SENTRY_DSN` is unset** — with no DSN the
+SDK is not even imported. Tests refuse to initialize it twice over (`main.ts`
+only calls it from its real-boot branch, and `initSentry()` refuses outright
+when it sees `VITEST`/`NODE_ENV=test`), so no test can send anything anywhere.
+
+Everything is scrubbed on the way out, as a Ley 1581 obligation rather than a
+nicety: request bodies and webhook payloads dropped whole, headers allowlisted
+(no `cookie`, no `authorization`), query strings cut, `user` reduced to an
+opaque id, stack-frame locals deleted, and emails / Colombian phones /
+cédula-shaped digit runs / tokens / this repo's own encrypted-credential format
+replaced by shape wherever they appear — including inside exception messages
+and breadcrumbs. The `PII_KEYS` list is imported from `privacy/redact.ts`, not
+copied, so the anonymizer and the scrubber cannot drift apart. It fails closed:
+a scrubber that throws drops the event rather than sending it unscrubbed.
+`test/observability-scrub.test.ts` asserts each class on a realistic Colombian
+checkout crash, and `test/observability-sentry.test.ts` proves the SDK's own
+`beforeSend` pipeline applies it by initializing a real client against a stub
+transport.
+
+The row is 🚧 rather than ✅ for one reason, and it is not a code gap: **no
+Sentry project or DSN was available**, so nothing has been verified past the
+socket. Alert rules, DSN correctness and the Sentry project's own scrubbing
+settings are deployment steps. Do the first deploy against a throwaway project
+and read one event end to end.
+
+The known limit, kept honest: a shopper's *name* interpolated into free prose
+survives the scrubber. A name is not a shape. Bodies being dropped whole and
+name-ish keys being blanked close the common path; the operational rule is not
+to put customer data in exception messages.
+
+**Queue visibility** is a JSON endpoint rather than a mounted `bull-board`, and
+the reasoning is an access-control one: `bull-board` mounts its own Express
+router, which Nest guards do not cover — the same seam that put this repo's
+rate limiters on the Express adapter in `main.ts` — and its default
+affordances retry and remove jobs, one of which suspends tenants. Cross-tenant
+queue state is not the thing to protect with a second, hand-rolled copy of the
+platform-admin check. The endpoint reuses the exact `PlatformAdminGuard` class,
+is read-only by construction, and scrubs job failure messages with the same
+scrubber, since a `failedReason` is an error message written by a worker that
+processes orders.
 
 ## What this audit did not cover
 
