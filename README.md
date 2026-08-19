@@ -589,16 +589,26 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
   deduplicated on `(tenantId, externalId)`. Human handoff marks the conversation escalated and
   emails the merchant; the admin has a Conversaciones panel to read the transcript and resolve.
   Merchant-side Meta app configuration is a deploy-time step — see `docs/deploying-whatsapp.md`.
-- **P6 — Platform Admin + Hardening + Pilot** 🚧: **done** — platform-operator surface behind an
-  env allowlist that fails closed and additionally requires a verified email; custom domains with
-  DNS TXT verification gating Caddy's on-demand TLS; plan limits unified behind one 402
-  `PLAN_LIMIT_EXCEEDED` shape; an append-only payment ledger; audit entries on every order
-  transition; backups + a restore drill executed for real (15/15, including tenant isolation
-  biting on restored data); and a 100-concurrent-checkout load test that found and proved a
-  connection-pool starvation bug in checkout — all three scripts and their measured results are
-  in [`docs/operations.md`](docs/operations.md). **Outstanding** — Ley 1581 (Habeas Data)
-  compliance, subscription tracking + auto-suspend, the platform-admin UI and
-  Sentry/BullMQ observability.
+- **P6 — Platform Admin + Hardening + Pilot** 🚧: every engineering item is built; the pilot
+  itself is not, and cannot be from a development environment. **Built** — the platform-operator
+  console (tenant list, detail with GMV and AI usage, assign plan, suspend/reactivate, and
+  impersonation), behind two independent grants: an env allowlist that fails closed *and* a
+  `User.isPlatformAdmin` column no product code path writes. Custom domains with DNS TXT
+  verification gating Caddy's on-demand TLS. Plan limits behind one 402 `PLAN_LIMIT_EXCEEDED`
+  shape. An append-only payment ledger and audit entries on every order transition. Subscription
+  tracking with an auto-suspend sweep and a warning three days ahead. Full **Ley 1581 (Habeas
+  Data)** compliance — a privacy-policy generator built from the Decreto 1074 required contents,
+  customer anonymization that keeps the accounting and erases the person, a 12-month conversation
+  retention purge, and authorization at checkout with the *prueba de la autorización* the law
+  lets a shopper demand. Backups with an offsite copy verified by read-back, and a restore drill
+  executed against the **downloaded** copy (15/15, tenant isolation biting on restored data).
+  A 100-concurrent-checkout load test that found and proved a connection-pool starvation bug in
+  checkout. Sentry with a PII scrubber that reuses the anonymizer's own key list, and a guarded
+  queue-health endpoint. **Not done, and not doable from here** — the pilot with 2–3 real
+  merchants on custom domains, which needs real merchants, real gateway credentials and real DNS.
+  Everything it requires is enumerated in [`docs/deploying.md`](docs/deploying.md). No payment
+  gateway and no WhatsApp number has ever been exercised against live traffic; there is no CI/CD,
+  no staging environment, and nothing schedules the backups.
 
 ## Operations: backups, restore drill & load test
 
