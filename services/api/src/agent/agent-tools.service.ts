@@ -15,6 +15,7 @@ import { StorefrontProductsService } from '../storefront/products.service';
 import { OrderTrackingService } from '../checkout/order-tracking.service';
 import { MAILER, type Mailer } from '../mailer/mailer';
 import { sendHandoffEmail } from '../mailer/agent-emails';
+import { createHandoffConversation, isConfigured, type ChatwootConfig } from '../chatwoot/chatwoot.client';
 
 /**
  * Server-side execution of the AI sales agent's tools (docs/SPEC.md §7).
@@ -435,6 +436,30 @@ export class AgentToolsService {
         // the shopper is told, but nobody was actively told to look.
         console.warn('[agent] escalated with no merchant contact email', { tenantId: ctx.tenantId });
       }
+
+      // Chatwoot, when the tenant has connected one — a SECOND notifier beside
+      // the email, not a replacement (SPEC.md §7). Fire-and-forget for the
+      // same reason: the conversation is already marked escalated and the
+      // merchant already has an email, so a Chatwoot outage must never become
+      // a shopper being told nobody can help them.
+      const chatwoot = readChatwootConfig(tenant.settings);
+      if (isConfigured(chatwoot)) {
+        void createHandoffConversation(chatwoot, {
+          // The WhatsApp number when we have one, so a returning shopper lands
+          // in their existing Chatwoot thread; the conversation id otherwise,
+          // which at least keeps one anonymous visitor's escalations together.
+          sourceId: conversation.shopperRef ?? conversation.id,
+          contactName: conversation.shopperRef ?? 'Cliente del chat web',
+          reason: parsed.data.reason,
+          transcriptSummary: parsed.data.transcript_summary,
+          conversationUrl: `${adminUrl()}/conversaciones?c=${conversation.id}`,
+        }).catch((err: unknown) => {
+          console.error('[agent] chatwoot handoff failed', {
+            conversationId: conversation.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
     }
 
     return {
@@ -448,6 +473,27 @@ export class AgentToolsService {
       },
     };
   }
+}
+
+/** The tenant's Chatwoot connection, if any. Read defensively from the
+ * loosely-typed `settings` blob: an unconfigured or half-configured tenant is
+ * the NORMAL case (most stores will never connect one), so a missing field
+ * must yield "not configured" rather than an error. */
+function readChatwootConfig(settings: unknown): Partial<ChatwootConfig> {
+  const raw = asRecord(asRecord(settings).chatwoot);
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  return {
+    baseUrl: str(raw.baseUrl),
+    apiToken: str(raw.apiToken),
+    accountId: str(raw.accountId),
+    inboxId: str(raw.inboxId),
+  };
+}
+
+/** Same `ADMIN_URL` fallback every merchant-facing link in this codebase
+ * uses. */
+function adminUrl(): string {
+  return (process.env.ADMIN_URL ?? 'http://admin.ventia.localhost').replace(/\/+$/, '');
 }
 
 /** Same defensive read of the loosely-typed `settings` JSON as everywhere else
