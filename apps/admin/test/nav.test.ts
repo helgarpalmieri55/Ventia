@@ -2,15 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { navItems } from '../lib/nav';
 
 describe('navItems', () => {
-  it('gives owners all 9 items in order, with es-CO labels', () => {
+  it('gives owners all 10 items in order, with es-CO labels', () => {
     const items = navItems('owner');
 
-    expect(items).toHaveLength(9);
+    expect(items).toHaveLength(10);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
       'Importar CSV',
       'Pedidos',
+      'Clientes',
       'Pagos por revisar',
       'Conversaciones',
       'Equipo',
@@ -19,15 +20,16 @@ describe('navItems', () => {
     ]);
   });
 
-  it('gives staff only the 6 catalog items', () => {
+  it('gives staff only the 7 catalog items', () => {
     const items = navItems('staff');
 
-    expect(items).toHaveLength(6);
+    expect(items).toHaveLength(7);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
       'Importar CSV',
       'Pedidos',
+      'Clientes',
       'Pagos por revisar',
       'Conversaciones',
     ]);
@@ -54,6 +56,15 @@ describe('navItems', () => {
   it('gives both owner and staff the /pedidos item (order fulfillment is shared, not owner-only)', () => {
     expect(navItems('owner').some((item) => item.href === '/pedidos')).toBe(true);
     expect(navItems('staff').some((item) => item.href === '/pedidos')).toBe(true);
+  });
+
+  it("gives both roles /clientes: the list mirrors the API's owner-or-staff guard", () => {
+    // PrivacyController has no class-level @Roles(); only the irreversible
+    // supresión handler is @Roles('owner'), and the page hides that button
+    // from staff. Hiding the whole section from staff would take away the
+    // customer lookup they need for fulfilment.
+    expect(navItems('owner').some((item) => item.href === '/clientes')).toBe(true);
+    expect(navItems('staff').some((item) => item.href === '/clientes')).toBe(true);
   });
 
   it('every item has a distinct href', () => {

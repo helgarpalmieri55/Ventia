@@ -12,6 +12,7 @@ import { PaymentAlertsModule } from './payment-alerts/payment-alerts.module';
 import { SettingsModule } from './settings/settings.module';
 import { StaffModule } from './staff/staff.module';
 import { PlatformModule } from './platform/platform.module';
+import { PrivacyModule } from './privacy/privacy.module';
 import { StorefrontModule } from './storefront/storefront.module';
 import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { RedisModule, REDIS_CLIENT } from './common/redis.module';
@@ -38,6 +39,7 @@ export { REDIS_CLIENT };
     SettingsModule,
     StaffModule,
     PlatformModule,
+    PrivacyModule,
     StorefrontModule,
     WhatsAppModule,
   ],

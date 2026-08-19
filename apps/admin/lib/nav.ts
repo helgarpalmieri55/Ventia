@@ -1,4 +1,5 @@
 import { CONVERSATIONS_PATH } from './conversations-api';
+import { CUSTOMERS_PATH } from './customers-api';
 import { ALERTS_PATH } from './payment-alerts-api';
 
 export type Role = 'owner' | 'staff';
@@ -15,6 +16,13 @@ const CATALOG_ITEMS: NavItem[] = [
   { href: '/categorias', label: 'Categorías' },
   { href: '/importar', label: 'Importar CSV' },
   { href: '/pedidos', label: 'Pedidos' },
+  // Both roles, mirroring the API: PrivacyController sits behind
+  // AdminSessionGuard with no class-level @Roles(), like the orders
+  // controller — looking a shopper up by phone to answer "¿dónde está mi
+  // pedido?" is fulfilment work. The IRREVERSIBLE action on this page (Ley
+  // 1581 supresión) is owner-only, enforced server-side by @Roles('owner') on
+  // that one handler and hidden from staff by the page itself.
+  { href: CUSTOMERS_PATH, label: 'Clientes' },
   // Both roles, mirroring the API: payment-alerts.controller.ts sits behind
   // AdminSessionGuard with no @Roles(), exactly like the orders controller,
   // because chasing a shopper who was charged for a cancelled order is

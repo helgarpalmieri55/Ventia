@@ -12,3 +12,4 @@ export { generateOrderReference, isOrderReference, ORDER_REFERENCE_PREFIX } from
 export * from './agent-tools.js';
 export * from './whatsapp-schemas.js';
 export * from './platform-schemas.js';
+export * from './privacy-schemas.js';

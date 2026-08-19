@@ -27,6 +27,10 @@ const MESSAGES: Record<string, string> = {
   ONLINE_PAYMENT_PENDING:
     'Este pedido se paga en línea y su pago aún no se ha confirmado. Se confirmará automáticamente cuando la pasarela reporte el pago.',
   ORDER_NOT_FOUND: 'No encontramos este pedido.',
+  // `PrivacyController` answers 404 (never 403) for a customer id belonging to
+  // another tenant, so this message must read the same for "does not exist"
+  // and "is not yours" — it is the copy for a no-existence-oracle response.
+  CUSTOMER_NOT_FOUND: 'No encontramos este cliente. Actualiza la página.',
   INVALID_UPLOAD: 'El archivo subido no es válido.',
   CSV_TOO_LARGE: 'El archivo CSV supera el tamaño permitido.',
   CSV_INVALID: 'El archivo CSV tiene un formato inválido.',
