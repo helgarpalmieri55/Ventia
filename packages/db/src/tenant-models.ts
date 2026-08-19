@@ -4,7 +4,7 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   'TenantDomain', 'TenantLimits', 'Category', 'Product', 'ProductCategory',
   'ProductVariant', 'ProductImage', 'InventoryMovement', 'Cart', 'CartItem',
   'Customer', 'Order', 'OrderItem', 'OrderEvent', 'Payment', 'Conversation',
-  'Message', 'AgentUsage', 'TenantContent', 'NotificationLog', 'Subscription',
+  'Message', 'AgentUsage', 'TenantContent', 'NotificationLog',
   'Shipment', 'Invoice', 'StaffInvite',
   // READ-ONLY for tenants. `ventia_app` holds SELECT and nothing else on this
   // table, and its RLS policy is `FOR SELECT` only (see
@@ -40,4 +40,14 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   // real caller today reads through `platformDb` anyway, because the
   // connection flow has to decrypt with the platform key.
   'WhatsAppNumber',
+  // NOT LISTED, deliberately: `Subscription`. It carries a `tenantId` and so
+  // looks like it belongs here, but it is platform-owned — what Ventia charges
+  // this merchant and until when they have paid, authored only by a Ventia
+  // operator (see 20260819170000_subscription_platform_owned for the full
+  // argument). `ventia_app` has ALL PRIVILEGES REVOKED on it, exactly like
+  // `User`/`Membership`/`AuditLog`, so a `tenantDb(t).subscription.*` call
+  // fails with `permission denied for table Subscription` (SQLSTATE 42501)
+  // rather than quietly working. That is the design: `paidUntil` is what the
+  // auto-suspend sweep enforces against, and a merchant-reachable write to it
+  // would be a merchant granting themselves free service.
 ]);

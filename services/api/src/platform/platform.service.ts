@@ -10,7 +10,8 @@ import {
 import { REDIS_CLIENT } from '../common/redis.module';
 import { currentYearMonth } from '../agent/agent-budget.service';
 import type { PlatformOperatorContext } from './platform-operator.decorator';
-import { writePlatformAudit } from './platform-audit';
+import { SYSTEM_OPERATOR, writePlatformAudit, type PlatformActor } from './platform-audit';
+import { subscriptionWindow, type SubscriptionDueState } from './subscription-window';
 
 /**
  * ## Why every query here uses `platformDb`, when every other service uses `tenantDb`
@@ -105,9 +106,12 @@ export class PlatformService {
       include: {
         limits: true,
         domains: { orderBy: [{ isPrimary: 'desc' }, { domain: 'asc' }] },
-        // v1 subscription tracking is manual (SPEC §6 M9); the newest row is
-        // the current one.
-        subscriptions: { orderBy: { id: 'desc' }, take: 1 },
+        // v1 subscription tracking is manual (SPEC §6 M9). Exactly one row per
+        // tenant — `Subscription.tenantId` is unique — so there is no "which
+        // one is current" question to get wrong. This used to take the newest
+        // of many ordered by `id DESC`, which, `id` being a random v4 UUID,
+        // was no order at all.
+        subscription: true,
       },
     });
     if (!tenant) throw new HttpException({ error: 'TENANT_NOT_FOUND' }, 404);
@@ -119,7 +123,7 @@ export class PlatformService {
       platformDb.product.count({ where: { tenantId } }),
     ]);
 
-    const subscription = tenant.subscriptions[0] ?? null;
+    const subscription = tenant.subscription;
 
     return {
       id: tenant.id,
@@ -154,14 +158,7 @@ export class PlatformService {
        * not have to diff six numbers by eye. Re-assigning the same plan is
        * the fix. */
       limitsMatchPlan: this.limitsMatchPlan(tenant.plan, tenant.limits),
-      subscription: subscription
-        ? {
-            plan: subscription.plan,
-            priceCents: subscription.priceCents,
-            paidUntil: subscription.paidUntil,
-            notes: subscription.notes,
-          }
-        : null,
+      subscription: subscription ? subscriptionView(subscription) : null,
       counts: { staff: staffCount, products: productCount },
       gmv: gmv.get(tenantId) ?? EMPTY_GMV,
       ai: this.aiView(usage.get(tenantId), tenant.limits?.aiMessagesMonth ?? 0),
@@ -214,6 +211,36 @@ export class PlatformService {
 
   reactivate(tenantId: string, note: string | undefined, operator: PlatformOperatorContext) {
     return this.setStatus(tenantId, 'live', operator, note ? { note } : {});
+  }
+
+  /**
+   * The auto-suspend sweep's entry point (SPEC §6 M9 — "auto-suspend N days
+   * past due"). Called by `subscription-sweep.worker.ts`, never by a route.
+   *
+   * It goes through the SAME `setStatus` a human operator's suspend button
+   * does, deliberately and not merely for tidiness: `setStatus` is what evicts
+   * `DomainResolver`'s Redis entries for every host pointing at the tenant,
+   * which is the only reason a suspension reaches the storefront in under the
+   * 60 s SPEC §6 M9 requires instead of after the cache TTL. A second,
+   * job-specific suspend path would have been a second place for that eviction
+   * to be forgotten — and it would have been forgotten silently, because the
+   * database row would look correctly suspended while the store kept selling.
+   *
+   * The audit row is written by `setStatus` too, with `actorUserId: null` and
+   * `data.actorEmail: 'sistema@ventia'` (see `SYSTEM_OPERATOR`), plus the
+   * numbers that justify it: which date was missed and how many days of grace
+   * had elapsed. "Why did my store go down" stays answerable from one query
+   * over `AuditLog`, whether a person or the job took it down.
+   */
+  suspendForNonPayment(tenantId: string, details: { paidUntil: Date; graceDays: number }) {
+    return this.setStatus(tenantId, 'suspended', SYSTEM_OPERATOR, {
+      reason:
+        `Suspensión automática por falta de pago: la suscripción venció el ` +
+        `${details.paidUntil.toISOString()} y superó los ${details.graceDays} días de gracia.`,
+      automated: true,
+      paidUntil: details.paidUntil.toISOString(),
+      graceDays: details.graceDays,
+    });
   }
 
   /**
@@ -270,7 +297,7 @@ export class PlatformService {
   private async setStatus(
     tenantId: string,
     status: TenantStatus,
-    operator: PlatformOperatorContext,
+    operator: PlatformActor,
     extra: Record<string, unknown>,
   ) {
     const tenant = await platformDb.tenant.findUnique({
@@ -397,6 +424,51 @@ export class PlatformService {
       limits.whatsappChannel === expected.whatsappChannel
     );
   }
+}
+
+/** The `Subscription` columns any caller of {@link subscriptionView} needs.
+ * Structural, so both a full Prisma row and a narrowed `select` satisfy it. */
+export interface SubscriptionRow {
+  plan: PlanId;
+  priceCents: number;
+  paidUntil: Date | null;
+  notes: string | null;
+  updatedAt: Date;
+}
+
+/** What a subscription looks like over the wire, on the tenant detail and on
+ * the record/update response alike — ONE mapper, so those two can never
+ * disagree about what "overdue" means.
+ *
+ * The four stored columns, plus the derived window: `dueState`, `suspendsOn`
+ * and `daysPastDue` are computed from `paidUntil` and the deployment's grace
+ * setting at read time, never stored. Storing them would mean a row that says
+ * "al día" the day after it stopped being true.
+ *
+ * The derivation is the SAME function the sweep acts on
+ * (`subscription-window.ts`), which is the point: the date an operator is
+ * shown here is the date the job will actually suspend on. */
+export function subscriptionView(row: SubscriptionRow, now: Date = new Date()) {
+  const window = subscriptionWindow(row.paidUntil, now);
+  return {
+    plan: row.plan,
+    priceCents: row.priceCents,
+    paidUntil: row.paidUntil,
+    notes: row.notes,
+    updatedAt: row.updatedAt,
+    /** See `SubscriptionDueState`. */
+    dueState: window.state as SubscriptionDueState,
+    /** When the auto-suspend sweep will take this store offline if nothing is
+     * paid — null when no `paidUntil` is on record, which is also the case in
+     * which the sweep does nothing at all. */
+    suspendsOn: window.suspendsOn,
+    /** When the warning email goes out (N-3). */
+    warnsOn: window.warnsOn,
+    daysPastDue: window.daysPastDue,
+    /** Echoed so a UI does not have to know the deployment's setting to
+     * explain the dates above. */
+    graceDays: window.graceDays,
+  };
 }
 
 /** Exported because it appears in `PlatformController`'s inferred return

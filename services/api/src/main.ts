@@ -11,6 +11,7 @@ import { clientIp, createRateLimiter, RATE_LIMITS } from './common/rate-limit';
 import { ReconciliationWorker } from './payments/reconciliation.worker';
 import { StockReservationWorker } from './payments/stock-reservation.worker';
 import { ConversationRetentionWorker } from './agent/conversation-retention.worker';
+import { SubscriptionSweepWorker } from './platform/subscription-sweep.worker';
 
 export async function createApp(): Promise<INestApplication> {
   // bodyParser: false — better-auth's toNodeHandler needs the raw (unparsed)
@@ -214,5 +215,13 @@ if (require.main === module) {
     // most for THIS worker, since an accidentally-auto-started one would be
     // deleting rows in the background of every test run in this repo.
     await app.get(ConversationRetentionWorker).start();
+    // Starts the subscription auto-suspend sweep (SPEC §6 M9) — a fourth
+    // sibling, in this branch for the identical reason, and the one where an
+    // accidental auto-start would be worst: this job SUSPENDS TENANTS, so a
+    // lifecycle hook would have it taking stores offline in the background of
+    // every test run and inside any process that merely built the module
+    // graph. SubscriptionSweepWorker implements no Nest lifecycle hook, so
+    // registering it in PlatformModule starts nothing on its own.
+    await app.get(SubscriptionSweepWorker).start();
   })();
 }

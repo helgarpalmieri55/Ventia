@@ -2,6 +2,33 @@ import { platformDb, Prisma } from '@ventia/db';
 import type { PlatformOperatorContext } from './platform-operator.decorator';
 
 /**
+ * The actor on a platform action that NO HUMAN TOOK — today, only the
+ * subscription auto-suspend sweep (`subscription-sweep.worker.ts`).
+ *
+ * `userId: null` rather than a sentinel UUID, and that is the whole point of
+ * the type: `AuditLog.actorUserId` is nullable, so "nobody" is representable
+ * honestly. Inventing a `00000000-…` user id would put a row in the audit log
+ * that reads like a person did this, and the first question anybody asks of a
+ * suspension is which authority ordered it. `actorEmail` carries the same
+ * answer in the JSON payload, where a human reading the row will see it.
+ */
+export const SYSTEM_OPERATOR = {
+  userId: null,
+  email: 'sistema@ventia',
+} as const;
+
+/**
+ * Who a platform audit row is attributed to: a real operator behind
+ * `PlatformAdminGuard`, or the system itself.
+ *
+ * Deliberately a union rather than a widened `PlatformOperatorContext` with a
+ * nullable `userId`: every HTTP handler still gets the narrow, non-null
+ * operator context (an authenticated request always has a user), and only the
+ * few functions that both a human and a job can call accept the union.
+ */
+export type PlatformActor = PlatformOperatorContext | typeof SYSTEM_OPERATOR;
+
+/**
  * Audit writes for platform-operator actions. The sibling of
  * `../catalog/audit.ts#writeAudit`, with the same two properties: it writes
  * through `platformDb` (AuditLog is RLS-exempt system bookkeeping, not a
@@ -23,7 +50,7 @@ import type { PlatformOperatorContext } from './platform-operator.decorator';
  * the authority and it can change between the action and the investigation.
  */
 export async function writePlatformAudit(
-  operator: PlatformOperatorContext,
+  operator: PlatformActor,
   action: `platform.${string}`,
   tenantId: string,
   data?: Record<string, unknown>,

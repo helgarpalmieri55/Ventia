@@ -105,7 +105,7 @@ model Tenant {
   orders        Order[]
   conversations Conversation[]
   contents      TenantContent[]
-  subscriptions Subscription[]
+  subscription  Subscription?
   whatsappNumbers WhatsAppNumber[]
 }
 
@@ -1008,16 +1008,37 @@ model NotificationLog {
   createdAt      DateTime @default(now())
 }
 
+/// Ventia's commercial relationship with ONE merchant (SPEC §6 M9, §8).
+///
+/// Platform-owned, not tenant-owned: `ventia_app` has no privilege on this
+/// table at all (see migration 20260819170000_subscription_platform_owned),
+/// so it is reachable only through `platformDb` — the operator API and the
+/// auto-suspend sweep. A merchant never reads or writes their own price or
+/// paid-until date.
+///
+/// EXACTLY ONE row per tenant (`tenantId` is unique): this is current state,
+/// not a ledger. "v1 manual" means an operator records that a merchant paid
+/// and moves `paidUntil` forward; the HISTORY of those moves lives in
+/// `AuditLog` (`platform.tenant.subscription_recorded`), which already
+/// records who changed what, when, from which value — everything a payment
+/// history would, on the table built for exactly that. A second row per
+/// tenant would instead force every reader to decide which one governs, and
+/// the auto-suspend sweep is one of those readers.
 model Subscription {
   id         String    @id @default(uuid()) @db.Uuid
-  tenantId   String    @db.Uuid
+  tenantId   String    @unique @db.Uuid
   plan       Plan
   priceCents Int
+  /// The instant the paid period ends. NULLABLE, and the null case is load-
+  /// bearing: it means "recorded, no payment date on file", which the sweep
+  /// treats as not-delinquent. See subscription-sweep.worker.ts.
   paidUntil  DateTime?
   notes      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
   tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  @@index([tenantId])
+  @@index([paidUntil])
 }
 
 // ---- Staff invites ----

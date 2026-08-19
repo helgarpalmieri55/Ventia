@@ -101,3 +101,86 @@ export type PlatformTenantListQuery = z.infer<typeof platformTenantListQuerySche
 export type AssignPlanInput = z.infer<typeof assignPlanSchema>;
 export type SuspendTenantInput = z.infer<typeof suspendTenantSchema>;
 export type ReactivateTenantInput = z.infer<typeof reactivateTenantSchema>;
+
+// ---------------------------------------------------------------------------
+// Subscription tracking, v1 manual (SPEC §6 M9: "plan, price, paid-until date,
+// notes")
+// ---------------------------------------------------------------------------
+
+/**
+ * `paidUntil` — the instant a merchant's paid period ends.
+ *
+ * Accepts two shapes and NOTHING else, deliberately:
+ *
+ *   - `YYYY-MM-DD` — what an operator actually types, and what a date input
+ *     submits. Interpreted as the END of that day **in Colombia** (UTC-05:00,
+ *     which has no DST), not as midnight UTC. The difference is five hours of
+ *     someone's grace period, and this is the direction that errs toward the
+ *     merchant: "pagó hasta el 31 de agosto" means the 31st is theirs.
+ *   - A full ISO-8601 timestamp, for a caller that already has an instant.
+ *
+ * `z.coerce.date()` is deliberately NOT used. It accepts a bare number (`0`
+ * becomes 1970, i.e. instantly overdue, i.e. a store taken offline by a
+ * malformed field) and a pile of implementation-defined string formats that
+ * differ between JS engines. The value on this field decides whether a
+ * storefront stays up; it is worth being strict about.
+ *
+ * The year bound catches the gross typo (`2026` mistyped as `2016`) that would
+ * otherwise read as "years overdue" and suspend a paying store. It cannot
+ * catch a plausible-but-wrong date — nothing can — which is why the API echoes
+ * `overdue` / `suspendsOn` back in the response, so the operator sees the
+ * consequence at the moment they record it rather than the next morning.
+ */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+/** Colombia is UTC-05:00 year round (no daylight saving). */
+export const COLOMBIA_UTC_OFFSET = '-05:00';
+
+/** True for a `YYYY-MM-DD` string that names a day that actually exists.
+ * `new Date('2026-02-31T…')` does not fail — it rolls forward to 3 March, so
+ * a typo'd date would be silently accepted as a different (later) one. */
+function isRealCalendarDay(v: string): boolean {
+  const parsed = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === v;
+}
+
+export const paidUntilSchema = z
+  .string()
+  .trim()
+  .refine((v) => (DATE_ONLY.test(v) ? isRealCalendarDay(v) : ISO_INSTANT.test(v)), {
+    message: 'Usa una fecha YYYY-MM-DD o una marca de tiempo ISO-8601',
+  })
+  .transform((v) => new Date(DATE_ONLY.test(v) ? `${v}T23:59:59.999${COLOMBIA_UTC_OFFSET}` : v))
+  .refine((d) => !Number.isNaN(d.getTime()), { message: 'Fecha inválida' })
+  .refine((d) => d.getUTCFullYear() >= 2020 && d.getUTCFullYear() <= 2100, {
+    message: 'La fecha está fuera de rango (2020-2100)',
+  });
+
+/**
+ * `PUT /v1/platform/tenants/:id/subscription` body — the whole subscription,
+ * every time.
+ *
+ * PUT with a complete body rather than PATCH with a partial one, because there
+ * is exactly one subscription per tenant and the operator UI loads it before
+ * editing it. A partial update whose `paidUntil` was omitted-by-accident
+ * versus omitted-on-purpose is indistinguishable on the wire, and on this
+ * field that ambiguity is the difference between a store staying up and going
+ * down.
+ *
+ * `paidUntil` is nullable rather than optional-and-absent: `null` is a
+ * MEANINGFUL, recordable state ("we have their plan and price on file, nobody
+ * has paid yet"), and the auto-suspend sweep treats it as not-delinquent. See
+ * `subscription-sweep.worker.ts` for why that is the only safe reading.
+ */
+export const recordSubscriptionSchema = z.object({
+  plan: planIdSchema,
+  /** COP cents, like every other money column in this schema. 0 is allowed —
+   * a pilot merchant or a comped account is a real thing an operator records,
+   * and forcing them to invent a price would be worse data. */
+  priceCents: z.number().int().min(0).max(1_000_000_000),
+  paidUntil: paidUntilSchema.nullable(),
+  /** Free text: "pago por transferencia", "factura 0142", "piloto sin cobro". */
+  notes: z.string().trim().max(1000).nullable().default(null),
+});
+
+export type RecordSubscriptionInput = z.infer<typeof recordSubscriptionSchema>;

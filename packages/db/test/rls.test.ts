@@ -397,3 +397,80 @@ describe('Payment ledger isolation and append-only privileges', () => {
     expect(rows).toHaveLength(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Subscription (20260819170000_subscription_platform_owned)
+// ---------------------------------------------------------------------------
+describe('Subscription is platform-owned, not tenant-owned', () => {
+  beforeAll(async () => {
+    // Seeded as the table owner — which is also exactly how production writes
+    // these rows: `SubscriptionService` and the auto-suspend sweep both run on
+    // `platformDb`, because the tenant role has no privilege here at all.
+    for (const [tenantId, cents] of [
+      [T1, 99_900_00],
+      [T2, 299_900_00],
+    ] as const) {
+      await prisma.subscription.create({
+        data: { tenantId, plan: 'pro', priceCents: cents, paidUntil: new Date('2026-09-30T04:59:59.999Z') },
+      });
+    }
+  });
+
+  it('ventia_app cannot read a subscription — not even its own', async () => {
+    // The difference from every other tenant table in this file, and the whole
+    // point of the migration: this is not "tenant 1 sees only tenant 1's row",
+    // it is "a merchant-scoped connection sees nothing, because what Ventia
+    // charges a merchant is not the merchant's data to read". Getting this
+    // wrong in the permissive direction leaks one merchant's negotiated price
+    // to another.
+    await expect(
+      asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT "priceCents" FROM "Subscription"`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('ventia_app cannot move its own paidUntil — the reason the grant is gone', async () => {
+    // `paidUntil` is what the auto-suspend sweep enforces against. Under the
+    // old tenant-table grant, any tenant-scoped write path that could be
+    // tricked into touching this table would have been a merchant granting
+    // themselves free service forever.
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`UPDATE "Subscription" SET "paidUntil" = now() + interval '100 years'`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('ventia_app cannot insert or delete a subscription', async () => {
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`
+        INSERT INTO "Subscription" ("id", "tenantId", "plan", "priceCents", "updatedAt")
+        VALUES (gen_random_uuid(), ${T1}::uuid, 'premium', 0, now())
+      `),
+    ).rejects.toThrow(/permission denied/i);
+
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`DELETE FROM "Subscription"`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('the RLS policy is still there, as the second control behind the grant', async () => {
+    // Belt and braces: if a future `GRANT ... ON ALL TABLES IN SCHEMA public`
+    // ever re-grants `ventia_app` by accident — which is precisely how this
+    // table ended up classified as tenant-owned in the first place — the
+    // policy still bounds the damage to one tenant's own row instead of the
+    // whole platform's price list.
+    const rows = await prisma.$queryRaw<{ relrowsecurity: boolean; policies: bigint }[]>`
+      SELECT c.relrowsecurity,
+             (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies
+        FROM pg_class c WHERE c.relname = 'Subscription'
+    `;
+    expect(rows[0]!.relrowsecurity).toBe(true);
+    expect(Number(rows[0]!.policies)).toBeGreaterThan(0);
+  });
+
+  it('one subscription per tenant, enforced by the database', async () => {
+    // The sweep reads this table to decide whether to take a store offline.
+    // "Whichever row sorts last" is not an acceptable answer to that question.
+    await expect(
+      prisma.subscription.create({ data: { tenantId: T1, plan: 'basico', priceCents: 1 } }),
+    ).rejects.toThrow(/[Uu]nique constraint/);
+  });
+});

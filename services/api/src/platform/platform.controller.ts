@@ -1,15 +1,17 @@
-import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
 import {
   assignPlanSchema,
   platformTenantIdSchema,
   platformTenantListQuerySchema,
   reactivateTenantSchema,
+  recordSubscriptionSchema,
   suspendTenantSchema,
 } from '@ventia/core';
 import { parseOr400 } from '../catalog/parse';
 import { PlatformAdminGuard } from './platform-admin.guard';
 import { PlatformOperator, type PlatformOperatorContext } from './platform-operator.decorator';
 import { PlatformService } from './platform.service';
+import { SubscriptionService } from './subscription.service';
 
 /**
  * Ventia's own back office (docs/SPEC.md §6 M9, phase P6): the operator's
@@ -41,7 +43,10 @@ import { PlatformService } from './platform.service';
 @UseGuards(PlatformAdminGuard)
 export class PlatformController {
   // Explicit @Inject: esbuild does not emit `design:paramtypes`.
-  constructor(@Inject(PlatformService) private readonly platform: PlatformService) {}
+  constructor(
+    @Inject(PlatformService) private readonly platform: PlatformService,
+    @Inject(SubscriptionService) private readonly subscriptions: SubscriptionService,
+  ) {}
 
   /** List + search + filter + page. Each row carries plan, status, GMV and
    * month-to-date AI usage, so the operator's first screen answers "who is
@@ -98,5 +103,38 @@ export class PlatformController {
     // "undo the suspension", unlike suspending, which requires a reason.
     const { note } = parseOr400(reactivateTenantSchema, body ?? {});
     return this.platform.reactivate(tenantId, note, operator);
+  }
+
+  // ---- subscription tracking (SPEC §6 M9, v1 manual) --------------------
+
+  /** The subscription panel on its own. 200 with `subscription: null` when
+   * nothing has been recorded — see `SubscriptionService.get`. */
+  @Get('tenants/:id/subscription')
+  getSubscription(@Param('id') id: string) {
+    return this.subscriptions.get(parseOr400(platformTenantIdSchema, id));
+  }
+
+  /**
+   * Record or update the tenant's subscription — plan, price, paid-until,
+   * notes (SPEC §6 M9). There is no payment processor behind this: an operator
+   * saw the transfer land and is writing down until when the merchant is paid
+   * up. That date is what the auto-suspend sweep enforces.
+   *
+   * PUT rather than PATCH, and rather than POST: exactly one subscription
+   * exists per tenant, the body describes all of it, and sending the same body
+   * twice leaves the same state — which is the definition of PUT and a
+   * property worth having on a surface where a retried request must not create
+   * a second billing record. See `recordSubscriptionSchema` for why a partial
+   * update would be dangerous on this particular resource.
+   */
+  @Put('tenants/:id/subscription')
+  recordSubscription(
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @PlatformOperator() operator: PlatformOperatorContext,
+  ) {
+    const tenantId = parseOr400(platformTenantIdSchema, id);
+    const input = parseOr400(recordSubscriptionSchema, body);
+    return this.subscriptions.record(tenantId, input, operator);
   }
 }
