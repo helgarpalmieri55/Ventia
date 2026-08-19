@@ -3,6 +3,7 @@ import { platformDb } from '@ventia/db';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.decorator';
 import { writeAudit } from '../catalog/audit';
+import { assertPlanFeature, isPlanFeatureEnabled } from '../common/plan-limits';
 import { CustomDomainsService, normalizeDomain } from './custom-domains.service';
 
 /**
@@ -50,13 +51,13 @@ export class CustomDomainsController {
 
   @Get()
   async list(@AdminSession() session: AdminSessionContext) {
-    const [items, limits] = await Promise.all([
+    const [items, customDomainEnabled] = await Promise.all([
       this.domains.listForTenant(session.tenantId),
-      platformDb.tenantLimits.findUnique({ where: { tenantId: session.tenantId } }),
+      isPlanFeatureEnabled(session.tenantId, 'customDomain'),
     ]);
     return {
       items,
-      customDomainEnabled: limits?.customDomain ?? false,
+      customDomainEnabled,
       // What the merchant must publish. Returned alongside so the UI can show
       // the exact record rather than describing it in prose — a mistyped host
       // is the most common reason verification never completes.
@@ -72,10 +73,11 @@ export class CustomDomainsController {
       throw new HttpException({ error: 'VALIDATION_FAILED', details: { domain: 'dominio inválido' } }, 400);
     }
 
-    const limits = await platformDb.tenantLimits.findUnique({ where: { tenantId: session.tenantId } });
-    if (!limits?.customDomain) {
-      throw new HttpException({ error: 'PLAN_LIMIT_EXCEEDED', details: { feature: 'customDomain' } }, 402);
-    }
+    // The shared gate rather than a hand-rolled 402: `common/plan-limits.ts`
+    // is the single definition of this error's shape, so the admin UI renders
+    // one upgrade prompt for every entitlement. It also fails closed on an
+    // unprovisioned tenant, which is the posture every boolean feature uses.
+    await assertPlanFeature(session.tenantId, 'customDomain');
 
     // Claimed by someone else — including by this same tenant, in which case
     // the honest answer is still "already registered". A 409 rather than a

@@ -3,6 +3,7 @@ import { platformDb, tenantDb } from '@ventia/db';
 import { getWhatsAppProvider, type InboundMessage, type WhatsAppConfig } from '@ventia/whatsapp';
 import { AgentService } from '../agent/agent.service';
 import { renderForWhatsApp } from '../agent/whatsapp-render';
+import { isPlanFeatureEnabled } from '../common/plan-limits';
 import { WhatsAppNumbersService } from './whatsapp-numbers.service';
 import { tenantStorefrontBaseUrl } from '../tenants/tenant-public-url';
 
@@ -56,8 +57,7 @@ export class WhatsAppInboundService {
       // number registered and Meta keeps delivering to it; without this check
       // it would keep answering — and keep spending AI budget — through a
       // channel it no longer pays for.
-      const limits = await platformDb.tenantLimits.findUnique({ where: { tenantId } });
-      if (!limits?.whatsappChannel) return;
+      if (!(await isPlanFeatureEnabled(tenantId, 'whatsappChannel'))) return;
 
       const conversationId = await this.resolveConversation(tenantId, message.from);
       const reply = await this.agent.respond({

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { platformDb } from '@ventia/db';
+import { isPlanFeatureEnabledOn, loadPlanLimits } from '../common/plan-limits';
 
 /**
  * The per-tenant monthly AI budget (docs/SPEC.md §7): "at 90% → merchant
@@ -80,7 +81,10 @@ export class AgentBudgetService {
   async check(tenantId: string, now: Date = new Date()): Promise<BudgetStatus> {
     const month = currentYearMonth(now);
     const [limits, usage] = await Promise.all([
-      platformDb.tenantLimits.findUnique({ where: { tenantId } }),
+      // Via common/plan-limits.ts so this — the reference implementation of
+      // the "no row means zero" posture — reads the plan row through the same
+      // helper as every other limit rather than alongside it.
+      loadPlanLimits(tenantId),
       platformDb.agentUsage.findUnique({ where: { tenantId_month: { tenantId, month } } }),
     ]);
 
@@ -99,7 +103,7 @@ export class AgentBudgetService {
       warning: limit > 0 && used >= Math.floor(limit * WARNING_THRESHOLD),
       // Same posture as the budget itself: no plan row means not provisioned,
       // which is `false` rather than a permissive default.
-      handoffEnabled: limits?.humanHandoff ?? false,
+      handoffEnabled: isPlanFeatureEnabledOn(limits, 'humanHandoff'),
     };
   }
 

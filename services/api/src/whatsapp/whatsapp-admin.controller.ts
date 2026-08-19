@@ -1,10 +1,10 @@
 import { Body, Controller, Delete, Get, HttpException, Inject, Param, Patch, Post, UseGuards } from '@nestjs/common';
-import { platformDb } from '@ventia/db';
 import { whatsappConnectSchema, whatsappNumberUpdateSchema, type WhatsAppConnectInput } from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from '../catalog/parse';
 import { writeAudit } from '../catalog/audit';
+import { assertPlanFeature, isPlanFeatureEnabled } from '../common/plan-limits';
 import { WhatsAppNumbersService } from './whatsapp-numbers.service';
 
 /**
@@ -25,15 +25,16 @@ export class WhatsAppAdminController {
 
   @Get()
   async list(@AdminSession() session: AdminSessionContext) {
-    const [items, limits] = await Promise.all([
+    const [items, channelEnabled] = await Promise.all([
       this.numbers.listForTenant(session.tenantId),
-      platformDb.tenantLimits.findUnique({ where: { tenantId: session.tenantId } }),
+      isPlanFeatureEnabled(session.tenantId, 'whatsappChannel'),
     ]);
     return {
       items,
       // So the page can render an upgrade prompt rather than a form that will
-      // 402 on submit.
-      channelEnabled: limits?.whatsappChannel ?? false,
+      // 402 on submit. Same source of truth as the gate on `connect` below —
+      // the read and the enforcement must never be able to disagree.
+      channelEnabled,
       // The URL the merchant pastes into the Meta dashboard. Built here rather
       // than in the client because only the server knows the API's public
       // origin, and a merchant copying a wrong callback URL is a support
@@ -50,10 +51,7 @@ export class WhatsAppAdminController {
     // never ends up with a half-configured number it cannot use — and checked
     // again on every inbound message, because a plan can be downgraded after
     // this succeeded.
-    const limits = await platformDb.tenantLimits.findUnique({ where: { tenantId: session.tenantId } });
-    if (!limits?.whatsappChannel) {
-      throw new HttpException({ error: 'PLAN_LIMIT_EXCEEDED', details: { feature: 'whatsappChannel' } }, 402);
-    }
+    await assertPlanFeature(session.tenantId, 'whatsappChannel');
 
     const { externalId, credentials } =
       input.provider === 'cloud'
@@ -104,6 +102,17 @@ export class WhatsAppAdminController {
     @Body() body: unknown,
   ) {
     const input = parseOr400(whatsappNumberUpdateSchema, body);
+
+    // Re-enabling a number is the same entitlement as connecting one, and it
+    // was the hole this endpoint left open: a store downgraded off the channel
+    // could not `connect` a number but could still flip an existing one back
+    // to `connected`. DISABLING stays ungated on purpose — a merchant must
+    // always be able to turn a channel off, plan or no plan, and gating the
+    // off-switch behind an upgrade prompt would be indefensible.
+    if (input.status === 'connected') {
+      await assertPlanFeature(session.tenantId, 'whatsappChannel');
+    }
+
     const updated = await this.numbers.setStatus(session.tenantId, id, input.status);
     if (!updated) throw new HttpException({ error: 'WHATSAPP_NUMBER_NOT_FOUND' }, 404);
     await writeAudit(session, 'whatsapp.status', 'WhatsAppNumber', id, input);

@@ -7,6 +7,7 @@ import type { SessionContext } from '../auth/session-context';
 import { parseOr400 } from '../catalog/parse';
 import { writeAudit } from '../catalog/audit';
 import { MAILER, type Mailer } from '../mailer/mailer';
+import { assertPlanQuota } from '../common/plan-limits';
 
 const INVITE_TOKEN_BYTES = 24; // -> 48 hex characters
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -36,20 +37,34 @@ export class StaffService {
     const db = tenantDb(tenantId);
     const now = new Date();
 
-    const limits = await db.tenantLimits.findUnique({ where: { tenantId } });
-    if (limits) {
+    // The seat quota, via the shared enforcement in common/plan-limits.ts —
+    // same 402 body as every other plan limit, so the admin UI renders one
+    // upgrade prompt. Only the COUNT is staff-specific.
+    await assertPlanQuota({
+      tenantId,
+      quota: 'staffSeats',
       // Membership is NOT in TENANT_MODELS/RLS (packages/db/src/tenant-models.ts)
       // — it has no tenantId-scoped policy at all (ventia_app's privileges on
       // it are explicitly revoked, see the revoke_ventia_app_system_tables
       // migration) — so counting staff members must go through platformDb,
       // filtered by tenantId explicitly. This is a system-context read,
       // justified by the @Roles('owner') guard upstream of this handler.
-      const staffCount = await platformDb.membership.count({ where: { tenantId, role: 'staff' } });
-      const pendingCount = await db.staffInvite.count({ where: pendingInviteWhere(now) });
-      if (staffCount + pendingCount + 1 > limits.staffSeats) {
-        throw new HttpException({ error: 'PLAN_LIMIT_EXCEEDED', details: { limit: limits.staffSeats } }, 402);
-      }
-    }
+      //
+      // A pending invite occupies a seat exactly like an accepted member: the
+      // alternative lets an owner mail out unlimited invites and only discover
+      // the limit when the last one to accept is bounced.
+      count: async () => {
+        const [staffCount, pendingCount] = await Promise.all([
+          platformDb.membership.count({ where: { tenantId, role: 'staff' } }),
+          db.staffInvite.count({ where: pendingInviteWhere(now) }),
+        ]);
+        return staffCount + pendingCount;
+      },
+      // Pre-existing behaviour, preserved deliberately: no `TenantLimits` row
+      // means unlimited seats here (pinned by test/staff.test.ts). See the
+      // note on `assertPlanQuota` for why it is not flipped in this change.
+      whenUnprovisioned: 'allow',
+    });
 
     const existingUser = await platformDb.user.findUnique({ where: { email: input.email } });
     if (existingUser) {
