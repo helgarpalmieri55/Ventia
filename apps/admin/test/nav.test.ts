@@ -72,3 +72,30 @@ describe('navItems', () => {
     expect(new Set(hrefs).size).toBe(hrefs.length);
   });
 });
+
+describe('the merchant nav and the platform console', () => {
+  /**
+   * The operator console at `/plataforma` is deliberately absent from the
+   * merchant sidebar, for both roles.
+   *
+   * `navItems` is keyed on `Role` — 'owner' | 'staff' — which is a
+   * *membership* role. Platform authority in this codebase is emphatically
+   * not a membership: `PlatformAdminGuard` reads an env allowlist plus
+   * `User.isPlatformAdmin` plus a verified email, and explicitly refuses to
+   * consult `Membership` so that no merchant-facing write path can ever widen
+   * a session into an operator one. Gating a platform link on `role ===
+   * 'owner'` would state the opposite relationship in the UI and would show
+   * every store owner on the platform a link they cannot use.
+   *
+   * The alternative — probing `/v1/platform/tenants` from this layout to
+   * decide whether to draw the link — would put one cross-tenant request on
+   * every merchant page render, for every merchant, to benefit a handful of
+   * operators who reach the console by bookmark. Operators get there by URL;
+   * the console's own layout is what checks them, by asking the API.
+   */
+  it('never puts a /plataforma link in either role\'s sidebar', () => {
+    for (const role of ['owner', 'staff'] as const) {
+      expect(navItems(role).some((item) => item.href.startsWith('/plataforma'))).toBe(false);
+    }
+  });
+});

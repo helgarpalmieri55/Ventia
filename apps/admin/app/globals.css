@@ -3,3 +3,63 @@
 /* Admin's own app/ source isn't under @ventia/ui's @source scan — declare it
    explicitly so Tailwind picks up utility classes used in this app's pages. */
 @source './**/*.{ts,tsx}';
+
+/* ---------------------------------------------------------------------
+   Consola de plataforma (/plataforma) — Ventia's own back office.
+
+   The whole point of this block is that an operator can NEVER mistake this
+   surface for their own merchant admin. It re-points the same design tokens
+   @ventia/ui already reads, scoped to `[data-surface='plataforma']`, so every
+   shared component (Card, Table, Badge, Dialog, Button) renders in a
+   different world without a single component being forked:
+
+     merchant admin  -> white page, slate text, blue primary
+     platform console-> near-black page, light text, amber primary
+
+   Chosen over a bespoke component set on purpose. A fork would drift: the
+   next Button variant added upstream would exist in one place and not the
+   other, and the two surfaces would slowly converge in appearance for the
+   worst possible reason (someone copying merchant styles across). Re-pointing
+   tokens means the surfaces can never converge — they are the same
+   components resolving different variables.
+
+   `--radius` is squared off as well: the merchant admin is rounded and soft,
+   this is not, and the difference is legible at a glance from across a desk
+   even before any text is read. */
+[data-surface='plataforma'] {
+  --background: #0b1120;
+  --foreground: #e2e8f0;
+  --primary: #f59e0b;
+  --primary-foreground: #1c1008;
+  --border: #33415580;
+  --muted: #1e293b;
+  --muted-foreground: #94a3b8;
+  --destructive: #f43f5e;
+  --destructive-foreground: #1c0810;
+  --radius: 0.25rem;
+}
+
+/* @ventia/ui's Alert hardcodes emerald-700/amber-700 TEXT for its success and
+   warning variants — tuned for a white page, and close to unreadable on this
+   one. Lightened here rather than by touching the shared component: the
+   merchant admin's contrast is correct as it stands, and this is the surface
+   with the unusual background. Two-selector specificity beats the utility
+   class regardless of stylesheet order. */
+[data-surface='plataforma'] .text-emerald-700 {
+  color: #6ee7b7;
+}
+[data-surface='plataforma'] .text-amber-700 {
+  color: #fcd34d;
+}
+
+/* The band across the top of every console page. Diagonal hazard stripes are
+   deliberately unlike anything in the merchant admin — they read as
+   "machinery, not storefront" in peripheral vision, before the words
+   "CONSOLA DE PLATAFORMA" are actually read. */
+.platform-hazard {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #f59e0b 0 10px,
+    #0b1120 10px 20px
+  );
+}
