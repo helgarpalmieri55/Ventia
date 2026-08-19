@@ -1,0 +1,143 @@
+# syntax=docker/dockerfile:1
+#
+# @ventia/admin — Next.js 15 App Router, shipped as a standalone bundle.
+#
+# Build from the REPO ROOT, not from docker/:
+#   docker build -f docker/Dockerfile.admin -t ventia-admin .
+#
+# Stages base/fetch are byte-identical to docker/Dockerfile.api's and
+# docker/Dockerfile.storefront's, so building all three images computes the
+# pnpm-fetch layer once.
+
+ARG NODE_IMAGE=node:22.22-bookworm-slim
+
+FROM ${NODE_IMAGE} AS runtime-base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base AS base
+# COREPACK_HOME is not cosmetic. Corepack caches the pnpm it downloads under
+# that path, defaulting to the CURRENT USER's ~/.cache — and `corepack prepare`
+# below runs as root while the migrator container runs as `node`. Without a
+# shared path the runtime user looks in /home/node, finds nothing, and
+# re-downloads pnpm from the registry on every migration run, which fails
+# outright on a host with no egress. (Observed exactly that: the first
+# `compose up` of this stack died in `prisma migrate deploy` with a corepack
+# TLS error before touching the database.)
+ENV PNPM_HOME=/pnpm \
+    PATH=/pnpm:$PATH \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    COREPACK_HOME=/pnpm/corepack \
+    CI=1
+WORKDIR /app
+
+# Optional extra CA for the BUILD ONLY, for hosts behind a TLS-terminating
+# proxy; a no-op when the secret is not supplied:
+#   docker build --secret id=proxy_ca,src=/path/to/ca.pem ...
+# This image needs outbound HTTPS at build time because admin's layout pulls in
+# `next/font/google` through @ventia/ui, which downloads and self-hosts the
+# font files during `next build`.
+RUN --mount=type=secret,id=proxy_ca,target=/tmp/proxy-ca.crt \
+    mkdir -p /usr/local/share/ca-certificates \
+ && if [ -s /tmp/proxy-ca.crt ]; then \
+      cp /tmp/proxy-ca.crt /usr/local/share/ca-certificates/build-proxy-ca.crt; \
+      chmod 0644 /usr/local/share/ca-certificates/build-proxy-ca.crt; \
+    else \
+      : > /usr/local/share/ca-certificates/build-proxy-ca.crt; \
+    fi
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/build-proxy-ca.crt
+
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+
+# =============================================================================
+# fetch — lockfile only, so a source change never re-downloads dependencies.
+# =============================================================================
+FROM base AS fetch
+COPY pnpm-lock.yaml ./
+RUN pnpm fetch
+
+# =============================================================================
+# deps — manifests only, still no source.
+# =============================================================================
+FROM fetch AS deps
+COPY package.json pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY packages/core/package.json      packages/core/
+COPY packages/db/package.json        packages/db/
+COPY packages/payments/package.json  packages/payments/
+COPY packages/ui/package.json        packages/ui/
+COPY packages/whatsapp/package.json  packages/whatsapp/
+COPY services/api/package.json       services/api/
+COPY apps/storefront/package.json    apps/storefront/
+COPY apps/admin/package.json         apps/admin/
+RUN pnpm install --frozen-lockfile --offline --filter "@ventia/admin..."
+
+# =============================================================================
+# builder — workspace packages first, then `next build`.
+# =============================================================================
+FROM deps AS builder
+
+COPY packages/core packages/core
+COPY packages/ui   packages/ui
+COPY apps/admin    apps/admin
+
+# @ventia/core and @ventia/ui resolve through package.json `main`/`exports` to
+# dist/, which does not exist until tsc runs. A missing dist/ is not an error
+# Next reports — it would just trace a thinner bundle — so this step is
+# load-bearing rather than a formality.
+#
+# @ventia/db is a devDependency of @ventia/admin and is deliberately NOT built:
+# the only reference to it in apps/admin is the comment in lib/orders-api.ts
+# explaining why the order types are hand-written instead of imported. Building
+# it would drag Prisma, its engine download and its CLI into this image for
+# nothing.
+RUN pnpm --filter @ventia/core --filter @ventia/ui run build
+
+# apps/admin/next.config.ts's rewrites() destination is serialised into
+# .next/routes-manifest.json by `next build`, so API_INTERNAL_URL is one of the
+# very few values in this system that genuinely IS build-time. The default is
+# the compose service name, which is stable across deployments because it names
+# the compose network rather than a host. Overriding it requires a rebuild:
+#   docker build --build-arg API_INTERNAL_URL=http://api:4000 ...
+#
+# Everything else admin reads (lib/session.ts's server-side fetches, and the
+# same API_INTERNAL_URL when read from a Server Component rather than a
+# rewrite) comes from the container environment at request time, so the
+# variable is set BOTH here and on the container in compose.prod.yaml.
+#
+# There are no NEXT_PUBLIC_* variables anywhere in either app — verified with
+# `grep -o 'process\.env\.[A-Z_]*'` across apps/ — so nothing per-deployment is
+# inlined into the client bundle.
+ARG API_INTERNAL_URL=http://api:4000
+ENV API_INTERNAL_URL=${API_INTERNAL_URL}
+RUN pnpm --filter @ventia/admin run build
+
+# =============================================================================
+# runner — the standalone server.
+# =============================================================================
+FROM runtime-base AS runner
+ENV NODE_ENV=production \
+    PORT=3001 \
+    HOSTNAME=0.0.0.0
+WORKDIR /app
+
+# Standalone output is a complete minimal application: server.js plus the
+# traced subset of node_modules. Two things it does not include:
+#
+#   .next/static — hashed JS/CSS chunks; without them the server answers 200
+#                  with unstyled, unhydrated HTML.
+#   public/      — apps/admin/public does not exist (verified), so there is no
+#                  COPY for it. Creating one later means adding a line here.
+#
+# Self-hosted `next/font` files are not a third case — the build emits them
+# into .next/static/media, so they travel with the static copy.
+COPY --from=builder --chown=node:node /app/apps/admin/.next/standalone ./
+COPY --from=builder --chown=node:node /app/apps/admin/.next/static     ./apps/admin/.next/static
+
+USER node
+EXPOSE 3001
+
+# HOSTNAME=0.0.0.0 above is required, not cosmetic: standalone's server.js
+# binds whatever HOSTNAME says and Next's default is localhost, which inside a
+# container is unreachable from anywhere else.
+CMD ["node", "apps/admin/server.js"]

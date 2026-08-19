@@ -1,0 +1,381 @@
+# Ventia — production stack for a single Ubuntu 24.04 VPS.
+#
+#   cd /srv/ventia
+#   cp .env.production.example .env      # then fill it in; see that file
+#   docker compose --env-file .env -f docker/compose.prod.yaml up -d --build
+#
+# `--env-file .env` is not optional. It is what feeds ${...} interpolation in
+# THIS file (healthcheck arguments, credentials passed to the database image);
+# `env_file:` below is a separate mechanism that feeds the containers. The
+# required variables are written as ${VAR:?...}, so a missing one stops compose
+# with a named error instead of silently expanding to an empty string — which
+# is how you get a Postgres superuser called "" and a stack that half-starts.
+#
+# Images are built on this host: there is no registry and no CI. That makes
+# `--build` part of the deploy command, and it makes the build cache on this
+# box the thing that keeps a deploy to a couple of minutes.
+name: ventia
+
+# -----------------------------------------------------------------------------
+# Shared fragments
+# -----------------------------------------------------------------------------
+
+# Every long-running service carries this. `unless-stopped` rather than
+# `always`: after `docker compose stop` for maintenance, a host reboot must not
+# quietly bring the stack back up underneath whoever stopped it.
+x-restart: &restart
+  restart: unless-stopped
+
+# The three Node services all read the same file. One file rather than three
+# per-service lists because the API's variables and the apps' overlap heavily
+# (API_INTERNAL_URL, REVALIDATE_SECRET) and a split invites the two halves to
+# drift. Secrets are never inline in this file — a compose file is committed,
+# a .env file is not.
+x-node-env: &node-env
+  env_file:
+    - ../.env
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  # ---------------------------------------------------------------------------
+  # Data
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    <<: [*restart, *logging]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # NO `ports:`. Deliberate, and the single most important line in this file
+    # that is not here: publishing 5432 on a public VPS exposes the database to
+    # the internet, because Docker's published-port rules are inserted ahead of
+    # ufw's. Everything that needs Postgres is on this compose network and
+    # reaches it as `postgres:5432`. To get a psql prompt:
+    #   docker compose -f docker/compose.prod.yaml exec postgres psql -U <user> <db>
+    healthcheck:
+      # -U/-d matter: bare pg_isready reports the server as up while it is
+      # still replaying WAL and before the application database exists, which
+      # is exactly the window the migration job would otherwise start in.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  redis:
+    image: redis:7-alpine
+    <<: [*restart, *logging]
+    # Persistence on: Redis holds BullMQ's queues, which carry stock-reservation
+    # expiries and payment reconciliation jobs. Losing them on a restart means
+    # reservations that never expire and payments that are never reconciled.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          # No maxmemory / eviction policy on purpose. An eviction policy here
+          # would silently drop queued jobs under pressure; a hard container
+          # limit turns the same situation into a visible restart instead.
+          memory: 768m
+
+  minio:
+    image: minio/minio:latest
+    <<: [*restart, *logging]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      # Public URL the browser will use for objects. MinIO needs it to sign
+      # redirects correctly when it sits behind Caddy.
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-}
+    volumes:
+      - miniodata:/data
+    # No published ports, including 9001 (the admin console). The dev stack
+    # publishes both; on a public host that console is an unauthenticated-until
+    # -you-guess-the-password door onto every merchant's product images.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    # One-shot. `no` rather than `unless-stopped` — a restart policy on a job
+    # that exits 0 is a crash loop.
+    restart: "no"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      S3_BUCKET: ${S3_BUCKET:-ventia}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$S3_BUCKET"
+        # Anonymous download only — never `mc anonymous set public`, which also
+        # grants anonymous WRITE. Product images are served to shoppers through
+        # Caddy; uploads go through the API's presigned URLs.
+        mc anonymous set download "local/$$S3_BUCKET"
+    <<: *logging
+
+  # ---------------------------------------------------------------------------
+  # Schema migration — the gate the API waits behind
+  # ---------------------------------------------------------------------------
+  migrate:
+    # Same Dockerfile as the API, different target, so the migrations applied
+    # here are by construction the ones the API image was built against.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+      target: migrator
+    image: ventia-migrate:local
+    <<: [*node-env, *logging]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    # `prisma migrate deploy` exits 0 only when every pending migration applied
+    # cleanly, and non-zero on the first failure. That exit code is the whole
+    # mechanism: `service_completed_successfully` on the API below means a
+    # failed migration leaves the OLD API running (or, on a first deploy, no
+    # API at all) rather than starting a new one against a schema it does not
+    # match. docs/deploying.md §9 lists this ordering as unenforced; this is
+    # what enforces it.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # ---------------------------------------------------------------------------
+  # Application
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+      target: runner
+    image: ventia-api:local
+    <<: [*restart, *node-env, *logging]
+    environment:
+      # Written here rather than left to .env because they name compose
+      # services: they are properties of this file's topology, not of the
+      # deployment, and a hand-edited .env getting them wrong is a silent
+      # misroute rather than an error.
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      S3_ENDPOINT: http://minio:9000
+      STOREFRONT_INTERNAL_URL: http://storefront:3000
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # No published ports. Caddy reaches it as `api:4000` on this network.
+    healthcheck:
+      # The real route: GET /v1/health, from services/api/src/health/
+      # health.controller.ts. It is explicitly EXCLUDED from TenantMiddleware
+      # in app.module.ts's configure(), so it answers without resolving a
+      # tenant and without touching Postgres or Redis — which is what makes it
+      # a liveness check rather than a dependency check.
+      #
+      # `node -e` rather than curl/wget: the runtime image is node:22-slim with
+      # neither installed, and adding one to get a healthcheck is a bad trade.
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          fetch('http://127.0.0.1:' + (process.env.API_PORT || 4000) + '/v1/health')
+            .then(r => r.json())
+            .then(b => process.exit(b.status === 'ok' ? 0 : 1))
+            .catch(() => process.exit(1));
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  storefront:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.storefront
+    image: ventia-storefront:local
+    <<: [*restart, *node-env, *logging]
+    environment:
+      API_INTERNAL_URL: http://api:4000
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          fetch('http://127.0.0.1:3000/')
+            .then(r => process.exit(r.status < 500 ? 0 : 1))
+            .catch(() => process.exit(1));
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+    init: true
+    read_only: true
+    tmpfs:
+      # Next writes its ISR/fetch cache under .next/cache at RUNTIME — the
+      # storefront revalidates on demand (app/api/revalidate/route.ts), so this
+      # is a live path, not a build artefact. tmpfs rather than a volume: the
+      # cache is derived data and a cold one after a restart is correct.
+      - /tmp
+      - /app/apps/storefront/.next/cache
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  admin:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.admin
+      args:
+        # Baked into .next/routes-manifest.json by `next build` — see the
+        # comment on rewrites() in apps/admin/next.config.ts. It is passed
+        # again as a runtime variable below because admin's Server Components
+        # read it directly (lib/session.ts).
+        API_INTERNAL_URL: http://api:4000
+    image: ventia-admin:local
+    <<: [*restart, *node-env, *logging]
+    environment:
+      API_INTERNAL_URL: http://api:4000
+      NODE_ENV: production
+      PORT: "3001"
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # The admin root redirects unauthenticated visitors (307), so "not 5xx"
+      # is the correct assertion here, not "200".
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          fetch('http://127.0.0.1:3001/', { redirect: 'manual' })
+            .then(r => process.exit(r.status < 500 ? 0 : 1))
+            .catch(() => process.exit(1));
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/apps/admin/.next/cache
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  # ---------------------------------------------------------------------------
+  # Edge — the only service with published ports
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    <<: [*restart, *logging]
+    # 80 and 443 and nothing else, on the whole stack. 443/udp is HTTP/3.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # docker/Caddyfile.prod reads both of these at start-up with Caddy's
+      # `{$VAR}` substitution, so the edge config is not edited per deployment.
+      # PLATFORM_ROOT_DOMAIN must be the SAME value the API gets: it is what
+      # onboarding uses to mint ${slug}.${root} subdomains and what the
+      # on-demand-TLS gate uses to recognise them. ACME_EMAIL is where Let's
+      # Encrypt sends expiry warnings; an unset one makes Caddy prompt for
+      # agreement and fail to start non-interactively.
+      PLATFORM_ROOT_DOMAIN: ${PLATFORM_ROOT_DOMAIN:?PLATFORM_ROOT_DOMAIN is required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+    volumes:
+      # Owned by the edge config, not by this file. Caddy proxies to
+      # `api:4000`, `admin:3001`, `storefront:3000` and `minio:9000` by service
+      # name on this network — every one of those is a service defined above.
+      - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      # Named volumes, not bind mounts: caddy_data holds the ACME account key
+      # and every issued certificate. Losing it means re-issuing everything,
+      # and Let's Encrypt rate-limits that.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      storefront:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  caddy_data:
+  caddy_config:
+
+# One user-defined bridge network, created implicitly. Every service resolves
+# every other by service name on it; nothing but caddy is reachable from
+# outside the host.
