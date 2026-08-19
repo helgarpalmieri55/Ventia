@@ -17,6 +17,7 @@ import {
   type PlatformTenantDetail,
 } from '../../../../lib/platform-api';
 import { PlanPanel } from './_components/plan-panel';
+import { ImpersonationPanel } from './_components/impersonation-panel';
 import { StatusPanel } from './_components/status-panel';
 import { SubscriptionPanel } from './_components/subscription-panel';
 
@@ -217,6 +218,8 @@ export default function PlataformaTenantPage() {
           )}
         </CardContent>
       </Card>
+
+      <ImpersonationPanel tenant={tenant} />
 
       <SubscriptionPanel tenant={tenant} onChanged={reload} />
 

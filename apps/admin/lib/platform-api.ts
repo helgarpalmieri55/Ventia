@@ -310,6 +310,35 @@ export async function reactivateTenant(id: string, note?: string): Promise<SetSt
  * is a whole-body upsert, so an operator editing a copy that went stale in an
  * open tab would silently revert whatever changed in between. Re-reading
  * immediately before editing is what keeps "save" from meaning "revert". */
+/**
+ * Starts an impersonation session for `id` (design §3). Returns nothing the
+ * caller needs: the whole effect is the `Set-Cookie` on the response, which is
+ * why {@link startImpersonation} is followed by a FULL navigation rather than
+ * a router push — see the note on `impersonationEntryHref`.
+ */
+export async function startImpersonation(id: string, reason?: string): Promise<void> {
+  await apiFetch<{ impersonation: unknown }>(`/v1/platform/tenants/${id}/impersonate`, {
+    method: 'POST',
+    body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}),
+  });
+}
+
+/**
+ * Where the browser must land once the grant cookie exists: the merchant
+ * admin root, reached by a FULL page load.
+ *
+ * Not `router.push`. The merchant shell reads the session on the server
+ * (`app/(app)/layout.tsx` → `getMe()`), so a client-side navigation would
+ * render the shell from a cache populated before the cookie existed — the
+ * operator would land in the merchant admin with no impersonation banner,
+ * which is precisely the state design §5's "visually unmistakable" AC exists
+ * to make impossible. `window.location.assign` guarantees the server sees the
+ * new cookie and returns a shell that knows it.
+ */
+export function impersonationEntryHref(): string {
+  return '/';
+}
+
 export async function getSubscription(id: string): Promise<GetSubscriptionResult> {
   return apiFetch<GetSubscriptionResult>(`/v1/platform/tenants/${id}/subscription`);
 }
