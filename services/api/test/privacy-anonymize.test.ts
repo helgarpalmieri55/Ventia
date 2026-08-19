@@ -42,6 +42,14 @@ afterAll(async () => {
 
 let orderNumberSeq = 1;
 
+/** Fixed authorization evidence written onto every seeded order, matching what
+ * a real checkout records: a server-clock timestamp and a fingerprint of the
+ * tenant's published política de tratamiento. Constants, not per-shopper
+ * values, precisely because that is the property under test — neither column
+ * narrows to a person. */
+const CONSENT_ACCEPTED_AT = new Date('2026-08-18T14:03:00.000Z');
+const CONSENT_POLICY_VERSION = 'sha256:0123456789abcdef';
+
 /** One shopper's worth of personal data, unique per test so the
  * whole-database PII scan below cannot be confused by a neighbouring test's
  * fixture. Deliberately free of `%` and `_` — the scan uses ILIKE. */
@@ -178,6 +186,14 @@ async function seedCustomer(tenantId: string, pii: Pii): Promise<Seeded> {
       phone: pii.phone,
       shippingAddress: address,
       billingFields: { documento: { tipo: 'CC', numero: pii.documento }, razonSocial: pii.razonSocial },
+      // The Ley 1581 art. 8 lit. e) *prueba de la autorización* a real
+      // checkout writes (services/api/src/checkout/checkout.service.ts). Seeded
+      // on THIS order only; `secondOrder` below deliberately has neither
+      // column set, standing in for an order placed before the checkout
+      // started asking. See the "prueba de la autorización" describe for what
+      // must happen to each, and why.
+      privacyAcceptedAt: CONSENT_ACCEPTED_AT,
+      privacyPolicyVersion: CONSENT_POLICY_VERSION,
       shippingMethod: 'flat',
       shippingCents: 900_000,
       subtotalCents: 3_000_000,
@@ -531,6 +547,77 @@ describe('POST /v1/admin/customers/:id/anonymize — Ley 1581 supresión (SPEC �
     for (const needle of [laterPii.name, laterPii.email, laterPii.phone, laterPii.direccion]) {
       expect(await scanDatabaseFor(needle)).toEqual([]);
     }
+  });
+});
+
+describe('the prueba de la autorización survives a supresión (Ley 1581 arts. 8 and 9)', () => {
+  it('leaves privacyAcceptedAt and privacyPolicyVersion exactly as they were, on every one of the customer\'s orders', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('privacy-consent-evidence@demo.co', 'owner');
+    const pii = makePii('consent');
+    const seeded = await seedCustomer(tenantId, pii);
+
+    const res = await anonymize(cookie, seeded.customerId);
+    expect(res.status).toBe(201);
+
+    // ## Why these two columns must NOT be erased
+    //
+    // A supresión request erases the PERSON, not the record that the
+    // treatment performed up to that point was lawfully authorized. Ley 1581
+    // art. 8 lit. e) gives the Titular the right to DEMAND prueba de la
+    // autorización, and Decreto 1377 art. 12 makes keeping it the
+    // Responsable's duty; a merchant who destroyed that proof on receipt of a
+    // deletion request would be unable to answer for the months of processing
+    // that preceded it — and would have destroyed it at the request of the
+    // one person entitled to ask for it.
+    //
+    // That is only defensible because neither column is personal data:
+    // `privacyAcceptedAt` is a fact about the ORDER (which keeps its own
+    // `createdAt` through anonymization anyway, by the same accounting
+    // logic), and `privacyPolicyVersion` is a fact about the MERCHANT's own
+    // policy text, byte-identical across every shopper who checked out
+    // against that revision. Neither narrows to a human. If either ever
+    // starts carrying something that does — a name, an e-mail, a device id, a
+    // per-shopper nonce — this test is wrong and the anonymizer has to grow a
+    // branch for it.
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: seeded.orderId } });
+    expect(order.privacyAcceptedAt?.toISOString()).toBe(CONSENT_ACCEPTED_AT.toISOString());
+    expect(order.privacyPolicyVersion).toBe(CONSENT_POLICY_VERSION);
+
+    // The second seeded order deliberately carries NO evidence — it stands in
+    // for every order placed before the checkout started asking. The
+    // anonymizer must leave that null exactly as it found it: inventing a
+    // timestamp or a version for a row that never had one would manufacture
+    // the very proof these columns exist to hold, and a merchant would then
+    // be unable to tell which of their orders they can actually vouch for.
+    const second = await prisma.order.findUniqueOrThrow({ where: { id: seeded.secondOrderId } });
+    expect(second.privacyAcceptedAt).toBeNull();
+    expect(second.privacyPolicyVersion).toBeNull();
+
+    // ...while the person really is gone from those same two rows.
+    expect(order.email).toMatch(/@anonimizado\.invalid$/);
+    expect(order.phone).toBe(ANON_PHONE);
+    expect((order.shippingAddress as Record<string, unknown>).nombreCompleto).toBe(ANON_NAME);
+    expect(order.billingFields).toBeNull();
+  });
+
+  it('the evidence itself contains none of the shopper\'s data: the whole-database PII scan still comes back clean', async () => {
+    // The same total scan the happy-path test runs, re-run specifically with
+    // the consent columns populated — so if a future change ever writes the
+    // shopper's name, e-mail or phone into `privacyPolicyVersion` (say, by
+    // "improving" the fingerprint into a per-authorization identifier), it
+    // shows up here as a surviving needle rather than as a column nobody
+    // thought to look at.
+    const { cookie, tenantId } = await signUpWithTenant('privacy-consent-scan@demo.co', 'owner');
+    const pii = makePii('consentscan');
+    const seeded = await seedCustomer(tenantId, pii);
+
+    expect((await anonymize(cookie, seeded.customerId)).status).toBe(201);
+
+    for (const needle of needles(pii)) {
+      expect(await scanDatabaseFor(needle)).toEqual([]);
+    }
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: seeded.orderId } });
+    expect(order.privacyPolicyVersion).toBe(CONSENT_POLICY_VERSION);
   });
 });
 

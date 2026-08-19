@@ -43,6 +43,20 @@ export interface CheckoutSubmitInput {
   // hand-rolled union rather than importing `PaymentProviderId` from
   // `@ventia/payments`.
   paymentMethod: 'cod' | 'wompi' | 'mercadopago' | 'epayco';
+  /**
+   * The shopper's Ley 1581 art. 9 authorization, ticked at checkout.
+   *
+   * A bare boolean, and deliberately nothing more: the server records WHEN it
+   * was given (its own clock) and WHICH published policy text was in force
+   * (a fingerprint it computes itself — see
+   * services/api/src/checkout/privacy-consent.ts). Evidence supplied by the
+   * party whose consent is being evidenced is not evidence, so this client
+   * has nothing else to say about it.
+   *
+   * Required, not optional: the API 400s a checkout body without it, and a
+   * type that let a caller omit it would push that failure to runtime.
+   */
+  acceptedPrivacyPolicy: boolean;
 }
 
 export interface CheckoutResult {

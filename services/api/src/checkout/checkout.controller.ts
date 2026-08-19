@@ -92,6 +92,45 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
     details.paymentMethod = "paymentMethod debe ser 'cod', 'wompi', 'mercadopago' o 'epayco'";
   }
 
+  // Ley 1581 art. 9 — the authorization must be PRIOR, EXPRESS and INFORMED,
+  // and unlike the GDPR, Colombian law offers no "necessary to perform a
+  // contract" basis to fall back on (art. 10's exceptions are public-register
+  // data, public-entity requests, medical emergencies and historical/
+  // statistical/scientific processing). A shirt sale is none of them, so an
+  // authorization is genuinely required rather than merely advisable.
+  //
+  // That does NOT make a checkout without a checkbox automatically unlawful:
+  // Decreto 1377 art. 7 accepts *conducta inequívoca* as a valid FORM of
+  // authorization, and completing a purchase is a reasonable candidate — it
+  // is how §4 of the generated policy (settings/privacy-policy.template.ts)
+  // words this very store's basis. The two are not in conflict and neither
+  // comment should be read as contradicting the other.
+  //
+  // The checkbox is a choice about EVIDENCE, not about legality. Art. 8
+  // lit. e) gives the Titular the right to demand *prueba de la
+  // autorización*, and "they completed a purchase, from which authorization
+  // may be inferred" is an argument, whereas a timestamped explicit
+  // acceptance is a record. The person who has to make that argument to the
+  // SIC is the merchant — they are the Responsable, not Ventia — so taking
+  // the weaker evidence to save one tap is a bad trade made on someone
+  // else's behalf. Hence: blocking, and unticked by default, since art. 7
+  // also says silence is not authorization and a pre-ticked box would
+  // manufacture a record of something that never happened.
+  //
+  // Checked SERVER-SIDE, not merely by the storefront's checkbox: the value
+  // the next line writes onto the order is offered as evidence under art. 8
+  // lit. e), and evidence produced by a rule only the browser enforces is
+  // worth nothing. Any client that omits this — the storefront with its
+  // checkbox unticked, a stale bundle, a script — gets the same 400 as any
+  // other invalid body.
+  //
+  // `=== true` rather than truthiness, deliberately: `"false"`, `1` and `[]`
+  // are all truthy in JS, and "the shopper authorized" is not a field where a
+  // caller's sloppy encoding should be silently read in their favour.
+  if (b.acceptedPrivacyPolicy !== true) {
+    details.acceptedPrivacyPolicy = 'Debes autorizar el tratamiento de tus datos personales';
+  }
+
   const addressResult = checkoutAddressSchema.safeParse(b.address);
   if (!addressResult.success) {
     details.address = addressResult.error.flatten();
@@ -112,6 +151,12 @@ function parseCheckoutBody(body: unknown): CheckoutInput {
     address,
     shippingMethodId: b.shippingMethodId as string,
     paymentMethod: b.paymentMethod as 'cod' | PaymentProviderId,
+    // Narrowed to the literal by the guard above. The service takes it as a
+    // `true`-only type rather than a boolean so that no future caller can
+    // reach order creation with `false` in hand and still write a
+    // `privacyAcceptedAt` — the type makes the unlawful state unrepresentable
+    // past this line.
+    acceptedPrivacyPolicy: true,
   };
 }
 

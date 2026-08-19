@@ -22,26 +22,52 @@ async function buildFullTenant(email: string) {
   // needs its own — derived from the (already unique) sign-up email.
   const domain = `${email.split('@')[0]}.ventia.localhost`;
 
+  // The five identidad-legal fields are saved through the REAL settings
+  // endpoint rather than written straight into the JSON column, because that
+  // is the fact under test: `storeSettingsSchema` (packages/core) has to
+  // ACCEPT them under exactly the key names the generator reads, and a
+  // fixture that bypassed the schema would keep passing on the day the schema
+  // silently stripped them again. `PATCH /v1/admin/settings/store` merges into
+  // `settings.storeInfo`, so this runs BEFORE the payments/agent write below,
+  // which replaces `settings` wholesale — hence the two halves are ordered
+  // this way and the merged keys are re-stated there.
+  const storeRes = await request(app.getHttpServer())
+    .patch('/v1/admin/settings/store')
+    .set('cookie', cookie)
+    .send({
+      name: 'Aromas del Quindío',
+      storeInfo: {
+        contactEmail: 'hola@aromasdelquindio.co',
+        contactPhone: '+57 310 555 0134',
+        category: 'hogar',
+        legalName: 'Aromas del Quindío S.A.S.',
+        taxId: 'NIT 901.234.567-8',
+        address: 'Carrera 14 # 8-42, local 3',
+        municipio: 'Armenia',
+        departamento: 'Quindío',
+      },
+    });
+  if (storeRes.status !== 200) {
+    throw new Error(`settings/store PATCH failed: ${storeRes.status} ${JSON.stringify(storeRes.body)}`);
+  }
+  // Proves the schema kept all five rather than stripping them — the exact
+  // failure mode that used to leave every merchant with five [COMPLETAR: ...]
+  // markers.
+  expect(storeRes.body.storeInfo).toMatchObject({
+    legalName: 'Aromas del Quindío S.A.S.',
+    taxId: 'NIT 901.234.567-8',
+    address: 'Carrera 14 # 8-42, local 3',
+    municipio: 'Armenia',
+    departamento: 'Quindío',
+  });
+
   await platformDb.tenant.update({
     where: { id: tenantId },
     data: {
       name: 'Aromas del Quindío',
       settings: {
         storeInfo: {
-          contactEmail: 'hola@aromasdelquindio.co',
-          contactPhone: '+57 310 555 0134',
-          category: 'hogar',
-          // `storeSettingsSchema` (packages/core) does not accept these five
-          // yet, so no merchant can save them through the settings endpoint
-          // today — the generator reads them defensively so that the day the
-          // schema grows them, the policy fills itself. Set here to exercise
-          // the fully-configured path; the "missing optional data" test below
-          // covers what every real store looks like until then.
-          legalName: 'Aromas del Quindío S.A.S.',
-          taxId: 'NIT 901.234.567-8',
-          address: 'Carrera 14 # 8-42, local 3',
-          municipio: 'Armenia',
-          departamento: 'Quindío',
+          ...(storeRes.body.storeInfo as Record<string, unknown>),
         },
         payments: {
           codEnabled: true,
@@ -211,6 +237,57 @@ describe('POST /v1/admin/content/policy_privacy/generate', () => {
     ]) {
       expect(body).toContain(heading);
     }
+  });
+
+  it('drops the five [COMPLETAR: ...] markers the moment the merchant saves their identidad legal', async () => {
+    // The direct causal claim behind Task 2, tested end to end through the
+    // real endpoint rather than by writing JSON: before, every merchant's
+    // generated policy carried five markers because `storeSettingsSchema`
+    // had no fields to save them into.
+    const { cookie } = await signUpWithTenant('policy-identidad@demo.co', 'owner');
+
+    const before = await request(app.getHttpServer())
+      .post('/v1/admin/content/policy_privacy/generate')
+      .set('cookie', cookie);
+    expect(before.body.placeholders).toEqual(
+      expect.arrayContaining([
+        'razón social o nombre completo del titular de la tienda',
+        'NIT o número de cédula',
+        'dirección del domicilio del negocio',
+        'municipio del domicilio',
+        'departamento del domicilio',
+      ]),
+    );
+
+    const saved = await request(app.getHttpServer())
+      .patch('/v1/admin/settings/store')
+      .set('cookie', cookie)
+      .send({
+        storeInfo: {
+          contactEmail: 'contacto@identidad.co',
+          contactPhone: '3105550134',
+          legalName: 'Comercializadora Identidad S.A.S.',
+          taxId: 'NIT 900.111.222-3',
+          address: 'Calle 45 # 12-08',
+          municipio: 'Pereira',
+          departamento: 'Risaralda',
+        },
+      });
+    expect(saved.status).toBe(200);
+
+    const after = await request(app.getHttpServer())
+      .post('/v1/admin/content/policy_privacy/generate')
+      .set('cookie', cookie);
+    const body = after.body.bodyMd as string;
+
+    // Every one of the five now appears as the merchant's own words, and the
+    // markers are gone. `[COMPLETAR: dirección web de la tienda]` survives —
+    // this tenant genuinely has no domain, and the generator must keep saying
+    // so rather than inventing one.
+    expect(body).toContain('Comercializadora Identidad S.A.S.');
+    expect(body).toContain('NIT 900.111.222-3');
+    expect(body).toContain('Calle 45 # 12-08, Pereira, Risaralda, Colombia');
+    expect(after.body.placeholders).toEqual(['dirección web de la tienda']);
   });
 
   it('only claims the channels this store actually has', async () => {

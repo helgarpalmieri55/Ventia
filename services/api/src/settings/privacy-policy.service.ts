@@ -88,12 +88,15 @@ export class PrivacyPolicyService {
       domain: primaryDomain?.domain ?? null,
       contactEmail: asString(storeInfo.contactEmail),
       contactPhone: asString(storeInfo.contactPhone),
-      // The three fields below have no writer today: `storeSettingsSchema`
-      // (packages/core) accepts category/contactEmail/contactPhone/description
-      // and strips anything else, so these are read defensively and will
-      // normally render as [COMPLETAR: ...] markers. Adding them to that schema
-      // is the one-line change that would autofill them; it lives in a package
-      // this task does not own.
+      // These five are now writable: `storeSettingsSchema` (packages/core)
+      // accepts them under exactly these key names, and the admin's Tienda tab
+      // collects them under an "Identidad legal" group. A store that has
+      // filled them in gets a policy with no [COMPLETAR: ...] markers at all;
+      // one that has not still renders them defensively as markers, which is
+      // what every store looked like before the schema grew the fields. Note
+      // `storeInfo.address` -> `addressLine`: the interface field and the
+      // settings key differ by design (see the schema's own comment), and
+      // renaming either side silently reintroduces the markers.
       legalName: asString(storeInfo.legalName),
       taxId: asString(storeInfo.taxId),
       addressLine: asString(storeInfo.address),

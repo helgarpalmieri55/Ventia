@@ -135,6 +135,7 @@ describe('P4 DoD — an agent-created cart converts to an order flagged source=a
         },
         shippingMethodId: 'flat-1',
         paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
       });
     expect(checkout.status).toBe(201);
 

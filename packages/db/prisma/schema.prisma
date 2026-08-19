@@ -352,9 +352,9 @@ model Customer {
 }
 
 model Order {
-  id                 String        @id @default(uuid()) @db.Uuid
-  tenantId           String        @db.Uuid
-  number             Int
+  id                   String        @id @default(uuid()) @db.Uuid
+  tenantId             String        @db.Uuid
+  number               Int
   // The reference handed to the payment gateway, and the ONLY identifier a
   // webhook is resolved through. GLOBALLY unique, random and unguessable —
   // all three properties are load-bearing, see
@@ -377,15 +377,15 @@ model Order {
   //
   // `number` remains the human-facing identifier (VNT-1001) everywhere — this
   // is plumbing and is never rendered.
-  reference          String        @unique
-  status             OrderStatus   @default(PENDING)
-  paymentStatus      PaymentStatus @default(PENDING)
-  paymentProvider    String?
+  reference            String        @unique
+  status               OrderStatus   @default(PENDING)
+  paymentStatus        PaymentStatus @default(PENDING)
+  paymentProvider      String?
   // null = no active stock reservation (every COD order, and any order past
   // the pending/reserved stage). Set to now()+15min when an online-payment
   // checkout reserves stock at order-creation time; cleared to null once the
   // payment webhook confirms (or the reservation expires and is restocked).
-  stockReservedUntil DateTime?
+  stockReservedUntil   DateTime?
   // Best-effort gateway transaction/payment reference for THIS order,
   // written from three sources (P3c design decision 2), none authoritative
   // on its own: (1) markPaid/markFailed, after a real signature-verified
@@ -397,7 +397,7 @@ model Order {
   // job (P3c Task 4) feeds into each gateway's own authenticated
   // getTransactionStatus/searchByReference call. Null until any
   // IMPLEMENTED source above fires.
-  providerRef        String?
+  providerRef          String?
   // PROVENANCE of `providerRef` — how the value currently in that column was
   // established, and therefore how much it may be trusted. Exactly two values
   // are ever written (kept a plain String, like `paymentProvider`, rather
@@ -429,25 +429,58 @@ model Order {
   // NULL means "unknown provenance" — pre-migration rows, and any future
   // writer that forgets to say. Treated exactly like 'hint' (untrusted) by
   // every consumer: fail closed, never open.
-  providerRefSource  String?
-  customerId         String?       @db.Uuid
-  email              String
-  phone              String
-  shippingAddress    Json
-  billingFields      Json?
-  shippingMethod     String?
-  shippingCents      Int           @default(0)
-  subtotalCents      Int
-  taxCents           Int
-  totalCents         Int
-  source             CartSource    @default(web)
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
-  tenant             Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer           Customer?     @relation(fields: [customerId], references: [id])
-  items              OrderItem[]
-  events             OrderEvent[]
-  payments           Payment[]
+  providerRefSource    String?
+  customerId           String?       @db.Uuid
+  // ---- Ley 1581 art. 8/9 — the *prueba de la autorización* --------------
+  //
+  // When this shopper ticked the "autorizo el tratamiento de mis datos
+  // personales" box at checkout, and WHICH policy text was published at that
+  // instant. Null on every order placed before this column existed, and on
+  // nothing since: the checkout endpoint refuses a submission that does not
+  // carry an explicit authorization, so a null here means "pre-migration",
+  // never "we forgot to ask".
+  //
+  // Why the order row and not a table of its own: art. 9 makes the
+  // authorization an attribute OF the collection event — this shopper, these
+  // data, this moment — and the order IS that event. A separate
+  // `DataConsent` table would carry a foreign key to the order and these two
+  // values, and would be joined on every question it can answer.
+  //
+  // `privacyPolicyVersion` is a FINGERPRINT of the published policy, not the
+  // policy: `sha256:<16 hex>` over the exact `title` + `bodyMd` this tenant
+  // had published at checkout time, or the sentinel `sin-politica-publicada`
+  // when they had published none (see checkout/privacy-consent.ts). Storing
+  // the text per order would duplicate ~8 KB on every order to say what one
+  // hash says.
+  //
+  // NEITHER COLUMN IS PERSONAL DATA, and that is deliberate. The timestamp is
+  // a fact about the order (which already carries `createdAt`); the
+  // fingerprint is a fact about the MERCHANT's own policy text, identical
+  // across every shopper who checked out against that revision. So the
+  // anonymizer (services/api/src/privacy/privacy.service.ts) leaves both
+  // alone — and must: destroying the proof that the authorization was
+  // obtained, on receipt of a supresión request, would leave the merchant
+  // unable to answer for the treatment performed while it was lawful.
+  // Asserted by test/privacy-anonymize.test.ts.
+  privacyAcceptedAt    DateTime?
+  privacyPolicyVersion String?
+  email                String
+  phone                String
+  shippingAddress      Json
+  billingFields        Json?
+  shippingMethod       String?
+  shippingCents        Int           @default(0)
+  subtotalCents        Int
+  taxCents             Int
+  totalCents           Int
+  source               CartSource    @default(web)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  tenant               Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer             Customer?     @relation(fields: [customerId], references: [id])
+  items                OrderItem[]
+  events               OrderEvent[]
+  payments             Payment[]
 
   @@unique([tenantId, number])
   @@index([tenantId, status])

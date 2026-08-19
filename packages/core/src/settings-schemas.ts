@@ -4,7 +4,36 @@ import { z } from 'zod';
  * merged (not replaced) into `tenants.settings.storeInfo` by the caller —
  * same partial-merge shape as onboarding-schemas.ts's `store_info` step,
  * duplicated here rather than reused because this endpoint additionally
- * accepts `name` (Tenant.name), which the wizard step does not. */
+ * accepts `name` (Tenant.name), which the wizard step does not.
+ *
+ * ## The five *identidad legal* fields, and why they are here
+ *
+ * `legalName` / `taxId` / `address` / `municipio` / `departamento` are read —
+ * defensively, by exactly these key names — by the Ley 1581 privacy-policy
+ * generator (services/api/src/settings/privacy-policy.template.ts), which
+ * needs them for the *Responsable del Tratamiento* block Decreto 1074 art.
+ * 2.2.2.25.3.1 #1 makes mandatory: "nombre o razón social, domicilio,
+ * dirección, correo electrónico y teléfono del Responsable". Until this
+ * schema accepted them there was no writer for any of them, so every
+ * merchant's generated policy came out with five `[COMPLETAR: ...]` markers
+ * they had to fill in by hand — in a legal document, five invitations to
+ * publish an incomplete one.
+ *
+ * The key names are NOT free choices: they must match what the template
+ * already reads (`storeInfo.address`, not `addressLine`, even though the
+ * generator's own interface field is called `addressLine`). Changing either
+ * side silently reintroduces the markers.
+ *
+ * All five are OPTIONAL, like every other `storeInfo` key. An existing store
+ * has none of them and must keep saving this form without error; a store that
+ * fills them in gets a policy that needs no hand-editing.
+ *
+ * `municipio` and `departamento` are free strings rather than validated
+ * against `colombia-locations.ts`: `DEPARTAMENTOS` is complete (33 entries),
+ * but `MUNICIPIOS` is a curated shipping-oriented subset of ~73 of Colombia's
+ * 1.100+ municipios, and a merchant whose domicilio is in one of the other
+ * thousand must still be able to state it truthfully in their own política.
+ * Max lengths only, in the spirit of `category`/`description` above. */
 export const storeSettingsSchema = z.object({
   name: z.string().min(2).max(80).optional(),
   storeInfo: z
@@ -13,6 +42,22 @@ export const storeSettingsSchema = z.object({
       contactEmail: z.string().email().optional(),
       contactPhone: z.string().max(20).optional(),
       description: z.string().max(500).optional(),
+      /** Razón social (an S.A.S./Ltda.) or the full legal name of the natural
+       * person behind the store. The Responsable named in the policy. */
+      legalName: z.string().max(120).optional(),
+      /** NIT (with or without verification digit) or cédula. Kept a free
+       * string, not a NIT-shaped regex: a persona natural files under a
+       * cédula, a NIT may be written `901.234.567-8` or `901234567`, and
+       * rejecting a merchant's own correctly-typed identifier because it did
+       * not match our idea of the format is worse than storing what they
+       * typed. */
+      taxId: z.string().max(40).optional(),
+      /** Street address of the merchant's *domicilio* — the business's own
+       * address, never a shopper's. Named `address` because that is the key
+       * the policy template already reads. */
+      address: z.string().max(200).optional(),
+      municipio: z.string().max(80).optional(),
+      departamento: z.string().max(80).optional(),
     })
     .optional(),
 });
