@@ -56,16 +56,7 @@ export async function writePlatformAudit(
   data?: Record<string, unknown>,
 ): Promise<void> {
   try {
-    await platformDb.auditLog.create({
-      data: {
-        tenantId,
-        actorUserId: operator.userId,
-        action,
-        entity: 'Tenant',
-        entityId: tenantId,
-        data: { actorEmail: operator.email, ...(data ?? {}) } as Prisma.InputJsonValue,
-      },
-    });
+    await writePlatformAuditOrThrow(operator, action, tenantId, data);
   } catch (err) {
     console.error('[platform-audit] failed to write audit log entry', {
       action,
@@ -73,4 +64,37 @@ export async function writePlatformAudit(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * The same write, but it PROPAGATES a failure instead of swallowing it.
+ *
+ * `writePlatformAudit` above must never throw, because it is called AFTER a
+ * mutation has already committed and an audit failure must not roll back a
+ * change that already happened. Impersonation inverts that ordering, and
+ * deliberately: the audit row is written BEFORE the grant is issued, so if
+ * the audit write fails, no token exists (impersonation design §3).
+ *
+ * "An impersonation that is not recorded must not happen" — that ordering is
+ * the difference between an audit trail and a best-effort log, and it is only
+ * expressible with a function that can fail. Hence two functions rather than
+ * a boolean flag on one: the choice between them is a claim about which of
+ * the two events came first, and it should be visible at the call site.
+ */
+export async function writePlatformAuditOrThrow(
+  operator: PlatformActor,
+  action: `platform.${string}`,
+  tenantId: string,
+  data?: Record<string, unknown>,
+): Promise<void> {
+  await platformDb.auditLog.create({
+    data: {
+      tenantId,
+      actorUserId: operator.userId,
+      action,
+      entity: 'Tenant',
+      entityId: tenantId,
+      data: { actorEmail: operator.email, ...(data ?? {}) } as Prisma.InputJsonValue,
+    },
+  });
 }

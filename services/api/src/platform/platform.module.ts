@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AdminModule } from '../admin/admin.module';
 import { RedisModule } from '../common/redis.module';
+import { ImpersonationService } from './impersonation.service';
 import { PlatformAdminGuard } from './platform-admin.guard';
 import { PlatformController } from './platform.controller';
 import { PlatformService } from './platform.service';
@@ -28,6 +29,12 @@ import { SubscriptionSweepWorker } from './subscription-sweep.worker';
 @Module({
   imports: [AdminModule, RedisModule],
   controllers: [PlatformController],
-  providers: [PlatformAdminGuard, PlatformService, SubscriptionService, SubscriptionSweepWorker],
+  providers: [
+    PlatformAdminGuard,
+    PlatformService,
+    SubscriptionService,
+    SubscriptionSweepWorker,
+    ImpersonationService,
+  ],
 })
 export class PlatformModule {}
