@@ -11,6 +11,7 @@ import { OrdersModule } from './orders/orders.module';
 import { PaymentAlertsModule } from './payment-alerts/payment-alerts.module';
 import { SettingsModule } from './settings/settings.module';
 import { StaffModule } from './staff/staff.module';
+import { PlatformModule } from './platform/platform.module';
 import { StorefrontModule } from './storefront/storefront.module';
 import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { RedisModule, REDIS_CLIENT } from './common/redis.module';
@@ -36,6 +37,7 @@ export { REDIS_CLIENT };
     PaymentAlertsModule,
     SettingsModule,
     StaffModule,
+    PlatformModule,
     StorefrontModule,
     WhatsAppModule,
   ],
