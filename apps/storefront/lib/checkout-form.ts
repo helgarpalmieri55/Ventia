@@ -29,6 +29,14 @@ export interface CheckoutFormState {
   // `OrderConfirmationDto`) is to keep storefront-local types hand-rolled
   // rather than share DTOs with the API/packages layer.
   paymentMethod: 'cod' | 'wompi' | 'mercadopago' | 'epayco' | '';
+  /**
+   * Ley 1581 art. 9 — the shopper's *autorización* for the treatment of their
+   * personal data. Starts `false` and is only ever `true` because the shopper
+   * ticked the box: an authorization must be EXPRESS, and Decreto 1377 art. 7
+   * is explicit that silence is not authorization, so a pre-checked box would
+   * not merely be bad manners, it would produce no valid authorization at all.
+   */
+  acceptedPrivacyPolicy: boolean;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -49,7 +57,7 @@ export function municipioOptionsFor(departamentoCode: string): { value: string; 
  * a `{field: message}` map; `{}` means every field relevant to this step is
  * valid. */
 export function validateCheckoutStep(
-  step: 'contact' | 'address' | 'shipping' | 'payment',
+  step: 'contact' | 'address' | 'shipping' | 'payment' | 'consent',
   state: CheckoutFormState,
 ): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -92,6 +100,23 @@ export function validateCheckoutStep(
   if (step === 'payment') {
     if (!state.paymentMethod) {
       errors.paymentMethod = 'Selecciona un método de pago.';
+    }
+  }
+
+  // Its own step, not folded into 'payment': the authorization is a distinct
+  // legal act from choosing how to pay, it gates the submit for a different
+  // reason, and giving it its own key keeps the section that renders it able
+  // to ask about exactly itself.
+  //
+  // Unlike every other rule in this function, this one is NOT merely a UX
+  // mirror of a server rule that would catch it anyway on submit — well, the
+  // server does reject it (checkout.controller.ts's parseCheckoutBody 400s on
+  // a missing `acceptedPrivacyPolicy`), but the point of checking here is
+  // different: the shopper must be able to see WHY the button did nothing,
+  // next to the box they did not tick, before their data is ever sent.
+  if (step === 'consent') {
+    if (!state.acceptedPrivacyPolicy) {
+      errors.acceptedPrivacyPolicy = 'Debes autorizar el tratamiento de tus datos personales para continuar.';
     }
   }
 

@@ -9,6 +9,7 @@ import type {
   TransactionStatusResult,
 } from '@ventia/payments';
 import { PaymentsService } from './payments.service';
+import { recordPaymentAttempt } from './payment-ledger';
 import { ORDER_CURRENCY, getProvider } from './provider-registry';
 
 /** How long an online-payment order must have existed before reconciliation
@@ -493,6 +494,14 @@ async function reconcileOneOrder(
   // nothing below this point may settle from an unbound one.
   let result: TransactionStatusResult | null = null;
   let providerRef: string | null = null;
+  /** WHICH lookup produced the bound `result` — `'by-id'` or
+   * `'search-by-reference'`. Recorded verbatim in the ledger row's `raw`
+   * because the two answers carry materially different guarantees (see
+   * `ACCOUNT_SCOPED_LOOKUP_PROVIDERS`), and a support engineer reading a
+   * ledger row months later cannot otherwise tell which one they are looking
+   * at. Assigned at exactly the two sites that assign `providerRef`, so the
+   * three values can never describe different lookups. */
+  let resolvedVia: string | null = null;
 
   // ⚠️ MANDATORY on EVERY path — see `checkOrderBinding`'s doc comment before
   // touching this. Nothing may settle from a result we cannot prove is about
@@ -541,7 +550,10 @@ async function reconcileOneOrder(
       );
     } else {
       result = boundOrNull(await provider.getTransactionStatus(order.providerRef, cfg), 'by-id');
-      if (result) providerRef = order.providerRef;
+      if (result) {
+        providerRef = order.providerRef;
+        resolvedVia = 'by-id';
+      }
     }
   }
 
@@ -585,7 +597,10 @@ async function reconcileOneOrder(
         },
         'search-by-reference',
       );
-      if (result) providerRef = found.providerRef;
+      if (result) {
+        providerRef = found.providerRef;
+        resolvedVia = 'search-by-reference';
+      }
     }
     // `found === null` — no payment attempt exists for this reference.
     // Nothing to reconcile; falls through to the return below.
@@ -600,6 +615,87 @@ async function reconcileOneOrder(
   // disclosed coverage gap, and it is deliberate.
   if (!result || !providerRef) {
     return false;
+  }
+
+  // ---- The payment ledger (docs/SPEC.md §8 `payments`).
+  //
+  // The OTHER settle path — `webhooks.controller.ts` — appends the same kind
+  // of row for the same reason, and both must, or the ledger is silently
+  // incomplete in exactly the interesting places: the rows this path
+  // contributes are the payments whose webhook never arrived, which is the
+  // whole reason this sweep exists. See `recordPaymentAttempt`'s doc comment.
+  //
+  // WHY HERE: this is the first point at which a gateway statement has been
+  // both resolved AND proven to be about this order (`checkOrderBinding`
+  // passed, via whichever lookup produced `result`), and it is before any
+  // settle. Every outcome below reaches it — PAID, FAILED, EXPIRED, and the
+  // gateway's own "still PENDING" — because all four are statements about this
+  // order's money, and none of them is a statement about what this worker did.
+  // The unbound and unresolved cases return above and write nothing, for the
+  // same reason the webhook path's refused branches do: a result this worker
+  // could not tie to this order must not be recorded as this order's money.
+  //
+  // WHY BEFORE THE SETTLE: a throw here is caught by `reconcilePendingPayments`'s
+  // per-order try/catch, which logs and moves on with the order UNTOUCHED, so
+  // the next sweep two minutes later retries the whole thing cleanly. Writing
+  // after a settle would instead leave a transitioned order with no ledger row
+  // and no retry that could add one, since the order no longer matches the
+  // candidate query.
+  //
+  // The `every 2 minutes, forever` case is real and is handled by the ledger's
+  // own unique key, not by a condition here: an order in PENDING/FAILED whose
+  // gateway answer is still FAILED is a candidate on every single pass (wave-2
+  // FIX 1), so this line runs on every pass and the second and later ones are
+  // `ON CONFLICT DO NOTHING` no-ops.
+  //
+  // A result with NO amount is the one case that records nothing. It is a
+  // documented possibility — `checkOrderBinding` binds on `reference` alone
+  // when the gateway supplied no amount — but this is a ledger of MONEY, and a
+  // statement with no amount makes no claim about any. Substituting
+  // `order.totalCents` would be inventing the very fact the row is supposed to
+  // evidence, which is the same reason `checkOrderBinding` refuses to assume a
+  // missing currency is COP. All three adapters do report an amount in
+  // practice, so this is logged loudly rather than passed over: it means a
+  // gateway's response shape changed under us. The settle below is
+  // deliberately NOT blocked by it — the binding rules decide whether to
+  // settle, and this line must never become a sixth one.
+  if (result.amountCents === undefined) {
+    console.error('[reconciliation-worker] bound gateway result carries no amount — settling, but recording no ledger row', {
+      orderId: order.id,
+      tenantId: order.tenantId,
+      provider: providerId,
+      providerRef,
+      gatewayStatus: result.status,
+    });
+  } else {
+    await recordPaymentAttempt({
+      tenantId: order.tenantId,
+      orderId: order.id,
+      provider: providerId,
+      providerRef,
+      // The GATEWAY's number, already proven equal to `order.totalCents` by
+      // `checkOrderBinding` — recorded as the gateway's so that the day the two
+      // diverge (a partial capture, a partial refund) this column is where the
+      // difference appears instead of where it is erased.
+      amountCents: result.amountCents,
+      status: result.status,
+      // Unlike the webhook path, this one produces no `WebhookEvent` row, so
+      // there is nothing to point at: the normalized lookup result IS the
+      // evidence, and this is the only place it is ever persisted. `via`
+      // records which lookup produced it, because a by-id answer and a
+      // by-our-reference answer carry different guarantees (see
+      // `ACCOUNT_SCOPED_LOOKUP_PROVIDERS`).
+      raw: {
+        source: 'reconciliation',
+        via: resolvedVia,
+        gateway: {
+          status: result.status,
+          reference: result.reference ?? null,
+          amountCents: result.amountCents,
+          currency: result.currency ?? null,
+        },
+      },
+    });
   }
 
   if (result.status === 'PAID') {

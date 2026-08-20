@@ -89,6 +89,49 @@ export class CartController {
     return cart;
   }
 
+  /**
+   * Adopts the cart behind an agent's `/carrito?c=<key>` link: the shopper
+   * follows the link, the storefront posts the key here, and the response
+   * sets `ventia_cart` to it so every later cart call — read, update,
+   * checkout — sees the agent's basket.
+   *
+   * Deliberately NOT a GET: it changes which cart the browser owns, and a GET
+   * that mutates state gets prefetched by browsers and link previewers. The
+   * key travels in the body for the same reason the route is a POST.
+   *
+   * `CartCookieKey` is ignored here — that is the point. A shopper who
+   * already has a cart and opens an agent link ends up on the agent's cart;
+   * their previous one is left intact in the database rather than merged or
+   * deleted, so nothing they built is destroyed by clicking a link.
+   */
+  @Post('adopt')
+  async adopt(
+    @StorefrontTenantId() tenantId: string,
+    @Body() body: unknown,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (typeof b.cookieKey !== 'string' || b.cookieKey.length === 0) {
+      throw new HttpException(
+        { error: 'VALIDATION_FAILED', details: { cookieKey: 'cookieKey es requerido' } },
+        400,
+      );
+    }
+
+    const cart = await this.cartService.adopt(tenantId, b.cookieKey);
+    // A stale or foreign key is a 404, the same answer as a link to a cart
+    // that never existed — a caller must not be able to probe which keys are
+    // real for this store.
+    if (!cart) throw new HttpException({ error: 'CART_NOT_FOUND' }, 404);
+
+    res.cookie(CART_COOKIE_NAME, b.cookieKey, {
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: CART_COOKIE_MAX_AGE_MS,
+    });
+    return cart;
+  }
+
   @Patch('items/:id')
   async updateItem(
     @StorefrontTenantId() tenantId: string,

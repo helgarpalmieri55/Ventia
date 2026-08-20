@@ -16,6 +16,7 @@ import { startTestDb } from './helpers';
  */
 process.env.RATE_LIMIT_AUTH_PER_MINUTE = '1';
 process.env.RATE_LIMIT_CHECKOUT_PER_MINUTE = '1';
+process.env.RATE_LIMIT_AGENT_PER_MINUTE = '1';
 process.env.RATE_LIMIT_WEBHOOKS_PER_MINUTE = '1';
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
@@ -62,6 +63,18 @@ describe('rate limiting is wired onto the real routes', () => {
     const server = app.getHttpServer();
     await request(server).post('/v1/storefront/checkout').send({});
     const second = await request(server).post('/v1/storefront/checkout').send({});
+
+    expect(second.status).toBe(429);
+    expect(second.body.error).toBe('TOO_MANY_REQUESTS');
+  });
+
+  it('limits /v1/storefront/agent', async () => {
+    // The route 404s without a resolvable tenant, which is fine here: the
+    // question is only whether the LIMITER runs before Nest routing does, and
+    // a 429 on the second call is the only way that answer can be yes.
+    const server = app.getHttpServer();
+    await request(server).post('/v1/storefront/agent/messages').send({ message: 'hola' });
+    const second = await request(server).post('/v1/storefront/agent/messages').send({ message: 'hola' });
 
     expect(second.status).toBe(429);
     expect(second.body.error).toBe('TOO_MANY_REQUESTS');

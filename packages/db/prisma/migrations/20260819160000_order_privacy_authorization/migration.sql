@@ -1,0 +1,65 @@
+-- The *prueba de la autorización* for the shopper's data, recorded on the
+-- order it was collected with (Ley 1581 de 2012 arts. 8 and 9, SPEC.md §9).
+--
+-- Art. 9 requires the Titular's authorization to be PRIOR, EXPRESS and
+-- INFORMED before their personal data may be treated at all — and Colombian
+-- law, unlike the GDPR, has no "necessary for the performance of a contract"
+-- basis: art. 10's exceptions are public-register data, public-entity
+-- requests, medical emergencies and historical/statistical/scientific
+-- processing, none of which describes selling someone a shirt. So a checkout
+-- without an authorization is not a checkout with a weaker legal basis; it is
+-- a collection with none. The storefront therefore asks for one explicitly
+-- (an unchecked-by-default checkbox linking to the store's own /privacidad),
+-- and the checkout endpoint refuses a submission that does not carry it.
+--
+-- Art. 8 lit. e) then gives that same Titular the right to demand "prueba de
+-- la autorización otorgada", and Decreto 1377 art. 12 puts the burden of
+-- keeping that proof on the Responsable. An authorization you obtained but
+-- cannot evidence is, in front of the SIC, an authorization you did not
+-- obtain. These two columns are that evidence.
+--
+--   "privacyAcceptedAt"    — the instant the shopper submitted the checkout
+--                            with the box ticked. Server clock, never the
+--                            browser's: the client is asked WHETHER it
+--                            authorized, never WHEN.
+--   "privacyPolicyVersion" — WHICH text they were pointed at. A fingerprint,
+--                            `sha256:<16 hex>` over the tenant's published
+--                            `TenantContent(policy_privacy)` title + body, or
+--                            the sentinel `sin-politica-publicada` when the
+--                            merchant had published none at that moment. The
+--                            sentinel is not a filler value: it is the
+--                            evidence that this particular authorization was
+--                            given against no published policy, which is
+--                            precisely what a merchant needs to see.
+--
+-- Nullable, with no backfill and no default. Every order that predates this
+-- migration was placed through a checkout that never asked, and there is no
+-- honest value to write into those rows — inventing a timestamp or a version
+-- for them would manufacture the exact proof this column exists to hold. NULL
+-- here means "we cannot show an authorization for this order", which is the
+-- truth about them, and it is deliberately distinguishable from every row
+-- written afterwards.
+--
+-- Deliberately NOT a separate table. The authorization is an attribute of one
+-- collection event, and the order row IS that event; a `DataConsent` table
+-- would hold a foreign key to "Order" plus these two values and would be
+-- joined on every question it can answer. It is also deliberately not stored
+-- inside `billingFields`/`shippingAddress`: those are the JSON columns the
+-- anonymizer scrubs, and this must survive a supresión (see below).
+--
+-- No PII, on purpose, and load-bearing. "privacyAcceptedAt" is a fact about
+-- the order — which already carries "createdAt" — and "privacyPolicyVersion"
+-- is a fact about the MERCHANT's own policy text, byte-identical for every
+-- shopper who checked out against that revision. Nothing here narrows to a
+-- person, so the Ley 1581 anonymizer
+-- (services/api/src/privacy/privacy.service.ts) does not touch either column,
+-- and must not: a supresión request erases the person, not the record that
+-- the treatment performed before it was lawfully authorized.
+--
+-- No GRANT statement. 20260723182728_rls granted SELECT/INSERT/UPDATE/DELETE
+-- to `ventia_app` at TABLE level on "Order", and a table-level grant covers
+-- columns added later (unlike the column-level grant on "WhatsAppNumber" in
+-- 20260818120000, which would need amending for a new column). The row-level
+-- tenant_isolation policy is likewise per-row and unaffected.
+ALTER TABLE "Order" ADD COLUMN "privacyAcceptedAt" TIMESTAMP(3);
+ALTER TABLE "Order" ADD COLUMN "privacyPolicyVersion" TEXT;

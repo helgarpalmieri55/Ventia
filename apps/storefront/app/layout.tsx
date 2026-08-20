@@ -5,6 +5,8 @@ import { buildThemeVars, type TenantTheme } from '../lib/theme';
 import { fontVariables } from '../lib/fonts';
 import { CartProvider } from '../lib/cart-context';
 import { CartDrawer } from '../components/cart-drawer';
+import { ChatWidget } from '../components/chat-widget';
+import { SiteFooter } from '../components/site-footer';
 
 export const metadata = { title: 'Ventia' };
 
@@ -40,6 +42,18 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <CartProvider>
           <CartDrawer />
           {children}
+          {/* Rendered for every store, unconditionally. The four pages it
+              links are the ones Ley 1581 art. 12 / Decreto 1074 require to be
+              *made known* rather than merely to exist at a URL, and before
+              this the storefront linked to none of them from anywhere. Inside
+              CartProvider only because it is `children`'s sibling; it is a
+              plain Server Component and uses no cart state. */}
+          <SiteFooter />
+          {/* Only for a store whose plan actually includes AI messages — see
+              `agentEnabled` on the tenant resolve. Offering a chat that can
+              only answer "no puedo responderte por chat" is worse than
+              offering none. */}
+          {tenant?.agentEnabled ? <ChatWidget agentName={tenant.agentName} /> : null}
         </CartProvider>
       </body>
     </html>

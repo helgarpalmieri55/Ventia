@@ -27,10 +27,22 @@ const MESSAGES: Record<string, string> = {
   ONLINE_PAYMENT_PENDING:
     'Este pedido se paga en línea y su pago aún no se ha confirmado. Se confirmará automáticamente cuando la pasarela reporte el pago.',
   ORDER_NOT_FOUND: 'No encontramos este pedido.',
+  // `PrivacyController` answers 404 (never 403) for a customer id belonging to
+  // another tenant, so this message must read the same for "does not exist"
+  // and "is not yours" — it is the copy for a no-existence-oracle response.
+  CUSTOMER_NOT_FOUND: 'No encontramos este cliente. Actualiza la página.',
   INVALID_UPLOAD: 'El archivo subido no es válido.',
   CSV_TOO_LARGE: 'El archivo CSV supera el tamaño permitido.',
   CSV_INVALID: 'El archivo CSV tiene un formato inválido.',
   LAUNCH_CHECKLIST_INCOMPLETE: 'Completa la lista de lanzamiento antes de continuar.',
+  // The `externalId` unique constraint on WhatsAppNumber: another store already
+  // registered this phone number ID / instance. Named as a mis-typed identifier
+  // first, because that is the overwhelmingly likely cause — and taking the
+  // number over silently would break the other store's routing, so there is
+  // nothing this merchant can do from here except check what they pasted.
+  WHATSAPP_NUMBER_ALREADY_CONNECTED:
+    'Ese número ya está conectado en otra tienda. Revisa el identificador que ingresaste; si de verdad es tuyo, contacta soporte.',
+  WHATSAPP_NUMBER_NOT_FOUND: 'No encontramos este número de WhatsApp. Actualiza la página.',
   NETWORK: 'No pudimos conectar con el servidor. Verifica tu conexión.',
   UNKNOWN: 'Ocurrió un error inesperado. Intenta de nuevo.',
 };

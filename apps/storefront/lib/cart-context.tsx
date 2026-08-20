@@ -20,6 +20,13 @@ export interface CartContextValue {
    * just makes the client's own state (drawer badge count, `/carrito` page)
    * match that reality immediately, without waiting on/triggering a refetch. */
   clearCart: () => void;
+  /** Re-reads the cart from the server. Needed when the cart changed WITHOUT
+   * going through one of the mutations above — which happens exactly once, on
+   * adopting an agent-built cart (`/carrito?c=…`), where the server swaps
+   * which cart the `ventia_cart` cookie points at and this client's copy is
+   * suddenly the wrong cart entirely. Goes through the same mutation queue so
+   * it cannot interleave with an in-flight qty change. */
+  refreshCart: () => Promise<void>;
 }
 
 const CartContext = React.createContext<CartContextValue | null>(null);
@@ -101,6 +108,14 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     setCart({ lines: [], subtotalCents: 0, taxCents: 0 });
   }, []);
 
+  const refreshCart = React.useCallback(
+    () =>
+      enqueue(async () => {
+        setCart(await fetchCart());
+      }),
+    [enqueue],
+  );
+
   const value = React.useMemo<CartContextValue>(
     () => ({
       cart,
@@ -112,8 +127,9 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       updateItem,
       removeItem,
       clearCart,
+      refreshCart,
     }),
-    [cart, loading, isOpen, addItem, updateItem, removeItem, clearCart],
+    [cart, loading, isOpen, addItem, updateItem, removeItem, clearCart, refreshCart],
   );
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;

@@ -2,33 +2,46 @@ import { describe, expect, it } from 'vitest';
 import { navItems } from '../lib/nav';
 
 describe('navItems', () => {
-  it('gives owners all 8 items in order, with es-CO labels', () => {
+  it('gives owners all 10 items in order, with es-CO labels', () => {
     const items = navItems('owner');
 
-    expect(items).toHaveLength(8);
+    expect(items).toHaveLength(10);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
       'Importar CSV',
       'Pedidos',
+      'Clientes',
       'Pagos por revisar',
+      'Conversaciones',
       'Equipo',
       'Configuración',
       'Lanzamiento',
     ]);
   });
 
-  it('gives staff only the 5 catalog items', () => {
+  it('gives staff only the 7 catalog items', () => {
     const items = navItems('staff');
 
-    expect(items).toHaveLength(5);
+    expect(items).toHaveLength(7);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
       'Importar CSV',
       'Pedidos',
+      'Clientes',
       'Pagos por revisar',
+      'Conversaciones',
     ]);
+  });
+
+  it('gives both roles /conversaciones, mirroring the API\'s owner-or-staff guard', () => {
+    // ConversationsController uses AdminSessionGuard with no @Roles(), for the
+    // same reason as orders and payment alerts: answering a shopper the agent
+    // handed over is fulfilment work, and staff are the people most likely to
+    // be doing it.
+    expect(navItems('owner').some((item) => item.href === '/conversaciones')).toBe(true);
+    expect(navItems('staff').some((item) => item.href === '/conversaciones')).toBe(true);
   });
 
   it('gives both roles /pagos-por-revisar, mirroring the API\'s owner-or-staff guard', () => {
@@ -45,8 +58,44 @@ describe('navItems', () => {
     expect(navItems('staff').some((item) => item.href === '/pedidos')).toBe(true);
   });
 
+  it("gives both roles /clientes: the list mirrors the API's owner-or-staff guard", () => {
+    // PrivacyController has no class-level @Roles(); only the irreversible
+    // supresión handler is @Roles('owner'), and the page hides that button
+    // from staff. Hiding the whole section from staff would take away the
+    // customer lookup they need for fulfilment.
+    expect(navItems('owner').some((item) => item.href === '/clientes')).toBe(true);
+    expect(navItems('staff').some((item) => item.href === '/clientes')).toBe(true);
+  });
+
   it('every item has a distinct href', () => {
     const hrefs = navItems('owner').map((item) => item.href);
     expect(new Set(hrefs).size).toBe(hrefs.length);
+  });
+});
+
+describe('the merchant nav and the platform console', () => {
+  /**
+   * The operator console at `/plataforma` is deliberately absent from the
+   * merchant sidebar, for both roles.
+   *
+   * `navItems` is keyed on `Role` — 'owner' | 'staff' — which is a
+   * *membership* role. Platform authority in this codebase is emphatically
+   * not a membership: `PlatformAdminGuard` reads an env allowlist plus
+   * `User.isPlatformAdmin` plus a verified email, and explicitly refuses to
+   * consult `Membership` so that no merchant-facing write path can ever widen
+   * a session into an operator one. Gating a platform link on `role ===
+   * 'owner'` would state the opposite relationship in the UI and would show
+   * every store owner on the platform a link they cannot use.
+   *
+   * The alternative — probing `/v1/platform/tenants` from this layout to
+   * decide whether to draw the link — would put one cross-tenant request on
+   * every merchant page render, for every merchant, to benefit a handful of
+   * operators who reach the console by bookmark. Operators get there by URL;
+   * the console's own layout is what checks them, by asking the API.
+   */
+  it('never puts a /plataforma link in either role\'s sidebar', () => {
+    for (const role of ['owner', 'staff'] as const) {
+      expect(navItems(role).some((item) => item.href.startsWith('/plataforma'))).toBe(false);
+    }
   });
 });

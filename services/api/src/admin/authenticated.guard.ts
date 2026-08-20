@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, HttpException, Inject, Injectable } from
 import type { Request } from 'express';
 import { platformDb } from '@ventia/db';
 import { getSessionContext, type SessionContext } from '../auth/session-context';
+import { assertImpersonatedRequestAllowed } from '../auth/impersonation-policy';
 import { AUTH_INSTANCE, type AuthInstance } from './auth-instance';
 
 /** Stashes the raw (possibly tenant-less) session on the request — see
@@ -42,6 +43,21 @@ export class AuthenticatedGuard implements CanActivate {
 
     const session = await getSessionContext(this.auth, platformDb, headers);
     if (!session) throw new HttpException({ error: 'UNAUTHENTICATED' }, 401);
+
+    // The impersonation policy applies here too, even though this guard
+    // fronts exactly one route today (POST /v1/admin/onboarding/tenant).
+    // Leaving it out would make "writes are default-deny under impersonation"
+    // true of one guard rather than of the system, and the next route added
+    // behind this guard would inherit the hole silently — which is the exact
+    // failure mode design §4 rejects deny-lists for.
+    if (session.impersonation) {
+      assertImpersonatedRequestAllowed(
+        session.impersonation.tenantId,
+        req.method,
+        req.originalUrl ?? req.url,
+        req.tenant?.tenantId,
+      );
+    }
 
     req.session = session;
     return true;

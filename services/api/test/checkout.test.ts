@@ -6,6 +6,7 @@ import type { PrismaClient as PrismaClientType } from '@ventia/db';
 import { startTestDb } from './helpers';
 import { MAILER, type Mailer, type MailMessage } from '../src/mailer/mailer';
 import type { PaymentsService as PaymentsServiceType } from '../src/payments/payments.service';
+import { NO_PUBLISHED_POLICY_VERSION, privacyPolicyVersionFor } from '../src/checkout/privacy-consent';
 
 const CHECKOUT_TEST_DOMAINS = [
   'checkout-a.ventia.localhost',
@@ -27,6 +28,10 @@ const CHECKOUT_TEST_DOMAINS = [
   // subdomain), which is the case no `PLATFORM_ROOT_DOMAIN` rule could derive.
   'checkout-o.ventia.localhost',
   'tienda-p.example.com',
+  // Tenant Q exists only for the Ley 1581 authorization tests at the bottom of
+  // this file, which need a tenant whose order rows and published policy
+  // nothing else in this file touches.
+  'checkout-q.ventia.localhost',
 ];
 
 // Same fixture shape as payments-service.test.ts/webhooks.test.ts's own
@@ -65,6 +70,7 @@ let tenantMId: string; // mercadopago checkout, credentials saved but missing ev
 let tenantNId: string; // epayco checkout, credentials saved but missing epaycoCustomerId (phase-7 review gap)
 let tenantOId: string; // wompi checkout on a *.ventia.localhost domain — half of the two-tenant redirect-URL test
 let tenantPId: string; // wompi checkout on a fully CUSTOM domain — other half of the two-tenant redirect-URL test
+let tenantQId: string; // Ley 1581 authorization: the checkbox gate + the prueba de la autorización written onto the order
 
 // Product fixture ids, populated in beforeAll.
 let productXId: string; // tenant A — 45900 cents
@@ -84,6 +90,7 @@ let mercadopagoIncompleteCredsProductId: string; // tenant M — mercadopago cre
 let epaycoIncompleteCredsProductId: string; // tenant N — epayco credentials missing epaycoCustomerId
 let multiTenantOProductId: string; // tenant O — wompi checkout, two-tenant redirect-URL test
 let multiTenantPProductId: string; // tenant P — wompi checkout, two-tenant redirect-URL test
+let consentProductId: string; // tenant Q — plenty of stock, one cod checkout per authorization test
 
 const BOGOTA_ADDRESS = {
   nombreCompleto: 'Ana Ejemplo',
@@ -496,6 +503,30 @@ beforeAll(async () => {
   });
   multiTenantPProductId = multiTenantPProduct.id;
 
+  // Tenant Q: the Ley 1581 authorization tests. Ordinary flat shipping and a
+  // deep stock, so nothing about the authorization assertions can be confused
+  // with a stock or shipping failure. Starts with NO published
+  // `policy_privacy` content — one test depends on that, and another publishes
+  // some for itself.
+  const tenantQ = await prisma.tenant.create({
+    data: {
+      slug: 'checkout-q',
+      name: 'Checkout Q',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+        },
+      },
+    },
+  });
+  tenantQId = tenantQ.id;
+  await prisma.tenantDomain.create({ data: { tenantId: tenantQId, domain: 'checkout-q.ventia.localhost', isPrimary: true } });
+  const consentProduct = await prisma.product.create({
+    data: { tenantId: tenantQId, name: 'Producto Consentimiento', slug: 'producto-consentimiento', priceCents: 50000, status: 'active', stock: 50 },
+  });
+  consentProductId = consentProduct.id;
+
   const { createApp } = await import('../src/main');
   app = await createApp();
   await app.init();
@@ -575,12 +606,15 @@ describe('POST /v1/storefront/checkout — happy path', () => {
     // lineX: 45900 * 2 = 91800 subtotal; 19% tax portion = 91800 - round(91800/1.19) = 14657.
     // lineY: 20000 * 1 = 20000 subtotal; 19% tax portion = 20000 - round(20000/1.19) = 3193.
     const expectedSubtotal = 91800 + 20000;
+    // The IVA CONTAINED IN that subtotal, not an addition to it — SPEC.md §5's
+    // "prices include IVA". Recorded on the order for the DIAN-ready
+    // breakdown, and deliberately absent from the total below.
     const expectedTax = 14657 + 3193;
     const expectedShipping = 12000; // flat-1
-    const expectedTotal = expectedSubtotal + expectedTax + expectedShipping;
+    const expectedTotal = expectedSubtotal + expectedShipping;
     expect(expectedSubtotal).toBe(111800);
     expect(expectedTax).toBe(17850);
-    expect(expectedTotal).toBe(141650);
+    expect(expectedTotal).toBe(123800);
 
     const before = await prisma.order.count({ where: { tenantId: tenantAId } });
     expect(before).toBe(0);
@@ -595,6 +629,7 @@ describe('POST /v1/storefront/checkout — happy path', () => {
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(201);
@@ -688,6 +723,7 @@ describe('POST /v1/storefront/checkout — insufficient stock rejects the whole 
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -721,6 +757,7 @@ describe('POST /v1/storefront/checkout — product archived after being added to
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -751,6 +788,7 @@ describe('POST /v1/storefront/checkout — COD-restricted departamento', () => {
         address: BOGOTA_ADDRESS, // departamentoCode '11', which tenant C restricts
         shippingMethodId: 'flat-1',
         paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -782,6 +820,7 @@ describe('POST /v1/storefront/checkout — unconfigured shipping method id', () 
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'does-not-exist',
         paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -803,6 +842,7 @@ describe('POST /v1/storefront/checkout — no cart cookie at all', () => {
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
       });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('CART_EMPTY');
@@ -835,6 +875,7 @@ describe('POST /v1/storefront/checkout — concurrency (pg_advisory_xact_lock sa
           address: BOGOTA_ADDRESS,
           shippingMethodId: 'flat-1',
           paymentMethod: 'cod',
+          acceptedPrivacyPolicy: true,
         }),
       request(app.getHttpServer())
         .post('/v1/storefront/checkout')
@@ -846,6 +887,7 @@ describe('POST /v1/storefront/checkout — concurrency (pg_advisory_xact_lock sa
           address: BOGOTA_ADDRESS,
           shippingMethodId: 'flat-1',
           paymentMethod: 'cod',
+          acceptedPrivacyPolicy: true,
         }),
     ]);
 
@@ -889,6 +931,7 @@ describe('POST /v1/storefront/checkout — concurrent checkout of the SAME cart'
           address: BOGOTA_ADDRESS,
           shippingMethodId: 'flat-1',
           paymentMethod: 'cod',
+          acceptedPrivacyPolicy: true,
         }),
       request(app.getHttpServer())
         .post('/v1/storefront/checkout')
@@ -900,6 +943,7 @@ describe('POST /v1/storefront/checkout — concurrent checkout of the SAME cart'
           address: BOGOTA_ADDRESS,
           shippingMethodId: 'flat-1',
           paymentMethod: 'cod',
+          acceptedPrivacyPolicy: true,
         }),
     ]);
 
@@ -936,6 +980,7 @@ describe('POST /v1/storefront/checkout — repeat customer', () => {
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
       });
     expect(res.status).toBe(201);
 
@@ -966,6 +1011,7 @@ describe('POST /v1/storefront/checkout — wompi happy path', () => {
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'wompi',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(201);
@@ -1046,6 +1092,7 @@ describe('POST /v1/storefront/checkout — two tenants get two different payment
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'wompi',
+        acceptedPrivacyPolicy: true,
       });
     expect(resO.status).toBe(201);
 
@@ -1060,6 +1107,7 @@ describe('POST /v1/storefront/checkout — two tenants get two different payment
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'wompi',
+        acceptedPrivacyPolicy: true,
       });
     expect(resP.status).toBe(201);
 
@@ -1112,6 +1160,7 @@ describe('POST /v1/storefront/checkout — wompi insufficient stock rejects the 
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'wompi',
+        acceptedPrivacyPolicy: true,
       });
 
     // Side-by-side with the cod insufficient-stock test above: same error
@@ -1150,6 +1199,7 @@ describe('POST /v1/storefront/checkout — wompi checkout for a tenant with no W
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'wompi',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -1188,6 +1238,7 @@ describe('POST /v1/storefront/checkout — wompi credentials saved but missing i
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'wompi',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -1226,6 +1277,7 @@ describe('POST /v1/storefront/checkout — mercadopago credentials saved but mis
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'mercadopago',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -1262,6 +1314,7 @@ describe('POST /v1/storefront/checkout — epayco credentials saved but missing 
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'epayco',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -1292,6 +1345,7 @@ describe('POST /v1/storefront/checkout — invalid paymentMethod', () => {
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'paypal',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -1331,6 +1385,7 @@ describe('POST /v1/storefront/checkout — wompi concurrent reservation race (ad
           address: BOGOTA_ADDRESS,
           shippingMethodId: 'flat-1',
           paymentMethod: 'wompi',
+          acceptedPrivacyPolicy: true,
         }),
       request(app.getHttpServer())
         .post('/v1/storefront/checkout')
@@ -1342,6 +1397,7 @@ describe('POST /v1/storefront/checkout — wompi concurrent reservation race (ad
           address: BOGOTA_ADDRESS,
           shippingMethodId: 'flat-1',
           paymentMethod: 'wompi',
+          acceptedPrivacyPolicy: true,
         }),
     ]);
 
@@ -1379,6 +1435,7 @@ describe('POST /v1/storefront/checkout — mercadopago checkout, no adapter/cred
         address: BOGOTA_ADDRESS,
         shippingMethodId: 'flat-1',
         paymentMethod: 'mercadopago',
+        acceptedPrivacyPolicy: true,
       });
 
     expect(res.status).toBe(400);
@@ -1394,5 +1451,366 @@ describe('POST /v1/storefront/checkout — mercadopago checkout, no adapter/cred
 
     const cartStillThere = await prisma.cart.findFirst({ where: { tenantId: tenantLId, cookieKey: cookieValue } });
     expect(cartStillThere).not.toBeNull();
+  });
+});
+
+/**
+ * Attribution (SPEC.md §7): an order placed from a cart the AI agent built
+ * must be identifiable as AI-assisted. Every "ventas asistidas por IA" number
+ * the merchant is shown reads `Order.source`, so if it is hardcoded the KPI
+ * is silently, permanently zero — the kind of bug that looks like "the agent
+ * isn't selling anything" rather than like a bug.
+ */
+describe('POST /v1/storefront/checkout — order source is inherited from the cart', () => {
+  it('marks an order from an agent-built cart as source=agent', async () => {
+    // Shaped exactly like what `create_cart_link` writes: a fresh cart with
+    // its own key and `source: 'agent'`.
+    const cart = await prisma.cart.create({
+      data: { tenantId: tenantAId, cookieKey: crypto.randomUUID(), source: 'agent' },
+    });
+    await prisma.cartItem.create({ data: { tenantId: tenantAId, cartId: cart.id, productId: productXId, qty: 1 } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cart.cookieKey}`)
+      .send({
+        email: 'agent-attributed@example.com',
+        phone: '3009990077',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
+      });
+
+    expect(res.status).toBe(201);
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'agent-attributed@example.com' },
+    });
+    expect(order.source).toBe('agent');
+  });
+
+  it('still marks an ordinary shopper cart as source=web', async () => {
+    const cookieValue = await newCartWithItem('checkout-a.ventia.localhost', productXId, 1);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'web-attributed@example.com',
+        phone: '3009990078',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
+      });
+
+    expect(res.status).toBe(201);
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'web-attributed@example.com' },
+    });
+    expect(order.source).toBe('web');
+  });
+});
+
+/**
+ * SPEC.md §5's totals rule, pinned on its own rather than left implicit in the
+ * happy path's expected numbers.
+ *
+ * > Totals: Colombian retail convention — **prices include IVA**. Order stores
+ * > the tax breakdown per line derived from each product's tax rate
+ * > (`price_cents - price_cents / (1 + rate)` for the tax portion).
+ *
+ * The code read `subtotal + tax + shipping` for the whole of P2b/P2c/P3,
+ * charging every shopper the IVA contained in their own basket a second time.
+ * A happy-path test whose expected total is computed the same wrong way cannot
+ * catch that, which is why this states the RULE and derives nothing.
+ */
+describe('POST /v1/storefront/checkout — prices include IVA (SPEC §5)', () => {
+  it('charges the sticker price plus shipping, and nothing else', async () => {
+    const cookieValue = await newCartWithItem('checkout-a.ventia.localhost', productXId, 1);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'iva-inclusive@example.com',
+        phone: '3009990099',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
+      });
+
+    expect(res.status).toBe(201);
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'iva-inclusive@example.com' },
+    });
+
+    // productX is 45.900 at 19% IVA; flat-1 ships for 12.000. The shopper was
+    // quoted 45.900 on the product page, so that is what the product costs.
+    expect(order.subtotalCents).toBe(45_900);
+    expect(order.shippingCents).toBe(12_000);
+    expect(order.totalCents).toBe(57_900);
+  });
+
+  it('records the IVA CONTAINED IN the price, for the DIAN breakdown', async () => {
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'iva-inclusive@example.com' },
+    });
+
+    // 45.900 - round(45.900 / 1.19) = 7.329. Strictly less than the subtotal,
+    // which is the arithmetic signature of an INCLUDED tax: an added 19% would
+    // be 8.721 and would push the total to 66.621.
+    expect(order.taxCents).toBe(45_900 - Math.round(45_900 / 1.19));
+    expect(order.taxCents).toBeLessThan(order.subtotalCents);
+    expect(order.totalCents).toBe(order.subtotalCents + order.shippingCents);
+  });
+
+  it('is unaffected by a zero-rated or excluded product', async () => {
+    // `excluido` and `0` products have no IVA portion at all; the total is
+    // still price + shipping, so the rule holds without a special case.
+    const zeroRated = await prisma.product.create({
+      data: {
+        tenantId: tenantAId,
+        name: 'Libro Excluido',
+        slug: `libro-excluido-${Date.now()}`,
+        priceCents: 30_000,
+        status: 'active',
+        stock: 5,
+        taxRate: 'EXCLUIDO',
+      },
+    });
+    const cookieValue = await newCartWithItem('checkout-a.ventia.localhost', zeroRated.id, 1);
+
+    await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send({
+        email: 'iva-excluido@example.com',
+        phone: '3009990098',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
+      });
+
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'iva-excluido@example.com' },
+    });
+    expect(order.taxCents).toBe(0);
+    expect(order.totalCents).toBe(30_000 + 12_000);
+  });
+});
+
+/**
+ * Ley 1581 de 2012 (Habeas Data), SPEC.md §9.
+ *
+ * Two obligations are being tested, and they are not the same obligation:
+ *
+ *  - art. 9 — the authorization must be PRIOR, EXPRESS and INFORMED. Colombian
+ *    law has no GDPR-style "necessary for the performance of a contract"
+ *    basis; art. 10's exceptions are public-register data, public-entity
+ *    requests, medical emergencies and historical/statistical/scientific
+ *    processing. So a checkout without an authorization is not a lawful
+ *    collection on a weaker basis, it is an unlawful one — and the API, not
+ *    only the storefront's checkbox, has to refuse it.
+ *  - art. 8 lit. e) — the Titular may demand *prueba de la autorización*, and
+ *    Decreto 1377 art. 12 makes keeping that proof the Responsable's duty. An
+ *    authorization obtained and not recorded is, in front of the SIC, an
+ *    authorization not obtained.
+ */
+describe('POST /v1/storefront/checkout — Ley 1581 authorization (SPEC §9)', () => {
+  const CONSENT_ADDRESS = { ...BOGOTA_ADDRESS };
+
+  function consentCheckout(cookieValue: string, body: Record<string, unknown>) {
+    return request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-q.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cookieValue}`)
+      .send(body);
+  }
+
+  it('400 VALIDATION_FAILED without an authorization, with ZERO side effects — no Order, no Customer, and the cart survives', async () => {
+    const cookieValue = await newCartWithItem('checkout-q.ventia.localhost', consentProductId, 1);
+    const ordersBefore = await prisma.order.count({ where: { tenantId: tenantQId } });
+
+    const res = await consentCheckout(cookieValue, {
+      email: 'sin-autorizacion@example.com',
+      phone: '3009990101',
+      address: CONSENT_ADDRESS,
+      shippingMethodId: 'flat-1',
+      paymentMethod: 'cod',
+      // acceptedPrivacyPolicy deliberately absent — a client that never asked.
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+    expect(res.body.details.acceptedPrivacyPolicy).toBeTruthy();
+
+    // The whole point: the shopper's name, e-mail, phone and address were in
+    // that request body and NONE of it may be stored, because there was no
+    // lawful basis to store it. Not "stored and flagged" — not stored.
+    expect(await prisma.order.count({ where: { tenantId: tenantQId } })).toBe(ordersBefore);
+    expect(
+      await prisma.customer.count({ where: { tenantId: tenantQId, email: 'sin-autorizacion@example.com' } }),
+    ).toBe(0);
+    // And the shopper does not lose their cart over it — this is a fixable
+    // mistake, not a dead end.
+    const cart = await prisma.cart.findFirst({ where: { tenantId: tenantQId, cookieKey: cookieValue } });
+    expect(cart).not.toBeNull();
+  });
+
+  it('400s an explicit false, and every truthy near-miss — only a real boolean true is an authorization', async () => {
+    // `"false"`, `1` and `[]` are all truthy in JavaScript. A shopper's
+    // authorization is not a field where a caller's sloppy encoding gets read
+    // in their favour, so the check is `=== true`.
+    for (const value of [false, 'true', 'false', 1, 0, [], {}, null] as unknown[]) {
+      const cookieValue = await newCartWithItem('checkout-q.ventia.localhost', consentProductId, 1);
+      const res = await consentCheckout(cookieValue, {
+        email: `casi-${String(typeof value)}-${Math.random().toString(36).slice(2, 8)}@example.com`,
+        phone: '3009990102',
+        address: CONSENT_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+        acceptedPrivacyPolicy: value,
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.details.acceptedPrivacyPolicy).toBeTruthy();
+    }
+  });
+
+  it('records the prueba de la autorización on the order: WHEN it was given, at the SERVER clock, and against WHICH policy', async () => {
+    const cookieValue = await newCartWithItem('checkout-q.ventia.localhost', consentProductId, 1);
+
+    // A client trying to dictate its own evidence. Both values must be
+    // ignored: the party whose authorization is being evidenced cannot also
+    // be the source of the evidence.
+    const before = new Date();
+    const res = await consentCheckout(cookieValue, {
+      email: 'con-autorizacion@example.com',
+      phone: '3009990103',
+      address: CONSENT_ADDRESS,
+      shippingMethodId: 'flat-1',
+      paymentMethod: 'cod',
+      acceptedPrivacyPolicy: true,
+      privacyAcceptedAt: '1999-01-01T00:00:00.000Z',
+      privacyPolicyVersion: 'sha256:deadbeefdeadbeef',
+    });
+    const after = new Date();
+    expect(res.status).toBe(201);
+
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantQId, email: 'con-autorizacion@example.com' },
+    });
+
+    expect(order.privacyAcceptedAt).not.toBeNull();
+    const acceptedAt = order.privacyAcceptedAt as Date;
+    expect(acceptedAt.getTime()).toBeGreaterThanOrEqual(before.getTime() - 1000);
+    expect(acceptedAt.getTime()).toBeLessThanOrEqual(after.getTime() + 1000);
+    expect(acceptedAt.getTime()).not.toBe(new Date('1999-01-01T00:00:00.000Z').getTime());
+    expect(order.privacyPolicyVersion).not.toBe('sha256:deadbeefdeadbeef');
+
+    // Tenant Q has published no política de tratamiento, and the recorded
+    // version says exactly that rather than a plausible-looking hash. A
+    // merchant auditing their orders has to be able to SEE which of their
+    // sales were authorized against nothing they wrote.
+    expect(order.privacyPolicyVersion).toBe(NO_PUBLISHED_POLICY_VERSION);
+  });
+
+  it('fingerprints the policy actually published at that moment, and a new fingerprint once the merchant edits it', async () => {
+    const policy = {
+      title: 'Política de tratamiento de datos personales',
+      bodyMd: 'En Checkout Q tratamos sus datos personales con responsabilidad.',
+    };
+    await prisma.tenantContent.create({
+      data: { tenantId: tenantQId, type: 'policy_privacy', ...policy },
+    });
+
+    const firstCookie = await newCartWithItem('checkout-q.ventia.localhost', consentProductId, 1);
+    expect(
+      (
+        await consentCheckout(firstCookie, {
+          email: 'politica-v1@example.com',
+          phone: '3009990104',
+          address: CONSENT_ADDRESS,
+          shippingMethodId: 'flat-1',
+          paymentMethod: 'cod',
+          acceptedPrivacyPolicy: true,
+        })
+      ).status,
+    ).toBe(201);
+
+    const first = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantQId, email: 'politica-v1@example.com' },
+    });
+    // Reproducible from the text itself — which is the whole value of a
+    // fingerprint: hand it a candidate policy and it tells you whether that
+    // is the one the shopper was pointed at.
+    expect(first.privacyPolicyVersion).toBe(privacyPolicyVersionFor(policy));
+    expect(first.privacyPolicyVersion).toMatch(/^sha256:[0-9a-f]{16}$/);
+
+    // The merchant rewrites their policy. Orders placed afterwards must not
+    // silently claim to have been authorized against the old text, and orders
+    // placed before must not be retconned into the new one.
+    const revised = { ...policy, bodyMd: `${policy.bodyMd} Actualizada en agosto.` };
+    await prisma.tenantContent.update({
+      where: { tenantId_type: { tenantId: tenantQId, type: 'policy_privacy' } },
+      data: revised,
+    });
+
+    const secondCookie = await newCartWithItem('checkout-q.ventia.localhost', consentProductId, 1);
+    await consentCheckout(secondCookie, {
+      email: 'politica-v2@example.com',
+      phone: '3009990105',
+      address: CONSENT_ADDRESS,
+      shippingMethodId: 'flat-1',
+      paymentMethod: 'cod',
+      acceptedPrivacyPolicy: true,
+    });
+
+    const second = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantQId, email: 'politica-v2@example.com' },
+    });
+    expect(second.privacyPolicyVersion).toBe(privacyPolicyVersionFor(revised));
+    expect(second.privacyPolicyVersion).not.toBe(first.privacyPolicyVersion);
+
+    const firstAgain = await prisma.order.findUniqueOrThrow({ where: { id: first.id } });
+    expect(firstAgain.privacyPolicyVersion).toBe(first.privacyPolicyVersion);
+  });
+
+  it('holds no personal data: the recorded evidence is identical for two different shoppers', async () => {
+    // Why this matters: it is what makes the Ley 1581 anonymizer's decision to
+    // LEAVE these two columns alone correct (see
+    // test/privacy-anonymize.test.ts). If the fingerprint were per-shopper it
+    // would be a pseudonymous identifier and would have to be erased on a
+    // supresión request, taking the proof of authorization with it.
+    const shoppers = ['sin-pii-uno@example.com', 'sin-pii-dos@example.com'];
+    for (const email of shoppers) {
+      const cookieValue = await newCartWithItem('checkout-q.ventia.localhost', consentProductId, 1);
+      await consentCheckout(cookieValue, {
+        email,
+        phone: '3009990106',
+        address: { ...CONSENT_ADDRESS, nombreCompleto: `Titular ${email}` },
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
+      });
+    }
+
+    const [a, b] = await Promise.all(
+      shoppers.map((email) =>
+        prisma.order.findFirstOrThrow({ where: { tenantId: tenantQId, email } }),
+      ),
+    );
+    expect(a.privacyPolicyVersion).toBe(b.privacyPolicyVersion);
+    for (const order of [a, b]) {
+      const version = order.privacyPolicyVersion as string;
+      expect(version).not.toContain('@');
+      expect(version).not.toContain('3009990106');
+    }
   });
 });

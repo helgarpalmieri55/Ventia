@@ -108,8 +108,10 @@ export function CartDrawer() {
                   <span className="text-muted-foreground">Subtotal</span>
                   <span>{formatCOP(cart.subtotalCents)}</span>
                 </div>
+                {/* "IVA incluido", not an addition — see the cart page's
+                    identical block and SPEC.md §5. */}
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Impuestos</span>
+                  <span className="text-muted-foreground">IVA incluido</span>
                   <span>{formatCOP(cart.taxCents)}</span>
                 </div>
               </div>

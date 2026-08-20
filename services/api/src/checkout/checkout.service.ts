@@ -1,5 +1,5 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
-import { Prisma, platformDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
+import { Prisma, platformDb, tenantDb, type TaxRate as PrismaTaxRate } from '@ventia/db';
 import {
   DEPARTAMENTOS,
   generateOrderReference,
@@ -15,6 +15,7 @@ import { getProvider, PAYMENT_PROVIDER_NOT_CONFIGURED } from '../payments/provid
 import { tenantStorefrontBaseUrl } from '../tenants/tenant-public-url';
 import { ShippingService } from './shipping.service';
 import { nextOrderNumber } from './order-number';
+import { privacyPolicyVersionFor } from './privacy-consent';
 
 // Stock is held for 15 minutes while a non-`cod` order's payment is pending
 // (P3a design doc decision 2) — released by a later BullMQ job (a
@@ -61,6 +62,19 @@ export interface CheckoutInput {
   address: CheckoutAddressInput; // from @ventia/core — already validated by the controller before this service is called
   shippingMethodId: string;
   paymentMethod: 'cod' | PaymentProviderId;
+  /**
+   * The shopper's Ley 1581 art. 9 authorization, already asserted by
+   * `parseCheckoutBody`.
+   *
+   * Typed `true`, not `boolean`, on purpose: the controller 400s a submission
+   * that lacks it, so by the time a `CheckoutInput` exists the authorization
+   * has been given — and a `boolean` here would leave a representable state
+   * ("checkout proceeding without authorization") that this system must never
+   * be in. The field is kept rather than dropped so the service does not have
+   * to take the controller's word for it implicitly; it reads as a
+   * precondition carried in the type.
+   */
+  acceptedPrivacyPolicy: true;
 }
 
 export interface CheckoutResult {
@@ -211,6 +225,49 @@ export class CheckoutService {
       }
     }
 
+    // Read the tenant's shipping config BEFORE opening the transaction.
+    //
+    // The two questions asked of it (`isCodAllowedIn`, `priceForIn`) are still
+    // asked from exactly where they were, in exactly the same order, and still
+    // throw the same 400s at the same point — only the DATABASE READ behind
+    // them moved out here. It had to: those calls used to run on `tenantDb`
+    // from inside `platformDb.$transaction()`, which means asking the Prisma
+    // pool for a SECOND connection while this request is already holding one.
+    // A burst of concurrent checkouts wider than the pool then deadlocks —
+    // every connection parked inside a transaction, waiting for a connection
+    // only a parked transaction can free — until Prisma's transaction timeout
+    // fires and the whole batch returns bare 500s. `scripts/load-test.mjs`
+    // reproduces it at 100 concurrent checkouts (see docs/operations.md); the
+    // failure is invisible below the pool size and total above it.
+    //
+    // Reading it a few milliseconds earlier is not a semantic change: this is
+    // committed data read outside the transaction either way (the transaction
+    // is on `platformDb`, `tenantDb` never joined it), so it was never
+    // transactionally consistent with the order write to begin with.
+    const shippingConfig = await this.shippingService.loadConfig(tenantId);
+
+    // The política de tratamiento this tenant has published RIGHT NOW,
+    // fingerprinted onto the order below as the Ley 1581 art. 8 lit. e)
+    // *prueba de la autorización* — see checkout/privacy-consent.ts for why a
+    // fingerprint and not the text, and why the client never supplies it.
+    //
+    // Read HERE, before the transaction opens, for exactly the reason the
+    // `loadConfig` call above is: `tenantDb(...)` asks the Prisma pool for a
+    // connection of its own, and asking for a second one while this request is
+    // already holding one inside `platformDb.$transaction()` deadlocks the
+    // pool under concurrent checkouts — the failure documented on
+    // `ShippingConfig` in shipping.service.ts and reproduced by
+    // scripts/load-test.mjs. Reading it milliseconds earlier is not a semantic
+    // change: a merchant republishing their policy in the same instant a
+    // shopper submits is a race with no correct answer, and the answer this
+    // picks (the text that was published when the shopper's browser was
+    // looking at it) is the one the evidence should record anyway.
+    const publishedPolicy = await tenantDb(tenantId).tenantContent.findUnique({
+      where: { tenantId_type: { tenantId, type: 'policy_privacy' } },
+      select: { title: true, bodyMd: true },
+    });
+    const privacyPolicyVersion = privacyPolicyVersionFor(publishedPolicy);
+
     const result = await platformDb.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
         // Manual RLS transaction escape (same pattern as
@@ -325,11 +382,9 @@ export class CheckoutService {
           });
         }
 
-        // ShippingService's methods run on plain tenantDb (each a read of
-        // Tenant.settings, committed independently of this transaction) —
-        // calling them from inside our transaction is safe since they don't
-        // need transactional consistency with the order write below, and
-        // they never touch Cart/Order/Customer rows themselves.
+        // Both calls below are pure functions over `shippingConfig`, loaded
+        // before this transaction opened — no database access from in here.
+        // See the note at the `loadConfig` call site.
         //
         // `isCodAllowed` is a COD-only concept (design doc decision 8) — any
         // non-COD checkout (wompi, mercadopago, epayco, ...) skips this check
@@ -338,20 +393,31 @@ export class CheckoutService {
         // rather than unconditionally reached; their own content/behavior for
         // an actual `cod` checkout is unchanged.
         if (input.paymentMethod === 'cod') {
-          const codAllowed = await this.shippingService.isCodAllowed(tenantId, input.address.departamentoCode);
+          const codAllowed = this.shippingService.isCodAllowedIn(shippingConfig, input.address.departamentoCode);
           if (!codAllowed) {
             throw new HttpException({ error: 'SHIPPING_METHOD_UNAVAILABLE' }, 400);
           }
         }
 
-        const shippingCents = await this.shippingService.priceFor(
-          tenantId,
+        const shippingCents = this.shippingService.priceForIn(
+          shippingConfig,
           input.shippingMethodId,
           input.address.departamentoCode,
           subtotalCents,
         );
 
-        const totalCents = subtotalCents + taxCents + shippingCents;
+        // NOT `+ taxCents`. SPEC.md §5: "Colombian retail convention —
+        // **prices include IVA**. Order stores the tax breakdown per line
+        // derived from each product's tax rate (`price_cents - price_cents /
+        // (1 + rate)` for the tax portion)". `taxCents` is therefore the IVA
+        // ALREADY CONTAINED IN `subtotalCents`, recorded so the order can show
+        // a DIAN-ready breakdown — adding it charges the shopper IVA twice.
+        //
+        // This read as `subtotalCents + taxCents + shippingCents` until the P4
+        // DoD test computed a total by hand and disagreed with it by 57.479
+        // pesos on a 360.000-peso basket. Every order placed before this was
+        // over-charged by the IVA portion of its own contents.
+        const totalCents = subtotalCents + shippingCents;
         const orderNumber = await nextOrderNumber(tx, tenantId);
 
         // Only needed for the post-checkout email flow below (tenant display
@@ -404,12 +470,27 @@ export class CheckoutService {
             email: input.email,
             phone: input.phone,
             shippingAddress: input.address as Prisma.InputJsonValue,
+            // Ley 1581 art. 8 lit. e) — the proof that this collection was
+            // authorized, written in the same insert as the data it
+            // authorizes, so the two can never come apart. The clock is the
+            // SERVER's: the browser is asked whether it authorized, never
+            // when. `input.acceptedPrivacyPolicy` is typed `true`, so there
+            // is no branch here in which an order is created without this.
+            privacyAcceptedAt: new Date(),
+            privacyPolicyVersion,
             shippingMethod: input.shippingMethodId,
             shippingCents,
             subtotalCents,
             taxCents,
             totalCents,
-            source: 'web',
+            // Inherited from the cart, not hardcoded: SPEC.md §7's attribution
+            // rule is that a cart the agent built (`create_cart_link` sets
+            // `source: 'agent'`) produces an order the merchant can see was
+            // AI-assisted, which is what the "ventas asistidas por IA" KPI
+            // counts. Every ordinary cart is already `web` by column default,
+            // so this reads as `'web'` for all non-agent traffic exactly as
+            // the literal did.
+            source: cart.source,
             ...(input.paymentMethod !== 'cod'
               ? {
                   paymentProvider: input.paymentMethod,

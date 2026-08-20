@@ -26,6 +26,11 @@ const EMPTY_FORM: CheckoutFormState = {
   notas: '',
   shippingMethodId: '',
   paymentMethod: '',
+  // Never pre-checked. Decreto 1377 art. 7: "el silencio no es autorización";
+  // an authorization the shopper did not actively give is not an
+  // authorization, so a default of `true` here would be worse than useless —
+  // it would produce a record claiming something that never happened.
+  acceptedPrivacyPolicy: false,
 };
 
 const GENERIC_ERROR = 'Ocurrió un error al procesar tu pedido. Intenta de nuevo.';
@@ -48,6 +53,7 @@ const FIELD_ORDER = [
   'notas',
   'shippingMethodId',
   'paymentMethod',
+  'acceptedPrivacyPolicy',
 ] as const;
 
 /** Scrolls to and focuses the first invalid field (in top-to-bottom form
@@ -81,7 +87,7 @@ function fieldErrorsFrom(details: unknown): Record<string, string> {
   if (!details || typeof details !== 'object') return result;
   const d = details as Record<string, unknown>;
 
-  for (const key of ['email', 'phone', 'shippingMethodId', 'paymentMethod'] as const) {
+  for (const key of ['email', 'phone', 'shippingMethodId', 'paymentMethod', 'acceptedPrivacyPolicy'] as const) {
     if (typeof d[key] === 'string') result[key] = d[key];
   }
 
@@ -231,7 +237,12 @@ export default function CheckoutPage() {
   const shippingCents = selectedShippingLine?.priceCents ?? 0;
   const subtotalCents = cart?.subtotalCents ?? 0;
   const taxCents = cart?.taxCents ?? 0;
-  const grandTotalCents = subtotalCents + taxCents + shippingCents;
+  // NOT `+ taxCents`. SPEC.md §5: prices include IVA, so `taxCents` is the
+  // portion of `subtotalCents` that IS IVA, not an extra charge. This has to
+  // match what `CheckoutService` actually bills — a shopper quoted one number
+  // here and charged another on the confirmation page has every reason to
+  // dispute the order.
+  const grandTotalCents = subtotalCents + shippingCents;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -242,6 +253,7 @@ export default function CheckoutPage() {
       ...validateCheckoutStep('address', form),
       ...validateCheckoutStep('shipping', form),
       ...validateCheckoutStep('payment', form),
+      ...validateCheckoutStep('consent', form),
     };
     if (Object.keys(stepErrors).length > 0) {
       setErrors(stepErrors);
@@ -272,6 +284,12 @@ export default function CheckoutPage() {
         // having already been validated non-empty). Widened for Task 6 to
         // the full online-provider union.
         paymentMethod: form.paymentMethod as 'cod' | 'wompi' | 'mercadopago' | 'epayco',
+        // Guaranteed `true` here: validateCheckoutStep('consent', ...) above
+        // returns before this line otherwise. Sent as its own field rather
+        // than inferred server-side from "a checkout arrived", because
+        // inferring it is exactly the *conducta inequívoca* reading this
+        // control exists to replace with an express one.
+        acceptedPrivacyPolicy: form.acceptedPrivacyPolicy,
       });
       if (result.redirectUrl) {
         // Any online-provider checkout (`wompi`/`mercadopago`/`epayco`): the
@@ -554,7 +572,7 @@ export default function CheckoutPage() {
                 <span>{formatCOP(subtotalCents)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Impuestos</span>
+                <span className="text-muted-foreground">IVA incluido</span>
                 <span>{formatCOP(taxCents)}</span>
               </div>
               <div className="flex justify-between">
@@ -566,6 +584,82 @@ export default function CheckoutPage() {
                 <span>{formatCOP(grandTotalCents)}</span>
               </div>
             </div>
+          </CardContent>
+        </Card>
+
+        {/*
+          Ley 1581 art. 9's *autorización previa, expresa e informada*, and
+          art. 12's duty to inform the Titular of the treatment and its
+          purposes AT THE MOMENT OF COLLECTION.
+
+          A REQUIRED checkbox that blocks submit, not an informational line,
+          and the choice is not a matter of taste:
+
+          - Colombian law has no "necessary to perform a contract" basis. Ley
+            1581 art. 10's exceptions are public-register data, public-entity
+            requests, medical emergencies and historical/statistical/
+            scientific processing — a shirt sale is none of them. So without
+            an authorization the merchant may not treat the shopper's data at
+            all, and a form that collected it anyway would be putting the
+            merchant (the Responsable, and the one the SIC sanctions) in
+            breach on every order.
+          - Decreto 1377 art. 7 does allow authorization by *conducta
+            inequívoca*, which is how §4 of the generated policy words it, and
+            a completed purchase is a defensible one. But art. 7 is a fallback
+            for collection channels where asking is impractical. Here it is
+            one tap. Relying on the fallback when the express form is
+            available is choosing the weaker evidence for no reason.
+          - It is what the shopper expects. Every large Colombian retailer
+            puts this box on the checkout, unticked, above the pay button.
+          - And it is what makes the record on the order worth keeping: art. 8
+            lit. e) lets the Titular demand *prueba de la autorización*, and
+            "they completed a purchase, so they must have agreed" is an
+            argument, while "they ticked this box at 14:03 against this exact
+            policy text" is proof.
+
+          Unticked by default (art. 7 again: silence is not authorization),
+          and the link is a real link to this store's OWN /privacidad page —
+          "informed" means the text was reachable before the tick, not after.
+          `target="_blank"` so opening it does not destroy a filled-in form.
+        */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Tratamiento de datos personales</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <label className="flex items-start gap-3 text-sm" htmlFor="acceptedPrivacyPolicy">
+              <input
+                id="acceptedPrivacyPolicy"
+                type="checkbox"
+                className="mt-1"
+                checked={form.acceptedPrivacyPolicy}
+                onChange={(e) => setField('acceptedPrivacyPolicy', e.target.checked)}
+                aria-describedby="acceptedPrivacyPolicy-help"
+                aria-invalid={errors.acceptedPrivacyPolicy ? true : undefined}
+              />
+              <span>
+                Autorizo el tratamiento de mis datos personales para procesar y entregar este pedido,
+                comunicarme el estado de mi compra y atender mis solicitudes, conforme a la{' '}
+                <a
+                  href="/privacidad"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline"
+                >
+                  política de tratamiento de datos personales
+                </a>{' '}
+                de esta tienda.
+              </span>
+            </label>
+            <p id="acceptedPrivacyPolicy-help" className="text-xs text-muted-foreground">
+              Puedes conocer, actualizar, rectificar o solicitar la eliminación de tus datos, y revocar
+              esta autorización, en cualquier momento (Ley 1581 de 2012).
+            </p>
+            {errors.acceptedPrivacyPolicy ? (
+              <p className="text-sm text-destructive" role="alert">
+                {errors.acceptedPrivacyPolicy}
+              </p>
+            ) : null}
           </CardContent>
         </Card>
 

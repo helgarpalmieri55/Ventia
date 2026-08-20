@@ -272,6 +272,100 @@ All three share the same provider-registry/webhook-controller/stock-reservation 
   financial discrepancy can be accounted for but never erased, and an alert marked reviewed by
   mistake is corrected by appending a `reopened` row rather than by deleting anything.
 
+### AI sales agent — P4
+
+`POST /v1/storefront/agent/messages` (JSON) and `/stream` (Server-Sent Events) answer one shopper
+message. Both call the same conversation loop, so tenant scoping, throttling and the budget cap are
+decided in exactly one place. The tenant comes from the request's domain via `PublicTenantGuard`,
+never from the body. Six tools run server-side against that tenant only — `search_products`,
+`get_product`, `recommend_products`, `create_cart_link`, `get_order_status`, `get_store_info`.
+`escalate_to_human` is plan-gated on `TenantLimits.humanHandoff` and is filtered out of the tool
+array — and out of the prompt's rule 7 — for a store without it, so the model is never told to reach
+for something it does not have. It marks the conversation `escalated` and emails the merchant a link to the
+transcript; SPEC's Chatwoot conversation is a P5 line item that will become a second notifier
+alongside the email rather than a replacement.
+
+**Conversaciones** (`/v1/admin/conversations`, both roles) is where the merchant reads what the agent
+has been saying and answers the chats it handed over — the handoff email deep-links to a row via
+`?c=<id>`, which for an anonymous web shopper is the merchant's only route to finding out who needs
+help. `PATCH :id/resolve` marks an escalation handled so the list stays meaningful as it grows.
+
+Three independent limits, deliberately not one:
+
+- **Monthly plan cap** (`AgentUsage` / `TenantLimits.aiMessagesMonth`) — counts shopper turns, not
+  API calls. At 100% the agent returns a fixed sentence and makes no model call at all. A tenant
+  with no `TenantLimits` row is zero budget, not unlimited. The counter is not writable by
+  tenant-scoped code (migration `20260818090000_agent_usage`).
+- **Per conversation** — 20 messages / 5 min, plus a cool-down that answers a repeated identical
+  message from the previous reply instead of billing it again. Redis, fails open.
+- **Per address** — 30/min on `/v1/storefront/agent`, the tightest of the four request limiters,
+  because it is the only surface where an accepted request spends the *merchant's* money.
+
+A cart the agent builds carries `source = 'agent'`; the order inherits it at checkout, which is what
+`GET /v1/admin/agent/usage` counts as "ventas asistidas por IA" alongside the month's message usage.
+The merchant configures name, tone and summaries under **Configuración → Asistente IA**
+(`PATCH /v1/admin/settings/agent`, owner-only). The storefront widget mounts only for a store whose
+plan includes AI messages.
+
+**Evals** (`services/api/test/agent-evals.test.ts`) cover SPEC §7's six scenarios in two halves. The
+deterministic half runs on every `pnpm test` and pins the properties the system guarantees whatever
+the model says — a budget is never exceeded because over-budget products are never returned, a
+mismatched order contact is indistinguishable from a nonexistent order, an escalation is a durable
+status change and not just a sentence, a price comes from the current row. The live half asks the real model and is skipped by default:
+
+```bash
+AGENT_LIVE_EVALS=1 ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @ventia/api vitest run test/agent-evals
+```
+
+### WhatsApp channel — P5
+
+Two providers behind one interface (`packages/whatsapp`): **Evolution API** in development (self-hosted,
+QR-paired, no Meta app review needed) and **Meta WhatsApp Cloud API** in production. Both were built
+against their official docs read at implementation time, per SPEC §4, and are verified against the
+docs' own example payloads rather than live traffic — no Meta app or Evolution instance was available
+during development. **See `docs/deploying-whatsapp.md`** for connecting a real app, including an
+ordered list of which assumptions are most likely to need adjusting on first contact.
+
+**Routing does not use the URL.** `POST /webhooks/whatsapp/:provider` carries no tenant, because Meta
+delivers one webhook per *app* covering every number registered under it — the only discriminator is
+`phone_number_id` inside the payload. Hence `WhatsAppNumber.externalId` is globally `@unique`: the
+lookup must have exactly one answer, and two tenants claiming one id would mean a shopper reaching
+another store's agent. Evolution's instance name occupies the same column, so there is no special case.
+
+Credentials (`credentialsEnc`) and `verifyToken` are AES-256-GCM encrypted with the same key as payment
+credentials, and are **unreachable from tenant-scoped code**: `ventia_app` holds a column-level SELECT
+grant that omits both, so a `tenantDb(...).whatsAppNumber.findMany()` errors rather than quietly loading
+a token into memory. RLS is `ENABLE`, not `FORCE`, and that is load-bearing — the inbound routing lookup
+runs on `platformDb` *before* a tenant is known, so forcing the policy on the owner would drop every
+inbound message on the platform.
+
+Four independent things bound abuse on this endpoint, since its tenant is unknowable at the rate-limiter
+layer (see the comment in `main.ts`): the provider signature is verified before any work beyond one
+indexed lookup; `Message.externalId` (unique per tenant) dedupes provider retries, which would otherwise
+each be a second billed agent turn; the per-conversation throttle caps one shopper; and the monthly
+budget caps the tenant. The plan gate (`TenantLimits.whatsappChannel`) is re-checked on every inbound
+message, not just at connect time — a downgraded store keeps its number registered and Meta keeps
+delivering to it.
+
+The agent itself is unchanged: `AgentService.respond` was already channel-agnostic, so WhatsApp is a
+second transport into it, with a text-first renderer replacing the widget's product cards. Prices in
+that text come from the tool results, never from the model's prose — the same guarantee the widget has.
+
+### Totals and IVA
+
+Colombian retail convention, per `docs/SPEC.md` §5: **catalogue prices include IVA**. An order's
+`taxCents` is therefore the IVA portion *contained in* `subtotalCents`
+(`price_cents - price_cents / (1 + rate)`), recorded for the DIAN breakdown — it is **not** added to
+the total. A shopper pays `subtotal + shipping`, which is exactly the sticker prices they were
+quoted plus delivery. Every surface that shows it says "IVA incluido" for the same reason.
+
+This was wrong from P2b until P4: checkout, the cart API, the cart drawer, the cart page and the
+checkout page all computed `subtotal + tax + shipping`, over-charging every order by the IVA
+contained in its own contents (a $180.000 basket at 19% was billed $208.739). It is pinned now by
+`POST /v1/storefront/checkout — prices include IVA (SPEC §5)` in `test/checkout.test.ts`, which
+states the rule rather than deriving an expected number the same way the code does — the reason the
+original happy-path test could not catch it.
+
 ### Onboarding, staff & launch
 
 A signed-up user provisions their tenant via `POST /v1/admin/onboarding/tenant`, then drives the
@@ -478,6 +572,107 @@ Build phases per [`docs/SPEC.md` §11](docs/SPEC.md#11-build-phases-claude-code-
       where a tampered one failed earlier with a different error); its
       `markPaid`/stock-decrement/idempotency chain rests on mocked-fetch unit tests
       (`packages/payments/test/mercadopago.test.ts`).
-- **P4 — AI Agent (web)** ⬜
-- **P5 — WhatsApp + Human handoff** ⬜
-- **P6 — Platform Admin + Hardening + Pilot** ⬜
+- **P4 — AI Agent (web)** ✅: a tool-using sales agent on the storefront widget, built on the
+  Anthropic Messages API. Seven tools (catalogue search, product detail, stock, shipping quote,
+  cart add/read, and `escalate_to_human`), a per-tenant monthly message budget read from
+  `TenantLimits.aiMessagesMonth` that fails **closed** for an unprovisioned tenant, an es-CO
+  system prompt whose handoff rule varies with the tenant's plan, and an eval suite. The agent
+  can build a cart that becomes a real, attributed order. DoD: the agent answers from the
+  merchant's own catalogue, never invents a product or a price, and stops at its budget.
+- **P5 — WhatsApp + Human handoff** ✅: `packages/whatsapp` with two providers behind one
+  interface — Meta's **WhatsApp Cloud API** (`X-Hub-Signature-256` HMAC over the raw body, the
+  `hub.challenge` handshake, Graph version pinned) and **Evolution API** — plus the inbound
+  channel in the API. One webhook per Meta *app* covers every number, so delivery is routed by
+  the `phone_number_id` in the payload against a globally-unique `WhatsAppNumber.externalId`;
+  the webhook URL carries no tenant id. Per-tenant credentials are encrypted at rest and the
+  columns holding them are withheld from `ventia_app` at the `GRANT` level. Messages are
+  deduplicated on `(tenantId, externalId)`. Human handoff marks the conversation escalated and
+  emails the merchant; the admin has a Conversaciones panel to read the transcript and resolve.
+  Merchant-side Meta app configuration is a deploy-time step — see `docs/deploying-whatsapp.md`.
+- **P6 — Platform Admin + Hardening + Pilot** 🚧: every engineering item is built; the pilot
+  itself is not, and cannot be from a development environment. **Built** — the platform-operator
+  console (tenant list, detail with GMV and AI usage, assign plan, suspend/reactivate, and
+  impersonation), behind two independent grants: an env allowlist that fails closed *and* a
+  `User.isPlatformAdmin` column no product code path writes. Custom domains with DNS TXT
+  verification gating Caddy's on-demand TLS. Plan limits behind one 402 `PLAN_LIMIT_EXCEEDED`
+  shape. An append-only payment ledger and audit entries on every order transition. Subscription
+  tracking with an auto-suspend sweep and a warning three days ahead. Full **Ley 1581 (Habeas
+  Data)** compliance — a privacy-policy generator built from the Decreto 1074 required contents,
+  customer anonymization that keeps the accounting and erases the person, a 12-month conversation
+  retention purge, and authorization at checkout with the *prueba de la autorización* the law
+  lets a shopper demand. Backups with an offsite copy verified by read-back, and a restore drill
+  executed against the **downloaded** copy (15/15, tenant isolation biting on restored data).
+  A 100-concurrent-checkout load test that found and proved a connection-pool starvation bug in
+  checkout. Sentry with a PII scrubber that reuses the anonymizer's own key list, and a guarded
+  queue-health endpoint. **Not done, and not doable from here** — the pilot with 2–3 real
+  merchants on custom domains, which needs real merchants, real gateway credentials and real DNS.
+  Everything it requires is enumerated in [`docs/deploying.md`](docs/deploying.md). No payment
+  gateway and no WhatsApp number has ever been exercised against live traffic; there is no CI/CD,
+  no staging environment, and nothing schedules the backups.
+
+## Operations: backups, restore drill & load test
+
+Full runbook — including everything that was written but **not** exercised — in
+[`docs/operations.md`](docs/operations.md). Four local-run scripts, none of them
+part of `pnpm turbo run test`/CI:
+
+```bash
+bash scripts/backup.sh          # pg_dump + pg_dumpall globals + manifest + sha256
+node scripts/backup-upload.mjs  # copy that run offsite (S3/R2), verified by read-back
+bash scripts/restore-drill.sh   # restore into a scratch DB and prove it is usable
+node scripts/load-test.mjs      # 100 concurrent checkouts, invariants asserted from Postgres
+```
+
+**Backups.** `backup.sh` writes four files per run: the `--format=custom` dump,
+a `pg_dumpall --globals-only` file, a manifest (row counts, policy digest,
+migration count), and checksums. The globals file is not optional — every RLS
+policy is written against the `ventia_app` role, which `pg_dump` does not
+carry, so a dump-only restore into a fresh cluster either fails on the first
+`GRANT` or comes up with tenant isolation quietly switched off. Retention
+defaults to 30 days (SPEC.md §10). Output goes to
+`${TMPDIR:-/tmp}/ventia-backups` by default, deliberately outside the repo.
+`backup-upload.mjs` copies a run offsite to S3/R2, verifying every file by
+reading it back (a `PutObject` 200 is not evidence the bytes that landed are
+the bytes you sent), and `--pull` brings one back down checked against the
+`.sha256` taken before the upload. Exercised end to end against the compose
+MinIO, and the **downloaded** copy then passed the full restore drill 15/15 —
+so the offsite copy is known-restorable, not merely present. Real R2
+credentials are a deploy-time step.
+
+**Restore drill (P6 DoD: "restore drill documented and executed").**
+`restore-drill.sh` restores a backup into a throwaway database and runs 15
+checks: row counts against the manifest, the RLS-enabled table set, an md5 over
+every policy's `USING`/`WITH CHECK` clause, `ventia_app`'s full grant matrix
+against the source, and — the one that matters — connecting **as `ventia_app`**
+to the restored data and confirming each tenant's `app.tenant_id` context sees
+exactly its own rows, zero of the other tenant's, nothing at all with no GUC
+set, and that a cross-tenant `INSERT` is refused. Executed against the dev
+database on 2026-08-19: **15 passed, 0 failed** (35 tables, 28 RLS tables, 29
+policies, 20 migrations). The checks were also verified non-vacuous against a
+deliberately sabotaged copy, where every one of them flipped red.
+
+**Load test (P6 DoD: "isolation suite green under load").** `load-test.mjs`
+seeds four throwaway tenants, drives real checkouts over HTTP, and asserts the
+outcome by reading Postgres — separating *invariants* (stock accounting, tenant
+isolation) from *capacity* (was the offered load actually served), because a
+platform that refuses work and a platform that oversells are not the same
+problem. At 100 concurrent checkouts, three consecutive green runs:
+
+| Scenario | Result | Wall | Throughput |
+| --- | --- | --- | --- |
+| Capacity — stock 100 | 100 × 201, stock → 0, order numbers dense 1..100 | 1839 ms | 54.4/s |
+| Oversell — stock 50 | exactly 50 × 201 + 50 × 400 `INSUFFICIENT_STOCK` | 1552 ms | 64.4/s |
+| Isolation — 2 tenants × 50 | 100 × 201, 50 orders each numbered 1..50, 0 cross-tenant rows under RLS | 911 ms | 109.7/s |
+
+Zero oversell at every concurrency level tested, and no invariant was violated
+in any run — including badly degraded ones. Two findings came out of it. The
+checkout rate limiter (60/IP/min) dominates any single-source load test unless
+raised — working as designed. And **checkout starved the Prisma connection
+pool**: it called `ShippingService` from inside `platformDb.$transaction()`,
+and that call needed a second connection from the same pool, so a burst larger
+than the pool wedged until Prisma's 15 s transaction timeout and returned bare
+500s. At 100 concurrent on the default pool that was **7 requests served out of
+100**. Fixed — the shipping config is now loaded before the transaction opens
+and priced from memory inside it, which takes the same run to **100/100 in
+1.9 s**. Both findings, the evidence, and the before/after are in
+[`docs/operations.md`](docs/operations.md#load-test).

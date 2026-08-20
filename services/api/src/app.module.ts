@@ -1,53 +1,59 @@
 import { Inject, MiddlewareConsumer, Module, NestModule, OnApplicationShutdown } from '@nestjs/common';
-import Redis from 'ioredis';
+import type Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
 import { AdminModule } from './admin/admin.module';
+import { AgentModule } from './agent/agent.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { CheckoutModule } from './checkout/checkout.module';
 import { HealthController } from './health/health.controller';
+import { ObservabilityModule } from './observability/observability.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentAlertsModule } from './payment-alerts/payment-alerts.module';
 import { SettingsModule } from './settings/settings.module';
 import { StaffModule } from './staff/staff.module';
+import { PlatformModule } from './platform/platform.module';
+import { PrivacyModule } from './privacy/privacy.module';
 import { StorefrontModule } from './storefront/storefront.module';
+import { WhatsAppModule } from './whatsapp/whatsapp.module';
+import { RedisModule, REDIS_CLIENT } from './common/redis.module';
 import { DomainResolver } from './tenants/domain-resolver';
 import { TenantMiddleware } from './tenants/tenant.middleware';
 import { TenantController } from './tenants/tenant.controller';
+import { CustomDomainsController, TlsAskController } from './tenants/custom-domains.controller';
+import { CustomDomainsService } from './tenants/custom-domains.service';
 
-export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
+// Re-exported from its own module (see common/redis.module.ts for why it moved)
+// so `main.ts` and existing imports keep the same source.
+export { REDIS_CLIENT };
 
 @Module({
   imports: [
+    RedisModule,
     AdminModule,
+    AgentModule,
     CatalogModule,
     CheckoutModule,
+    ObservabilityModule,
     OnboardingModule,
     OrdersModule,
     PaymentAlertsModule,
     SettingsModule,
     StaffModule,
+    PlatformModule,
+    PrivacyModule,
     StorefrontModule,
+    WhatsAppModule,
   ],
-  controllers: [HealthController, TenantController],
+  controllers: [HealthController, TenantController, TlsAskController, CustomDomainsController],
   providers: [
-    {
-      provide: REDIS_CLIENT,
-      useFactory: () => {
-        const client = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
-        // Without this listener, ioredis logs unhandled "error" events straight
-        // to stderr (e.g. connection-refused noise in tests) and, on some
-        // versions/paths, an unhandled 'error' event with no listener can throw.
-        client.on('error', (err) => console.error('[redis]', err.message));
-        return client;
-      },
-    },
     {
       provide: DomainResolver,
       useFactory: (redis: Redis) => new DomainResolver(redis, platformDb),
       inject: [REDIS_CLIENT],
     },
     TenantMiddleware,
+    CustomDomainsService,
   ],
 })
 export class AppModule implements NestModule, OnApplicationShutdown {

@@ -13,6 +13,14 @@ export interface ResolvedTenant {
   // `buildThemeVars(tenant?.theme as TenantTheme | null ?? null)` in
   // app/layout.tsx.
   theme: unknown;
+  /** Whether to offer the AI chat widget at all — true only when this store's
+   * plan includes AI messages. A display hint, not the enforcement: the hard
+   * cap lives server-side in `AgentBudgetService`. Absent on an older API,
+   * which the widget treats as "off". */
+  agentEnabled?: boolean;
+  /** The agent's display name, from the merchant's agent config. Falls back to
+   * the widget's own default when unset. */
+  agentName?: string;
 }
 
 // Wrapped in React's cache() so a layout and a page rendering the same

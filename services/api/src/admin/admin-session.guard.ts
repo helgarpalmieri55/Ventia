@@ -2,7 +2,9 @@ import { CanActivate, ExecutionContext, HttpException, Inject, Injectable } from
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { platformDb } from '@ventia/db';
+import type { ImpersonationContext } from '@ventia/core';
 import { getSessionContext } from '../auth/session-context';
+import { assertImpersonatedRequestAllowed } from '../auth/impersonation-policy';
 import { ROLES_KEY, type AdminSessionContext } from './roles.decorator';
 import { AUTH_INSTANCE, type AuthInstance } from './auth-instance';
 
@@ -12,7 +14,19 @@ import { AUTH_INSTANCE, type AuthInstance } from './auth-instance';
 // session used by every catalog/csv-import handler, and emailVerified is
 // per-request response data for /me specifically, not identity every
 // downstream handler needs).
-export type RequestWithAdminSession = Request & { adminSession?: AdminSessionContext; emailVerified?: boolean };
+// `impersonation` rides on the request rather than inside
+// AdminSessionContext for the same reason `emailVerified` does: that type is
+// the narrowed identity EVERY downstream handler depends on, and it must stay
+// the same shape whether or not an operator is behind the request — the whole
+// design's point is that an impersonated write is indistinguishable to a
+// service, because `userId` is already the right answer. Only `/v1/admin/me`
+// reads this, so the admin shell can render its banner from the server's
+// answer (design §5).
+export type RequestWithAdminSession = Request & {
+  adminSession?: AdminSessionContext;
+  emailVerified?: boolean;
+  impersonation?: ImpersonationContext;
+};
 
 @Injectable()
 export class AdminSessionGuard implements CanActivate {
@@ -34,6 +48,19 @@ export class AdminSessionGuard implements CanActivate {
     if (!session) throw new HttpException({ error: 'UNAUTHENTICATED' }, 401);
     if (!session.tenantId || !session.role || session.role === 'platform_admin') {
       throw new HttpException({ error: 'NO_TENANT' }, 403);
+    }
+
+    // Impersonation policy (design §4), BEFORE the @Roles check so a refused
+    // route reports why it was refused rather than a misleading
+    // FORBIDDEN_ROLE — the borrowed role is always 'owner', so @Roles would
+    // never have refused it anyway.
+    if (session.impersonation) {
+      assertImpersonatedRequestAllowed(
+        session.impersonation.tenantId,
+        req.method,
+        req.originalUrl ?? req.url,
+        req.tenant?.tenantId,
+      );
     }
 
     const required = this.reflector.getAllAndOverride<Array<'owner' | 'staff'> | undefined>(ROLES_KEY, [
@@ -70,6 +97,7 @@ export class AdminSessionGuard implements CanActivate {
     };
     req.adminSession = adminSession;
     req.emailVerified = session.emailVerified;
+    req.impersonation = session.impersonation;
     return true;
   }
 }

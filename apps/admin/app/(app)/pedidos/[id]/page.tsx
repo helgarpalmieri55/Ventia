@@ -237,7 +237,10 @@ export default function PedidoDetailPage() {
               <span>{formatCOP(order.subtotalCents)}</span>
             </div>
             <div className="flex justify-between gap-8">
-              <span className="text-muted-foreground">IVA</span>
+              {/* "incluido": the IVA is part of Subtotal above, not a line
+                  added into Total — SPEC.md §5's tax-inclusive pricing. Left
+                  unlabelled this column reads as a sum that does not add up. */}
+              <span className="text-muted-foreground">IVA incluido</span>
               <span>{formatCOP(order.taxCents)}</span>
             </div>
             <div className="flex justify-between gap-8">

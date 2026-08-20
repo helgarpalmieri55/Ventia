@@ -21,6 +21,25 @@ const envSchema = z.object({
   REVALIDATE_SECRET: z.string().min(1).default('dev-revalidate-secret'),
   STOREFRONT_INTERNAL_URL: z.string().url().default('http://localhost:3000'),
   RESEND_API_KEY: z.string().min(1).optional(),
+  /**
+   * Comma-separated email addresses allowed to reach `/v1/platform/*` — the
+   * Ventia OPERATOR surface, not a merchant's.
+   *
+   * Optional, and unset means NOBODY: the guard builds an empty set and denies
+   * everyone. That is the whole point of putting the grant here rather than in
+   * a row — no HTTP request, buggy or otherwise, writes `process.env`, whereas
+   * `Membership` rows are already produced by the merchant-facing staff-invite
+   * path. A privilege a merchant-facing write could ever mint is not a
+   * platform privilege.
+   *
+   * The guard additionally requires the session's email to be VERIFIED, which
+   * is load-bearing rather than belt-and-braces: `auth.ts` sets
+   * `requireEmailVerification: false`, so anyone can sign up as an address
+   * they do not own and hold a valid session immediately. Operator addresses
+   * at a company's own domain are guessable, so without that check, signing up
+   * as `ops@ventia.co` before the real operator does is a full takeover.
+   */
+  PLATFORM_ADMIN_EMAILS: z.string().optional(),
   RESEND_FROM_EMAIL: z.string().email().default(DEFAULT_RESEND_FROM_EMAIL),
   // Overrides the http/https inference for tenant storefront redirect URLs
   // (services/api/src/tenants/tenant-public-url.ts). Optional — unset means

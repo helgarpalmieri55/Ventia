@@ -20,6 +20,7 @@ function validState(overrides: Partial<CheckoutFormState> = {}): CheckoutFormSta
     notas: '',
     shippingMethodId: 'flat-1',
     paymentMethod: 'cod',
+    acceptedPrivacyPolicy: true,
     ...overrides,
   };
 }
@@ -132,5 +133,43 @@ describe('a fully valid state', () => {
 
   it("returns {} for 'payment'", () => {
     expect(validateCheckoutStep('payment', validState())).toEqual({});
+  });
+});
+
+describe("validateCheckoutStep('consent', ...) — Ley 1581 art. 9", () => {
+  it('blocks the submit when the shopper has not authorized the treatment of their data', () => {
+    const errors = validateCheckoutStep('consent', validState({ acceptedPrivacyPolicy: false }));
+    // THE assertion this control exists for. Colombian law offers no
+    // "necessary to perform a contract" basis (Ley 1581 art. 10's exceptions
+    // are elsewhere), so an unticked box is not a shopper who declined a
+    // nicety — it is a collection the merchant may not lawfully make.
+    expect(errors.acceptedPrivacyPolicy).toBeTruthy();
+    expect(errors.acceptedPrivacyPolicy).toMatch(/autoriza/i);
+  });
+
+  it('passes once the shopper has ticked the box', () => {
+    expect(validateCheckoutStep('consent', validState({ acceptedPrivacyPolicy: true }))).toEqual({});
+  });
+
+  it('is its own step: the other four never flag it, and it never flags theirs', () => {
+    const noConsent = validState({ acceptedPrivacyPolicy: false });
+    for (const step of ['contact', 'address', 'shipping', 'payment'] as const) {
+      expect(validateCheckoutStep(step, noConsent).acceptedPrivacyPolicy).toBeUndefined();
+    }
+    // An otherwise-empty form, consented: the consent step reports nothing
+    // about the empty fields, so its error can only ever appear next to the
+    // box itself.
+    const emptyButConsented = validState({
+      email: '',
+      phone: '',
+      nombreCompleto: '',
+      departamentoCode: '',
+      municipioName: '',
+      direccion: '',
+      shippingMethodId: '',
+      paymentMethod: '',
+      acceptedPrivacyPolicy: true,
+    });
+    expect(validateCheckoutStep('consent', emptyButConsented)).toEqual({});
   });
 });

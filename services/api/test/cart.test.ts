@@ -297,3 +297,108 @@ describe('cross-tenant isolation', () => {
     expect(verifyB.body.lines[0].qty).toBe(1);
   });
 });
+
+/**
+ * Adopting an agent-built cart — the other half of `create_cart_link`.
+ *
+ * The tool returns `/carrito?c=<key>`; without this endpoint that link opens
+ * an empty cart and everything the agent assembled is lost.
+ */
+describe('POST /v1/storefront/cart/adopt', () => {
+  async function agentCart(tenantId: string, productId: string) {
+    const cart = await prisma.cart.create({
+      data: { tenantId, cookieKey: crypto.randomUUID(), source: 'agent' },
+    });
+    await prisma.cartItem.create({ data: { tenantId, cartId: cart.id, productId, qty: 2 } });
+    return cart.cookieKey;
+  }
+
+  it('hands the shopper the agent\'s cart and sets the cookie to it', async () => {
+    const cookieKey = await agentCart(tenantAId, activeProductId);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/adopt')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({ cookieKey });
+
+    expect(res.status).toBe(201);
+    expect(res.body.lines).toHaveLength(1);
+    expect(res.body.lines[0].qty).toBe(2);
+    // The cookie is what makes every LATER call — read, update, checkout —
+    // see this cart rather than the shopper's old one.
+    expect(extractCartCookie(res)).toBe(cookieKey);
+  });
+
+  it('refuses a cart from another store', async () => {
+    const cookieKey = await agentCart(tenantBId, tenantBProductId);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/adopt')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({ cookieKey });
+
+    expect(res.status).toBe(404);
+    expect(res.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('refuses a plain web cart, so a leaked cookie key is not a usable link', async () => {
+    // Adoption is restricted to carts the agent itself created: a URL leaks
+    // far more readily than an HttpOnly cookie (history, referrers, a
+    // forwarded WhatsApp message), and nothing needs the wider power.
+    const addRes = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/items')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({ productId: activeProductId, variantId: null, qty: 1 });
+    const webCookieKey = extractCartCookie(addRes);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/adopt')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({ cookieKey: webCookieKey });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('answers a nonexistent key exactly like a foreign one', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/adopt')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({ cookieKey: crypto.randomUUID() });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('CART_NOT_FOUND');
+  });
+
+  it('leaves the shopper\'s previous cart intact rather than merging or deleting it', async () => {
+    const addRes = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/items')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({ productId: activeProductId, variantId: null, qty: 3 });
+    const oldCookieKey = extractCartCookie(addRes);
+    const cookieKey = await agentCart(tenantAId, activeProductId);
+
+    await request(app.getHttpServer())
+      .post('/v1/storefront/cart/adopt')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${oldCookieKey}`)
+      .send({ cookieKey });
+
+    // Clicking a link must not destroy something the shopper built.
+    const old = await prisma.cart.findFirst({
+      where: { tenantId: tenantAId, cookieKey: oldCookieKey },
+      include: { items: true },
+    });
+    expect(old?.items).toHaveLength(1);
+    expect(old?.items[0].qty).toBe(3);
+  });
+
+  it('400s a request with no key', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/adopt')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+  });
+});

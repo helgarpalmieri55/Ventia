@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { centsToPesos, formatCOP, pesosToCents } from '../lib/format';
+import {
+  centsToPesos,
+  formatCOP,
+  formatDateBogota,
+  formatLongDateBogota,
+  pesosToCents,
+  toBogotaDateInput,
+} from '../lib/format';
 
 describe('formatCOP', () => {
   it('formats integer cents (pesos = cents / 100) as es-CO COP with no decimals', () => {
@@ -82,5 +89,50 @@ describe('pesosToCents / centsToPesos round-trip', () => {
 
   it('round-trips zero', () => {
     expect(centsToPesos(pesosToCents('0')!)).toBe(0);
+  });
+});
+
+describe('Bogotá-pinned dates', () => {
+  // The API stores `paidUntil: '2026-09-01'` as the END of that day in
+  // America/Bogota, i.e. `2026-09-02T04:59:59.999Z` on the wire (verified by
+  // running services/api/src/platform/subscription-window.ts directly). Every
+  // assertion below is written against that real value.
+  const paidUntilWire = '2026-09-02T04:59:59.999Z';
+  // What the same run produced for `suspendsOn` with the default 7-day grace.
+  const suspendsOnWire = '2026-09-09T04:59:59.999Z';
+
+  it('renders the Bogotá calendar day, not the UTC one', () => {
+    // The whole point: `formatDateCO` (runtime zone) would say 02/09/2026 for
+    // anyone running in UTC or further east — a day later than the operator
+    // typed, on the field that decides when a store goes offline.
+    expect(formatDateBogota(paidUntilWire)).toBe('01/09/2026');
+  });
+
+  it('renders the suspension date as prose in Bogotá time', () => {
+    // A store whose grace window ends at 2026-09-09T04:59:59.999Z goes dark on
+    // the EIGHTH in Colombia. Saying "9 de septiembre" would be a day late.
+    expect(formatLongDateBogota(suspendsOnWire)).toBe('8 de septiembre de 2026');
+  });
+
+  it('round-trips an instant back to the YYYY-MM-DD an <input type="date"> holds', () => {
+    expect(toBogotaDateInput(paidUntilWire)).toBe('2026-09-01');
+    expect(toBogotaDateInput(suspendsOnWire)).toBe('2026-09-08');
+  });
+
+  it('does not shift a plain midday instant', () => {
+    expect(toBogotaDateInput('2026-03-14T17:00:00.000Z')).toBe('2026-03-14');
+    expect(formatDateBogota('2026-03-14T17:00:00.000Z')).toBe('14/03/2026');
+  });
+
+  it('returns null rather than "Invalid Date" for unparseable input', () => {
+    for (const bad of ['', 'no soy una fecha', '2026-13-45T00:00:00Z']) {
+      expect(formatDateBogota(bad)).toBeNull();
+      expect(formatLongDateBogota(bad)).toBeNull();
+      expect(toBogotaDateInput(bad)).toBeNull();
+    }
+  });
+
+  it('accepts a Date as well as a string', () => {
+    expect(toBogotaDateInput(new Date(paidUntilWire))).toBe('2026-09-01');
   });
 });

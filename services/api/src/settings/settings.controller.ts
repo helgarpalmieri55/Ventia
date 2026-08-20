@@ -1,7 +1,13 @@
 import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import { Prisma, tenantDb } from '@ventia/db';
 import type { PaymentProviderId } from '@ventia/payments';
-import { paymentsSettingsSchema, shippingSettingsSchema, storeSettingsSchema, themeSchema } from '@ventia/core';
+import {
+  agentSettingsSchema,
+  paymentsSettingsSchema,
+  shippingSettingsSchema,
+  storeSettingsSchema,
+  themeSchema,
+} from '@ventia/core';
 import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from '../catalog/parse';
@@ -91,7 +97,7 @@ export class SettingsController {
   @Get()
   async get(@AdminSession() session: AdminSessionContext) {
     const tenant = await tenantDb(session.tenantId).tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
-    return this.toResponse(tenant.name, tenant.slug, tenant.status, tenant.settings, tenant.theme);
+    return this.toResponse(tenant.name, tenant.slug, tenant.status, tenant.settings, tenant.theme, tenant.agentConfig);
   }
 
   @Patch('store')
@@ -120,7 +126,14 @@ export class SettingsController {
 
     await writeAudit(session, 'settings.store', 'Tenant', session.tenantId, input);
 
-    return this.toResponse(updated.name, updated.slug, updated.status, updated.settings, updated.theme);
+    return this.toResponse(
+      updated.name,
+      updated.slug,
+      updated.status,
+      updated.settings,
+      updated.theme,
+      updated.agentConfig,
+    );
   }
 
   @Put('theme')
@@ -138,7 +151,14 @@ export class SettingsController {
 
     await writeAudit(session, 'settings.theme', 'Tenant', session.tenantId, input);
 
-    return this.toResponse(updated.name, updated.slug, updated.status, updated.settings, updated.theme);
+    return this.toResponse(
+      updated.name,
+      updated.slug,
+      updated.status,
+      updated.settings,
+      updated.theme,
+      updated.agentConfig,
+    );
   }
 
   /**
@@ -206,7 +226,7 @@ export class SettingsController {
     });
 
     const tenant = await tenantDb(session.tenantId).tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
-    return this.toResponse(tenant.name, tenant.slug, tenant.status, tenant.settings, tenant.theme);
+    return this.toResponse(tenant.name, tenant.slug, tenant.status, tenant.settings, tenant.theme, tenant.agentConfig);
   }
 
   /**
@@ -247,7 +267,51 @@ export class SettingsController {
 
     await writeAudit(session, 'settings.shipping', 'Tenant', session.tenantId, input);
 
-    return this.toResponse(updated.name, updated.slug, updated.status, updated.settings, updated.theme);
+    return this.toResponse(
+      updated.name,
+      updated.slug,
+      updated.status,
+      updated.settings,
+      updated.theme,
+      updated.agentConfig,
+    );
+  }
+
+  /**
+   * The merchant's configuration of the AI sales agent (docs/SPEC.md §7).
+   *
+   * Writes `Tenant.agentConfig` — a column of its own rather than another key
+   * under `settings`, because that is where the schema already put it and
+   * where `agent/system-prompt.ts` already reads it from.
+   *
+   * Merged field-by-field like `storeInfo`, not replaced like `theme`: the
+   * admin page edits these four fields independently and there is no render
+   * that needs all four present, so a PATCH carrying only `tone` should not
+   * silently blank a store's carefully written summary.
+   */
+  @Patch('agent')
+  async updateAgent(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
+    const input = parseOr400(agentSettingsSchema, body);
+    const db = tenantDb(session.tenantId);
+
+    const tenant = await db.tenant.findUniqueOrThrow({ where: { id: session.tenantId } });
+    const agentConfig = { ...asRecord(tenant.agentConfig), ...input };
+
+    const updated = await db.tenant.update({
+      where: { id: session.tenantId },
+      data: { agentConfig: agentConfig as Prisma.InputJsonValue },
+    });
+
+    await writeAudit(session, 'settings.agent', 'Tenant', session.tenantId, input);
+
+    return this.toResponse(
+      updated.name,
+      updated.slug,
+      updated.status,
+      updated.settings,
+      updated.theme,
+      updated.agentConfig,
+    );
   }
 
   private toResponse(
@@ -256,12 +320,14 @@ export class SettingsController {
     status: string,
     settingsJson: Prisma.JsonValue | null,
     themeJson: Prisma.JsonValue | null,
+    agentConfigJson: Prisma.JsonValue | null,
   ) {
     const settings = asRecord(settingsJson);
     const storeInfo = asRecord(settings.storeInfo as Prisma.JsonValue | undefined);
     const payments = asRecord(settings.payments as Prisma.JsonValue | undefined);
     const shipping = asRecord(settings.shipping as Prisma.JsonValue | undefined);
     const theme = asRecord(themeJson);
+    const agent = asRecord(agentConfigJson);
 
     return {
       name,
@@ -285,6 +351,12 @@ export class SettingsController {
       // Defaults to `{}` when unset — the admin UI (a later task) handles
       // defaulting this to `{ methods: [] }` client-side.
       shipping,
+      // Whatever the merchant has configured for the AI agent, `{}` when
+      // untouched. Unlike the storefront's own view of this blob
+      // (`/v1/tenant`, which exposes only `agentName`), the whole thing is
+      // returned here — this route is owner-only and it is the merchant's own
+      // text.
+      agent,
     };
   }
 }

@@ -4,7 +4,7 @@ import { csvImportRequestSchema, slugify, type TaxRateValue } from '@ventia/core
 import type { AdminSessionContext } from '../admin/roles.decorator';
 import { parseOr400 } from '../catalog/parse';
 import { writeAudit } from '../catalog/audit';
-import { assertProductLimit } from '../catalog/plan-limits';
+import { assertProductLimit, productLimitWouldBeExceeded } from '../catalog/plan-limits';
 import { parseProductsCsv, type ParsedRow, type RowError } from './csv-parser';
 
 // Same translation table as ProductsService (products.service.ts) — kept in
@@ -85,12 +85,11 @@ export class CsvImportService {
       return existingRow !== undefined && existingRow.status === 'archived' && r.provided.status;
     }).length;
 
-    const limits = await db.tenantLimits.findUnique({ where: { tenantId } });
-    let limitExceeded = false;
-    if (limits) {
-      const nonArchivedCount = await db.product.count({ where: { status: { not: 'archived' } } });
-      limitExceeded = nonArchivedCount + creates + unArchives > limits.productsMax;
-    }
+    // The same check `commit()` runs, answered instead of thrown (see
+    // catalog/plan-limits.ts). Sharing it is what makes the preview's
+    // `limitExceeded` and the commit-time 402 agree by construction — two
+    // hand-written comparisons had already drifted apart once.
+    const limitExceeded = await productLimitWouldBeExceeded(session, creates + unArchives);
 
     return {
       valid: rows.length,

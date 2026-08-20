@@ -1,0 +1,20 @@
+-- Ventia operator flag. Required IN ADDITION to the PLATFORM_ADMIN_EMAILS env
+-- allowlist, never instead of it — see
+-- services/api/src/platform/platform-admin.guard.ts.
+--
+-- DEFAULT false, so this migration grants nothing to anybody. Every existing
+-- user, including whoever is currently reaching /v1/platform through the env
+-- allowlist alone, is denied the moment the guard starts requiring the column.
+-- That is the intended, and safe, direction for a privilege migration to fail:
+-- an operator locked out files a ticket, an attacker let in does not.
+--
+-- Granting it is one deliberate statement by someone who already holds
+-- database credentials:
+--
+--   UPDATE "User" SET "isPlatformAdmin" = true WHERE email = 'ops@yourdomain.co';
+--
+-- No GRANT changes here. "User" is one of the seven auth/platform tables
+-- `ventia_app` has no access to at all (see 20260723182728_rls), so the
+-- tenant-scoped role cannot read this column, let alone write it. The restore
+-- drill asserts that table set stays exactly seven.
+ALTER TABLE "User" ADD COLUMN "isPlatformAdmin" BOOLEAN NOT NULL DEFAULT false;

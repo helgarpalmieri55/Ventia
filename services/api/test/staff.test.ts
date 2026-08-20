@@ -118,7 +118,7 @@ describe('seat limits', () => {
     // Seat now taken by an accepted staff member — next invite is blocked.
     const secondRes = await invite(ownerCookie, 'staff-seats-second@demo.co');
     expect(secondRes.status).toBe(402);
-    expect(secondRes.body).toEqual({ error: 'PLAN_LIMIT_EXCEEDED', details: { limit: 1 } });
+    expect(secondRes.body).toEqual({ error: 'PLAN_LIMIT_EXCEEDED', details: { feature: 'staffSeats', limit: 1 } });
   });
 
   it('a pending (unaccepted) invite counts toward the seat limit too', async () => {
@@ -132,7 +132,7 @@ describe('seat limits', () => {
 
     const secondRes = await invite(ownerCookie, 'staff-seats-pending-second@demo.co');
     expect(secondRes.status).toBe(402);
-    expect(secondRes.body).toEqual({ error: 'PLAN_LIMIT_EXCEEDED', details: { limit: 1 } });
+    expect(secondRes.body).toEqual({ error: 'PLAN_LIMIT_EXCEEDED', details: { feature: 'staffSeats', limit: 1 } });
   });
 
   it('no tenantLimits row means unlimited seats', async () => {

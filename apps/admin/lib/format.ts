@@ -67,3 +67,77 @@ export function pesosToCents(pesos: string | number): number | null {
 export function centsToPesos(cents: number): number {
   return cents / 100;
 }
+
+// ---- Bogotá-pinned dates --------------------------------------------
+//
+// `formatDateCO` above formats in the RUNTIME's time zone, which is right for
+// the merchant admin (a Colombian merchant on a Colombian laptop) and wrong
+// for anything whose meaning is a calendar day the API computed.
+//
+// The subscription surface is exactly that case. `paidUntil: '2026-09-01'` is
+// stored by the API as the END of that Bogotá day — `2026-09-01T23:59:59.999-05:00`,
+// i.e. `2026-09-02T04:59:59.999Z` on the wire. Formatted in UTC (or in any
+// zone east of Bogotá) that renders as **2 September**: the operator is shown
+// a different day than the one they typed, and the derived `suspendsOn` is
+// shown a day later than the day the sweep will actually take the store
+// offline. Pinning the zone is what makes "se suspende el 8 de septiembre"
+// mean the 8th.
+//
+// One shared constant, because a second literal is a second answer.
+
+export const BOGOTA_TIME_ZONE = 'America/Bogota';
+
+const bogotaShortDate = new Intl.DateTimeFormat('es-CO', {
+  timeZone: BOGOTA_TIME_ZONE,
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+});
+
+const bogotaLongDate = new Intl.DateTimeFormat('es-CO', {
+  timeZone: BOGOTA_TIME_ZONE,
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
+});
+
+// `en-CA` is the locale whose short numeric date IS `YYYY-MM-DD`, which is
+// what `<input type="date">` requires and what the API's `paidUntil` accepts.
+// Formatting through Intl rather than slicing `toISOString()` is the whole
+// point: the slice would give the UTC day.
+const bogotaDateInput = new Intl.DateTimeFormat('en-CA', {
+  timeZone: BOGOTA_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+function toDate(value: string | Date): Date | null {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/** `'2026-09-02T04:59:59.999Z'` -> `'01/09/2026'` (the Bogotá day). `null`
+ * for anything unparseable, so the caller decides what a missing date looks
+ * like rather than getting "Invalid Date" rendered at a user. */
+export function formatDateBogota(value: string | Date): string | null {
+  const date = toDate(value);
+  return date ? bogotaShortDate.format(date) : null;
+}
+
+/** `'2026-09-09T04:59:59.999Z'` -> `'8 de septiembre de 2026'`. Used for the
+ * one sentence an operator has to read as prose — the date a store goes
+ * offline. */
+export function formatLongDateBogota(value: string | Date): string | null {
+  const date = toDate(value);
+  return date ? bogotaLongDate.format(date) : null;
+}
+
+/** The Bogotá calendar day of an instant, as `YYYY-MM-DD` — the value an
+ * `<input type="date">` holds and the value the API's `paidUntil` accepts.
+ * Round-trips: what the operator sees in the field is the day the API will
+ * store back. */
+export function toBogotaDateInput(value: string | Date): string | null {
+  const date = toDate(value);
+  return date ? bogotaDateInput.format(date) : null;
+}

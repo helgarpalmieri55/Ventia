@@ -1,4 +1,5 @@
 import { cookies } from 'next/headers';
+import { isImpersonationFailure, readImpersonationContext, type ImpersonationContext } from './impersonation';
 
 export type Role = 'owner' | 'staff';
 
@@ -32,7 +33,34 @@ export interface Me {
 export type SessionResult =
   | { kind: 'anonymous' }
   | { kind: 'no-tenant' }
-  | { kind: 'member'; me: Me };
+  /**
+   * A signed-in operator whose impersonation grant is no longer honoured —
+   * expired, unbound, or revoked. Distinct from `no-tenant` even though both
+   * arrive as a 403 from the same endpoint, because they call for opposite
+   * responses: `no-tenant` means "finish signing up", this means "your thirty
+   * minutes are over, go back to the console". See `isImpersonationFailure`.
+   */
+  | { kind: 'impersonation-ended' }
+  | {
+      kind: 'member';
+      me: Me;
+      /**
+       * The impersonation context `/v1/admin/me` reported, or `null` when it
+       * reported none (docs/superpowers/specs/2026-08-19-impersonation-design.md
+       * §5: "the admin shell renders the banner from that response, never
+       * from a client-side flag or a route param").
+       *
+       * It rides on THIS result, from THIS response, rather than being
+       * fetched separately by the banner, so the shell cannot render a
+       * session and an impersonation state that came from two different
+       * moments. While impersonating, the rest of `me` is the MERCHANT's —
+       * that is the point of the feature — which is exactly why the banner
+       * has to be next to it.
+       *
+       * Shape and its caveats: `lib/impersonation.ts`.
+       */
+      impersonation: ImpersonationContext | null;
+    };
 
 const API_INTERNAL_URL = process.env.API_INTERNAL_URL ?? 'http://localhost:4000';
 
@@ -90,16 +118,35 @@ export async function getMe(): Promise<SessionResult> {
   }
 
   if (response.status === 401) return { kind: 'anonymous' };
-  if (response.status === 403) return { kind: 'no-tenant' };
+  if (response.status === 403) {
+    // Two different 403s live on this endpoint. Reading the code is what keeps
+    // an operator with a dead grant out of the create-your-store wizard.
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      body = undefined;
+    }
+    return isImpersonationFailure(body) ? { kind: 'impersonation-ended' } : { kind: 'no-tenant' };
+  }
   if (!response.ok) return { kind: 'anonymous' };
 
   const body = (await response.json()) as AdminMeResponse;
-  const me: Me = { ...body };
+  const me: Me = {
+    userId: body.userId,
+    email: body.email,
+    tenantId: body.tenantId,
+    role: body.role,
+    emailVerified: body.emailVerified,
+  };
+  // Read off the SAME body, before anything else can go wrong: a failure to
+  // resolve the store name below must not be able to drop the banner.
+  const impersonation = readImpersonationContext(body);
 
   if (me.role === 'owner') {
     const name = await fetchStoreName();
     if (name) me.tenant = { name };
   }
 
-  return { kind: 'member', me };
+  return { kind: 'member', me, impersonation };
 }

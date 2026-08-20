@@ -52,6 +52,7 @@ describe('submitCheckout', () => {
     },
     shippingMethodId: 'flat-1',
     paymentMethod: 'cod' as const,
+    acceptedPrivacyPolicy: true,
   };
 
   it('POSTs to /api/checkout with the body and credentials included', async () => {
@@ -66,6 +67,25 @@ describe('submitCheckout', () => {
       body: JSON.stringify(input),
       credentials: 'include',
     });
+  });
+
+  it("sends the shopper's Ley 1581 authorization, and sends nothing else about it", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ orderNumber: 1, totalCents: 1 }), { status: 201 }));
+    await submitCheckout(input, fetchImpl);
+
+    const body = JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(body.acceptedPrivacyPolicy).toBe(true);
+    // The client must NOT be the source of the timestamp or of which policy
+    // text was in force: the server records both itself, precisely because
+    // evidence supplied by the party being evidenced is not evidence. If a
+    // future change starts sending either from here, this fails.
+    expect(Object.keys(body)).not.toContain('privacyAcceptedAt');
+    expect(Object.keys(body)).not.toContain('privacyPolicyVersion');
   });
 
   it('surfaces a CART_EMPTY 400 as a CheckoutApiError with that code', async () => {

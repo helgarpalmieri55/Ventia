@@ -1,19 +1,31 @@
 'use client';
 
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { FONT_PAIRS, RADIUS_OPTIONS, type FontPair, type Radius } from '@ventia/core';
+import { DEPARTAMENTOS, FONT_PAIRS, RADIUS_OPTIONS, type AgentTone, type FontPair, type Radius } from '@ventia/core';
 import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Input, Select, Spinner } from '@ventia/ui';
 import { ApiError, apiFetch } from '../../../lib/api';
 import { errorMessage, fieldErrors } from '../../../lib/errors';
 import { FONT_PAIR_LABELS, RADIUS_LABELS, themeToFormState } from '../../../lib/theme-form';
 import { EnviosTab } from '../../../components/shipping-tab';
 import { PagosTab } from '../../../components/pagos-tab';
+import { AgenteTab } from '../../../components/agente-tab';
+import { WhatsAppTab } from '../../../components/whatsapp-tab';
+import { ContenidoTab } from '../../../components/contenido-tab';
 
 interface StoreInfo {
   category?: string;
   contactEmail?: string;
   contactPhone?: string;
   description?: string;
+  // Identidad legal (Ley 1581 / Decreto 1074 art. 2.2.2.25.3.1 #1) — the
+  // Responsable's own razón social, NIT/cédula and domicilio. Read by the
+  // privacy-policy generator under exactly these key names; see
+  // `storeSettingsSchema` in @ventia/core.
+  legalName?: string;
+  taxId?: string;
+  address?: string;
+  municipio?: string;
+  departamento?: string;
 }
 
 /** `GET /v1/admin/settings`'s full response shape (see
@@ -45,15 +57,27 @@ export interface SettingsResponse {
     };
   };
   shipping: Record<string, unknown>;
+  /** The merchant's AI agent configuration (`Tenant.agentConfig`). `{}` until
+   * they have touched it — every field is optional and the server falls back
+   * to its own defaults when building the system prompt. */
+  agent: {
+    agentName?: string;
+    tone?: AgentTone;
+    storeSummary?: string;
+    policiesSummary?: string;
+  };
 }
 
-type Tab = 'tienda' | 'marca' | 'pagos' | 'envios';
+type Tab = 'tienda' | 'marca' | 'pagos' | 'envios' | 'agente' | 'whatsapp' | 'contenido';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'tienda', label: 'Tienda' },
   { key: 'marca', label: 'Marca' },
   { key: 'pagos', label: 'Pagos' },
   { key: 'envios', label: 'Envíos' },
+  { key: 'agente', label: 'Asistente IA' },
+  { key: 'whatsapp', label: 'WhatsApp' },
+  { key: 'contenido', label: 'Contenido' },
 ];
 
 /** Owner-only route (hidden from staff in the nav, enforced server-side by
@@ -61,9 +85,9 @@ const TABS: { key: Tab; label: string }[] = [
  * `/configuracion` directly gets 403 FORBIDDEN_ROLE from `GET
  * /v1/admin/settings`, surfaced by `load`'s catch below via `errorMessage`).
  *
- * Three client-side tabs (no routing — just local `tab` state, per the
- * binding contract). All three tab components are always mounted (with the
- * inactive tabs hidden via the `hidden` attribute on their containers), so
+ * Client-side tabs (no routing — just local `tab` state, per the binding
+ * contract). Every tab component is always mounted (with the inactive tabs
+ * hidden via the `hidden` attribute on their containers), so
  * each component maintains its own form state independently and switching
  * tabs never clobbers unsaved edits in another tab. */
 export default function ConfiguracionPage() {
@@ -142,6 +166,15 @@ export default function ConfiguracionPage() {
         <div hidden={tab !== 'envios'}>
           <EnviosTab settings={settings} onSaved={setSettings} />
         </div>
+        <div hidden={tab !== 'agente'}>
+          <AgenteTab settings={settings} onSaved={setSettings} />
+        </div>
+        <div hidden={tab !== 'whatsapp'}>
+          <WhatsAppTab />
+        </div>
+        <div hidden={tab !== 'contenido'}>
+          <ContenidoTab />
+        </div>
       </CardContent>
     </Card>
   );
@@ -167,6 +200,11 @@ function TiendaTab({ settings, onSaved }: TabProps) {
   const [contactEmail, setContactEmail] = useState(settings.storeInfo.contactEmail ?? '');
   const [contactPhone, setContactPhone] = useState(settings.storeInfo.contactPhone ?? '');
   const [description, setDescription] = useState(settings.storeInfo.description ?? '');
+  const [legalName, setLegalName] = useState(settings.storeInfo.legalName ?? '');
+  const [taxId, setTaxId] = useState(settings.storeInfo.taxId ?? '');
+  const [address, setAddress] = useState(settings.storeInfo.address ?? '');
+  const [municipio, setMunicipio] = useState(settings.storeInfo.municipio ?? '');
+  const [departamento, setDepartamento] = useState(settings.storeInfo.departamento ?? '');
   const [error, setError] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -203,6 +241,15 @@ function TiendaTab({ settings, onSaved }: TabProps) {
             ...(contactEmail ? { contactEmail } : {}),
             contactPhone,
             description,
+            // Same unconditional-send reasoning as category/contactPhone/
+            // description: all five are plain max-length strings server-side,
+            // so an empty one is valid and is what actually clears a
+            // previously-saved value through the merge-in-place PATCH.
+            legalName,
+            taxId,
+            address,
+            municipio,
+            departamento,
           },
         }),
       });
@@ -278,6 +325,88 @@ function TiendaTab({ settings, onSaved }: TabProps) {
           }}
           maxLength={500}
           placeholder="Cuéntales a tus clientes de qué se trata tu tienda"
+        />
+      </FormField>
+
+      {/* Identidad legal. Grouped under its own heading, and explained rather
+          than merely labelled: a merchant filling in "NIT o cédula" deserves
+          to know WHY a store-settings form suddenly wants their tax id. These
+          five fields are what the Ley 1581 policy generator (Contenido tab)
+          needs for the Responsable block Decreto 1074 requires; leaving them
+          blank is allowed and simply leaves [COMPLETAR: ...] markers in the
+          generated text for the merchant to fill by hand. */}
+      <div className="mt-2 flex flex-col gap-1 border-t border-border pt-4">
+        <h3 className="text-sm font-semibold">Identidad legal</h3>
+        <p className="text-sm text-muted-foreground">
+          Estos datos identifican al responsable del tratamiento de datos personales de tu tienda. Se usan
+          para completar automáticamente tu política de tratamiento de datos (pestaña Contenido), como lo
+          exige la Ley 1581 de 2012. Son opcionales, pero sin ellos la política queda con espacios por
+          llenar.
+        </p>
+      </div>
+      <FormField label="Razón social o nombre completo" htmlFor="tienda-legal-name">
+        <Input
+          value={legalName}
+          onChange={(event) => {
+            setLegalName(event.target.value);
+            setSaved(false);
+          }}
+          maxLength={120}
+          placeholder="Ej. Aromas del Quindío S.A.S."
+        />
+      </FormField>
+      <FormField label="NIT o cédula" htmlFor="tienda-tax-id">
+        <Input
+          value={taxId}
+          onChange={(event) => {
+            setTaxId(event.target.value);
+            setSaved(false);
+          }}
+          maxLength={40}
+          placeholder="Ej. NIT 901.234.567-8 o C.C. 1.020.304.050"
+        />
+      </FormField>
+      <FormField label="Dirección del domicilio" htmlFor="tienda-address">
+        <Input
+          value={address}
+          onChange={(event) => {
+            setAddress(event.target.value);
+            setSaved(false);
+          }}
+          maxLength={200}
+          placeholder="Ej. Carrera 14 # 8-42, local 3"
+        />
+      </FormField>
+      {/* Departamento is a <Select> because DEPARTAMENTOS is Colombia's
+          complete list of 33; municipio is a free text Input because
+          MUNICIPIOS in @ventia/core is a curated shipping subset (~73 of
+          1.100+), and a merchant domiciled outside it must still be able to
+          state their own municipio in their own legal document. */}
+      <FormField label="Departamento" htmlFor="tienda-departamento">
+        <Select
+          value={departamento}
+          onChange={(event) => {
+            setDepartamento(event.target.value);
+            setSaved(false);
+          }}
+        >
+          <option value="">Sin especificar</option>
+          {DEPARTAMENTOS.map((d) => (
+            <option key={d.code} value={d.name}>
+              {d.name}
+            </option>
+          ))}
+        </Select>
+      </FormField>
+      <FormField label="Municipio" htmlFor="tienda-municipio">
+        <Input
+          value={municipio}
+          onChange={(event) => {
+            setMunicipio(event.target.value);
+            setSaved(false);
+          }}
+          maxLength={80}
+          placeholder="Ej. Armenia"
         />
       </FormField>
       <Button type="submit" disabled={submitting} className="self-start">

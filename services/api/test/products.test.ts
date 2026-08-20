@@ -178,7 +178,7 @@ describe('/v1/admin/products', () => {
 
     const third = await createProduct(cookie, { name: 'Producto Tres' });
     expect(third.status).toBe(402);
-    expect(third.body).toEqual({ error: 'PLAN_LIMIT_EXCEEDED', details: { limit: 2 } });
+    expect(third.body).toEqual({ error: 'PLAN_LIMIT_EXCEEDED', details: { feature: 'productsMax', limit: 2 } });
   });
 
   it('archives instead of hard-deleting; archived products are excluded from status=active and do not count toward the plan limit', async () => {

@@ -1,3 +1,5 @@
+import { CONVERSATIONS_PATH } from './conversations-api';
+import { CUSTOMERS_PATH } from './customers-api';
 import { ALERTS_PATH } from './payment-alerts-api';
 
 export type Role = 'owner' | 'staff';
@@ -14,6 +16,13 @@ const CATALOG_ITEMS: NavItem[] = [
   { href: '/categorias', label: 'Categorías' },
   { href: '/importar', label: 'Importar CSV' },
   { href: '/pedidos', label: 'Pedidos' },
+  // Both roles, mirroring the API: PrivacyController sits behind
+  // AdminSessionGuard with no class-level @Roles(), like the orders
+  // controller — looking a shopper up by phone to answer "¿dónde está mi
+  // pedido?" is fulfilment work. The IRREVERSIBLE action on this page (Ley
+  // 1581 supresión) is owner-only, enforced server-side by @Roles('owner') on
+  // that one handler and hidden from staff by the page itself.
+  { href: CUSTOMERS_PATH, label: 'Clientes' },
   // Both roles, mirroring the API: payment-alerts.controller.ts sits behind
   // AdminSessionGuard with no @Roles(), exactly like the orders controller,
   // because chasing a shopper who was charged for a cancelled order is
@@ -27,6 +36,17 @@ const CATALOG_ITEMS: NavItem[] = [
   // still being live. Its empty state is a genuinely useful answer ("no
   // tienes pagos por revisar"), not filler.
   { href: ALERTS_PATH, label: 'Pagos por revisar' },
+  // Both roles, same reasoning as Pedidos and Pagos por revisar: answering a
+  // shopper the AI handed over is fulfilment work, not account
+  // administration, and the API mirrors that (no @Roles() on
+  // ConversationsController).
+  //
+  // Permanent rather than conditional on there being an escalation. A store
+  // whose plan excludes human handoff still has conversations worth reading —
+  // seeing what the agent actually says to customers is the main reason a
+  // merchant opens this — and its empty state is a real answer rather than
+  // filler.
+  { href: CONVERSATIONS_PATH, label: 'Conversaciones' },
 ];
 
 /** Owner-only items — the server mirrors this with @Roles('owner') on the

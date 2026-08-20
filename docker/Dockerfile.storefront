@@ -1,0 +1,142 @@
+# syntax=docker/dockerfile:1
+#
+# @ventia/storefront — Next.js 15 App Router, shipped as a standalone bundle.
+#
+# Build from the REPO ROOT, not from docker/:
+#   docker build -f docker/Dockerfile.storefront -t ventia-storefront .
+#
+# Stages base/fetch are byte-identical to docker/Dockerfile.api's, so building
+# all three images reuses the same pnpm-fetch layer instead of downloading the
+# dependency graph three times.
+
+ARG NODE_IMAGE=node:22.22-bookworm-slim
+
+FROM ${NODE_IMAGE} AS runtime-base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base AS base
+# COREPACK_HOME is not cosmetic. Corepack caches the pnpm it downloads under
+# that path, defaulting to the CURRENT USER's ~/.cache — and `corepack prepare`
+# below runs as root while the migrator container runs as `node`. Without a
+# shared path the runtime user looks in /home/node, finds nothing, and
+# re-downloads pnpm from the registry on every migration run, which fails
+# outright on a host with no egress. (Observed exactly that: the first
+# `compose up` of this stack died in `prisma migrate deploy` with a corepack
+# TLS error before touching the database.)
+ENV PNPM_HOME=/pnpm \
+    PATH=/pnpm:$PATH \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    COREPACK_HOME=/pnpm/corepack \
+    CI=1
+WORKDIR /app
+
+# Optional extra CA for the BUILD ONLY, for hosts behind a TLS-terminating
+# proxy; a no-op when the secret is not supplied:
+#   docker build --secret id=proxy_ca,src=/path/to/ca.pem ...
+# This image genuinely needs outbound HTTPS at build time: apps/storefront/
+# lib/fonts.ts loads ten families through `next/font/google`, which downloads
+# and self-hosts them during `next build`. A build with no network reaches
+# `next build` and then fails on the font fetch.
+RUN --mount=type=secret,id=proxy_ca,target=/tmp/proxy-ca.crt \
+    mkdir -p /usr/local/share/ca-certificates \
+ && if [ -s /tmp/proxy-ca.crt ]; then \
+      cp /tmp/proxy-ca.crt /usr/local/share/ca-certificates/build-proxy-ca.crt; \
+      chmod 0644 /usr/local/share/ca-certificates/build-proxy-ca.crt; \
+    else \
+      : > /usr/local/share/ca-certificates/build-proxy-ca.crt; \
+    fi
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/build-proxy-ca.crt
+
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+
+# =============================================================================
+# fetch — lockfile only, so a source change never re-downloads dependencies.
+# =============================================================================
+FROM base AS fetch
+COPY pnpm-lock.yaml ./
+RUN pnpm fetch
+
+# =============================================================================
+# deps — manifests only, still no source.
+# =============================================================================
+FROM fetch AS deps
+COPY package.json pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY packages/core/package.json      packages/core/
+COPY packages/db/package.json        packages/db/
+COPY packages/payments/package.json  packages/payments/
+COPY packages/ui/package.json        packages/ui/
+COPY packages/whatsapp/package.json  packages/whatsapp/
+COPY services/api/package.json       services/api/
+COPY apps/storefront/package.json    apps/storefront/
+COPY apps/admin/package.json         apps/admin/
+RUN pnpm install --frozen-lockfile --offline --filter "@ventia/storefront..."
+
+# =============================================================================
+# builder — workspace packages first, then `next build`.
+# =============================================================================
+FROM deps AS builder
+
+COPY packages/core packages/core
+COPY packages/ui   packages/ui
+COPY apps/storefront apps/storefront
+
+# @ventia/core and @ventia/ui resolve through their package.json `main`/
+# `exports` to dist/, which does not exist until tsc runs. Next would not
+# error on a missing dist — it would trace a thinner bundle — so these two
+# builds are the load-bearing step, not a formality.
+#
+# @ventia/db is correctly absent: nothing in apps/storefront imports it (the
+# only mention in apps/ is a comment in admin's lib/orders-api.ts explaining
+# why it is NOT imported), so this image needs neither Prisma nor its engine.
+RUN pnpm --filter @ventia/core --filter @ventia/ui run build
+
+# NEXT_PUBLIC_* is what would have to be passed here — Next inlines those into
+# the client bundle at build time, so anything per-deployment among them would
+# be baked in. There are none: `grep -o 'process\.env\.[A-Z_]*'` across both
+# apps yields only API_INTERNAL_URL and REVALIDATE_SECRET, and the storefront
+# reads both at request time (lib/storefront-api.ts, middleware.ts,
+# app/api/revalidate/route.ts). So nothing deployment-specific is baked into
+# this image and every one of those values comes from the container
+# environment.
+#
+# NODE_ENV=production is set by `next build` itself for the build; the runner
+# stage sets it for the server process.
+RUN pnpm --filter @ventia/storefront run build
+
+# =============================================================================
+# runner — the standalone server.
+# =============================================================================
+FROM runtime-base AS runner
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+WORKDIR /app
+
+# Next's standalone output is already a complete, minimal application: server.js
+# plus the traced subset of node_modules, laid out under the trace root. Two
+# things it deliberately does NOT include and that must be copied beside it:
+#
+#   .next/static — hashed JS/CSS chunks. Missing them yields a server that
+#                  answers 200 with unstyled HTML and no hydration.
+#   public/      — not present in either app (verified: neither
+#                  apps/storefront/public nor apps/admin/public exists), so
+#                  there is no COPY for it. Adding one later means adding a
+#                  COPY line here.
+#
+# The self-hosted `next/font` files are NOT a third case: they are emitted into
+# .next/static/media by the build, so they travel with the static copy.
+COPY --from=builder --chown=node:node /app/apps/storefront/.next/standalone      ./
+COPY --from=builder --chown=node:node /app/apps/storefront/.next/static          ./apps/storefront/.next/static
+
+USER node
+EXPOSE 3000
+
+# HOSTNAME=0.0.0.0 above is required, not cosmetic: standalone's server.js
+# binds to the HOSTNAME env var and Next's own default is localhost, which
+# inside a container means nothing outside the container can reach it.
+#
+# API_INTERNAL_URL and REVALIDATE_SECRET are read per request from the
+# environment, so they belong on the container, not in this image.
+CMD ["node", "apps/storefront/server.js"]

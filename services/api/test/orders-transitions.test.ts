@@ -1071,3 +1071,60 @@ describe('cancel — paymentStatus', () => {
     expect(order?.paymentStatus).toBe('COD');
   });
 });
+
+/**
+ * SPEC.md §9: "audit log on all admin/platform mutations."
+ *
+ * Order transitions had none until now, which made order state the one
+ * consequential merchant action with no trail — and it is the action a dispute
+ * is argued over. A staff member cancelling an order restocks it and flips
+ * `paymentStatus`; "nobody cancelled that" needs an answer.
+ */
+describe('order transitions are audit-logged', () => {
+  it('records who did what, and what the order became', async () => {
+    const { cookie, tenantId, userId } = await signUpWithTenant('orders-audit@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'PENDING', []);
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+    expect(res.status).toBe(200);
+
+    const entries = await prisma.auditLog.findMany({ where: { tenantId, entityId: orderId } });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ action: 'order.confirm', entity: 'Order', actorUserId: userId });
+    // The resulting state, so the log answers "what did this order become"
+    // without joining a row that has since moved on again.
+    expect(entries[0].data).toMatchObject({ status: 'CONFIRMED' });
+  });
+
+  it('records the payload of a transition that carries one', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('orders-audit-ship@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'PREPARING', []);
+
+    await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/shipped`)
+      .set('cookie', cookie)
+      .send({ carrier: 'Servientrega', trackingNumber: 'SE-123456' });
+
+    const entry = await prisma.auditLog.findFirstOrThrow({
+      where: { tenantId, entityId: orderId, action: 'order.shipped' },
+    });
+    expect(entry.data).toMatchObject({ carrier: 'Servientrega', trackingNumber: 'SE-123456' });
+  });
+
+  it('writes NO audit row for a transition that was rejected', async () => {
+    // An audit row for a mutation that did not happen is worse than none — it
+    // would make the log lie in exactly the situation someone consults it.
+    const { cookie, tenantId } = await signUpWithTenant('orders-audit-reject@demo.co', 'owner');
+    const orderId = await seedOrder(tenantId, 'DELIVERED', []);
+
+    const res = await request(app.getHttpServer())
+      .patch(`/v1/admin/orders/${orderId}/confirm`)
+      .set('cookie', cookie);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+
+    const entries = await prisma.auditLog.findMany({ where: { tenantId, entityId: orderId } });
+    expect(entries).toHaveLength(0);
+  });
+});

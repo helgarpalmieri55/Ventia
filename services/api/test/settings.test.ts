@@ -107,6 +107,72 @@ describe('PATCH /v1/admin/settings/store', () => {
     expect(settings.storeInfo).toMatchObject({ contactEmail: 'wizard@store-merge.co', category: 'hogar' });
   });
 
+  it('accepts the five identidad-legal fields the Ley 1581 policy generator reads, and lets them be cleared', async () => {
+    const { cookie, tenantId } = await signUpWithTenant('settings-store-identidad@demo.co', 'owner');
+
+    // The key names are load-bearing: `privacy-policy.service.ts` reads
+    // exactly these five off `settings.storeInfo` (note `address`, not
+    // `addressLine`), and a schema that accepted differently-named fields
+    // would strip them silently and leave the generated policy full of
+    // [COMPLETAR: ...] markers with nothing in the UI to explain why.
+    const res = await request(app.getHttpServer())
+      .patch('/v1/admin/settings/store')
+      .set('cookie', cookie)
+      .send({
+        storeInfo: {
+          legalName: 'Distribuidora del Café S.A.S.',
+          taxId: 'NIT 901.234.567-8',
+          address: 'Carrera 14 # 8-42, local 3',
+          municipio: 'Armenia',
+          departamento: 'Quindío',
+        },
+      });
+    expect(res.status).toBe(200);
+
+    const tenant = await platformDb.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    expect((tenant.settings as Record<string, unknown>).storeInfo).toMatchObject({
+      legalName: 'Distribuidora del Café S.A.S.',
+      taxId: 'NIT 901.234.567-8',
+      address: 'Carrera 14 # 8-42, local 3',
+      municipio: 'Armenia',
+      departamento: 'Quindío',
+    });
+
+    // All five are plain max-length strings, so an empty one is valid and is
+    // what the Tienda tab actually sends to clear a saved value — unlike
+    // `contactEmail`, whose `.email()` rule makes it unclearable through this
+    // endpoint (a pre-existing, documented gap).
+    const cleared = await request(app.getHttpServer())
+      .patch('/v1/admin/settings/store')
+      .set('cookie', cookie)
+      .send({ storeInfo: { legalName: '', taxId: '', address: '', municipio: '', departamento: '' } });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.storeInfo).toMatchObject({ legalName: '', taxId: '', municipio: '' });
+  });
+
+  it('400 VALIDATION_FAILED for a legalName over its max length, and leaves an existing store untouched', async () => {
+    const { cookie } = await signUpWithTenant('settings-store-identidad-long@demo.co', 'owner');
+    const res = await request(app.getHttpServer())
+      .patch('/v1/admin/settings/store')
+      .set('cookie', cookie)
+      .send({ storeInfo: { legalName: 'A'.repeat(121) } });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_FAILED');
+  });
+
+  it('a store that never sets the identidad-legal fields still saves normally', async () => {
+    // The "must not break an existing store" rule, stated as a test: all five
+    // are optional, so a PATCH that has never heard of them is unaffected.
+    const { cookie } = await signUpWithTenant('settings-store-identidad-absent@demo.co', 'owner');
+    const res = await request(app.getHttpServer())
+      .patch('/v1/admin/settings/store')
+      .set('cookie', cookie)
+      .send({ name: 'Tienda Sin Identidad', storeInfo: { category: 'moda' } });
+    expect(res.status).toBe(200);
+    expect(res.body.storeInfo).toMatchObject({ category: 'moda' });
+    expect(res.body.storeInfo.legalName).toBeUndefined();
+  });
+
   it('400 VALIDATION_FAILED for an invalid contactEmail', async () => {
     const { cookie } = await signUpWithTenant('settings-store-bad-email@demo.co', 'owner');
 

@@ -65,6 +65,16 @@ enum ConversationChannel {
   whatsapp
 }
 
+/// Mirrors `WhatsAppProviderId` in packages/whatsapp/src/index.ts. An enum
+/// rather than a free `String` because the value selects which adapter parses
+/// an inbound delivery and signs an outbound send — a typo here would route a
+/// Cloud API payload through the Evolution parser, which returns `null`
+/// (unrecognized shape) and silently drops a shopper's message.
+enum WhatsAppProviderId {
+  evolution
+  cloud
+}
+
 enum TenantContentType {
   faq
   policy_shipping
@@ -95,7 +105,8 @@ model Tenant {
   orders        Order[]
   conversations Conversation[]
   contents      TenantContent[]
-  subscriptions Subscription[]
+  subscription  Subscription?
+  whatsappNumbers WhatsAppNumber[]
 }
 
 model TenantDomain {
@@ -127,6 +138,21 @@ model User {
   email         String    @unique
   emailVerified Boolean   @default(false)
   image         String?
+  // Ventia operator flag — NOT a merchant role. Required IN ADDITION to the
+  // PLATFORM_ADMIN_EMAILS env allowlist, never instead of it (see
+  // services/api/src/platform/platform-admin.guard.ts): two independent
+  // controls, one in deployment config and one in the database, neither
+  // sufficient alone.
+  //
+  // Nothing in the product writes this column. better-auth is deliberately
+  // configured with no `user.additionalFields`, so it does not know the column
+  // exists and cannot set it through any sign-up or profile path; there is no
+  // API endpoint that updates it either. Granting it is a deliberate SQL
+  // statement by someone who already holds database credentials. That is the
+  // property being bought — contrast MembershipRole.platform_admin, which is
+  // reachable from the merchant-driven staff-invite path and is rejected for
+  // exactly that reason.
+  isPlatformAdmin Boolean @default(false)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   sessions      Session[]
@@ -326,9 +352,9 @@ model Customer {
 }
 
 model Order {
-  id                 String        @id @default(uuid()) @db.Uuid
-  tenantId           String        @db.Uuid
-  number             Int
+  id                   String        @id @default(uuid()) @db.Uuid
+  tenantId             String        @db.Uuid
+  number               Int
   // The reference handed to the payment gateway, and the ONLY identifier a
   // webhook is resolved through. GLOBALLY unique, random and unguessable —
   // all three properties are load-bearing, see
@@ -351,15 +377,15 @@ model Order {
   //
   // `number` remains the human-facing identifier (VNT-1001) everywhere — this
   // is plumbing and is never rendered.
-  reference          String        @unique
-  status             OrderStatus   @default(PENDING)
-  paymentStatus      PaymentStatus @default(PENDING)
-  paymentProvider    String?
+  reference            String        @unique
+  status               OrderStatus   @default(PENDING)
+  paymentStatus        PaymentStatus @default(PENDING)
+  paymentProvider      String?
   // null = no active stock reservation (every COD order, and any order past
   // the pending/reserved stage). Set to now()+15min when an online-payment
   // checkout reserves stock at order-creation time; cleared to null once the
   // payment webhook confirms (or the reservation expires and is restocked).
-  stockReservedUntil DateTime?
+  stockReservedUntil   DateTime?
   // Best-effort gateway transaction/payment reference for THIS order,
   // written from three sources (P3c design decision 2), none authoritative
   // on its own: (1) markPaid/markFailed, after a real signature-verified
@@ -371,7 +397,7 @@ model Order {
   // job (P3c Task 4) feeds into each gateway's own authenticated
   // getTransactionStatus/searchByReference call. Null until any
   // IMPLEMENTED source above fires.
-  providerRef        String?
+  providerRef          String?
   // PROVENANCE of `providerRef` — how the value currently in that column was
   // established, and therefore how much it may be trusted. Exactly two values
   // are ever written (kept a plain String, like `paymentProvider`, rather
@@ -403,25 +429,58 @@ model Order {
   // NULL means "unknown provenance" — pre-migration rows, and any future
   // writer that forgets to say. Treated exactly like 'hint' (untrusted) by
   // every consumer: fail closed, never open.
-  providerRefSource  String?
-  customerId         String?       @db.Uuid
-  email              String
-  phone              String
-  shippingAddress    Json
-  billingFields      Json?
-  shippingMethod     String?
-  shippingCents      Int           @default(0)
-  subtotalCents      Int
-  taxCents           Int
-  totalCents         Int
-  source             CartSource    @default(web)
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
-  tenant             Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer           Customer?     @relation(fields: [customerId], references: [id])
-  items              OrderItem[]
-  events             OrderEvent[]
-  payments           Payment[]
+  providerRefSource    String?
+  customerId           String?       @db.Uuid
+  // ---- Ley 1581 art. 8/9 — the *prueba de la autorización* --------------
+  //
+  // When this shopper ticked the "autorizo el tratamiento de mis datos
+  // personales" box at checkout, and WHICH policy text was published at that
+  // instant. Null on every order placed before this column existed, and on
+  // nothing since: the checkout endpoint refuses a submission that does not
+  // carry an explicit authorization, so a null here means "pre-migration",
+  // never "we forgot to ask".
+  //
+  // Why the order row and not a table of its own: art. 9 makes the
+  // authorization an attribute OF the collection event — this shopper, these
+  // data, this moment — and the order IS that event. A separate
+  // `DataConsent` table would carry a foreign key to the order and these two
+  // values, and would be joined on every question it can answer.
+  //
+  // `privacyPolicyVersion` is a FINGERPRINT of the published policy, not the
+  // policy: `sha256:<16 hex>` over the exact `title` + `bodyMd` this tenant
+  // had published at checkout time, or the sentinel `sin-politica-publicada`
+  // when they had published none (see checkout/privacy-consent.ts). Storing
+  // the text per order would duplicate ~8 KB on every order to say what one
+  // hash says.
+  //
+  // NEITHER COLUMN IS PERSONAL DATA, and that is deliberate. The timestamp is
+  // a fact about the order (which already carries `createdAt`); the
+  // fingerprint is a fact about the MERCHANT's own policy text, identical
+  // across every shopper who checked out against that revision. So the
+  // anonymizer (services/api/src/privacy/privacy.service.ts) leaves both
+  // alone — and must: destroying the proof that the authorization was
+  // obtained, on receipt of a supresión request, would leave the merchant
+  // unable to answer for the treatment performed while it was lawful.
+  // Asserted by test/privacy-anonymize.test.ts.
+  privacyAcceptedAt    DateTime?
+  privacyPolicyVersion String?
+  email                String
+  phone                String
+  shippingAddress      Json
+  billingFields        Json?
+  shippingMethod       String?
+  shippingCents        Int           @default(0)
+  subtotalCents        Int
+  taxCents             Int
+  totalCents           Int
+  source               CartSource    @default(web)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  tenant               Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer             Customer?     @relation(fields: [customerId], references: [id])
+  items                OrderItem[]
+  events               OrderEvent[]
+  payments             Payment[]
 
   @@unique([tenantId, number])
   @@index([tenantId, status])
@@ -455,19 +514,156 @@ model OrderEvent {
   @@index([orderId])
 }
 
+/// An APPEND-ONLY, per-ATTEMPT ledger of what a payment gateway said about
+/// money for one order. Spec'd in docs/SPEC.md §8 (`payments — order_id,
+/// provider, provider_ref, amount_cents, status, raw jsonb`), declared since
+/// the initial migration, and — until this change — never read or written by
+/// anything.
+///
+/// ## Why it earns its place, given `Order` already carries payment state
+///
+/// `Order.paymentStatus` / `paymentProvider` / `providerRef` are ONE SLOT.
+/// They answer "where does this order stand right now?", which is the
+/// question checkout, the admin UI and the expiry worker all need, and they
+/// answer it well. What one slot structurally cannot represent:
+///
+///  * **A shopper whose first card declined and whose second succeeded.**
+///    This is an ordinary, everyday flow on PSE and cards — so ordinary that
+///    `PaymentsService.markPaid` was widened in P3 wave-2 FIX 1 specifically
+///    to accept `PENDING -> FAILED -> PAID`. After the retry settles, the
+///    order row says `PAID` with the SECOND attempt's `providerRef`, and the
+///    first attempt — a real charge attempt against a real card, with its own
+///    transaction id at the gateway — is gone. The `payment_failed`
+///    `OrderEvent` is the only trace, and `OrderEvent` is a narrative log
+///    keyed by `type`/`actor`, not a money record with an amount and a
+///    gateway reference in queryable columns.
+///  * **A partial refund.** `paymentStatus` is a single enum value; there is
+///    nowhere to say "3 of the 5 units came back" without either overwriting
+///    `PAID` (destroying the fact that it was paid) or inventing a second
+///    enum member per refund shape. A per-attempt ledger holds one row per
+///    statement the gateway made about money, which is the shape a partial
+///    refund needs. Nothing writes refund rows today — no code path in this
+///    repo calls `PaymentProvider.refund` yet — but the table can hold them,
+///    and this is the reason its grain is per-attempt rather than per-order.
+///
+/// So: `Order` is the CURRENT STATE, this table is the HISTORY. That split is
+/// load-bearing in one direction — see "not a second source of truth" below.
+///
+/// ## Append-only, for `WebhookEvent`'s reason
+///
+/// Every row here is evidence of what a gateway said about money. Migration
+/// 20260819120000_payment_ledger revokes INSERT/UPDATE/DELETE on this table
+/// from `ventia_app` and grants back SELECT alone, with the `FOR ALL` RLS
+/// policy from 20260723182728_rls replaced by a `FOR SELECT` one to match —
+/// exactly the treatment `WebhookEvent` got in 20260815120000. A merchant can
+/// read their own payment history; nobody but the owner connection
+/// (`platformDb`) can write it, and nothing anywhere can amend or delete a
+/// row. Writes therefore go through `platformDb` only; see
+/// `services/api/src/payments/payment-ledger.ts`, the single writer.
+///
+/// ## Not a second source of truth
+///
+/// NOTHING may read this table to decide an order's state. `Order.paymentStatus`
+/// stays authoritative, and the two settle paths keep deciding exactly as they
+/// did: `markPaid`/`markFailed` read and write `Order` under their own
+/// advisory lock, and a ledger row is written BEFORE the settle is attempted,
+/// precisely because it records what the GATEWAY said and not what this
+/// system did about it. A row therefore exists for an attempt whose settle
+/// then no-op'd (a PAID event landing on an already-cancelled order writes a
+/// `PAID` row here and still records `paid_order_not_settleable` on
+/// `WebhookEvent`) — that pairing is the true one, and reading the ledger to
+/// infer "this order is paid" would turn it into a way to contradict `Order`.
+///
+/// ## `tenantId` (kept, not added)
+///
+/// This column already existed — every tenant-owned table in this schema has
+/// one, and it stays for the two reasons that make it non-optional here: the
+/// RLS policy is literally `"tenantId" = current_setting('app.tenant_id')`, so
+/// without the column there is no row-level isolation at all; and
+/// `packages/db/src/tenant-models.ts` already lists `Payment`, so
+/// `tenantDb(t).payment.*` injects `AND tenantId = t` at the application
+/// layer. Deriving the tenant through `orderId` instead would give the policy
+/// a subquery on `Order` (evaluated per row, on every read) and would leave
+/// the first isolation layer with nothing to filter on.
 model Payment {
-  id          String  @id @default(uuid()) @db.Uuid
-  tenantId    String  @db.Uuid
-  orderId     String  @db.Uuid
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @db.Uuid
+  orderId     String   @db.Uuid
+  /// The `PaymentProviderId` this statement came from (`wompi` /
+  /// `mercadopago` / `epayco`), matching `Order.paymentProvider`.
   provider    String
+  /// The GATEWAY's own transaction id — the identity of the ATTEMPT, and what
+  /// makes this table per-attempt rather than per-order. It is the same value
+  /// `Order.providerRef` holds for whichever attempt happened to be the last
+  /// one; here every attempt keeps its own.
   providerRef String?
+  /// What the gateway said MOVED, in minor units, taken from the gateway's own
+  /// statement and never from `Order.totalCents`. On both settle paths this
+  /// has already been proven equal to the order total before the row is
+  /// written (the webhook controller's amount check, `checkOrderBinding` on
+  /// the reconciliation path), so today it always matches — it is recorded as
+  /// the gateway's number anyway, because the day it stops matching (a partial
+  /// refund, a partial capture) is the day this column is the only place the
+  /// difference exists.
   amountCents Int
+  /// The NORMALIZED status (`packages/payments`'s `NormalizedStatus`:
+  /// `PAID` / `FAILED` / `PENDING` / `EXPIRED`), not the gateway's own
+  /// vocabulary — the raw wording lives in the evidence `raw` points at.
+  /// A plain String rather than an enum because it is a record of an external
+  /// system's claim, and a new gateway status must never fail an INSERT into
+  /// the table whose job is to preserve what was said.
   status      String
+  /// The evidence, and how it was obtained. Shaped by the writer:
+  ///  * webhook path — `{source:'webhook', eventId, ...}`, a POINTER to the
+  ///    `WebhookEvent` row (unique on `(provider, tenantId, eventId)`) that
+  ///    already stores the verified payload byte-for-byte. Deliberately not a
+  ///    second copy of the payload.
+  ///  * reconciliation path — `{source:'reconciliation', via, gateway:{...}}`,
+  ///    the full normalized lookup result, because that path produces no
+  ///    `WebhookEvent` row and this is the ONLY place the gateway's answer is
+  ///    persisted anywhere.
   raw         Json?
   createdAt   DateTime @default(now())
-  order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
+  // Idempotency for both settle paths, and the reason repeated sweeps do not
+  // grow this table without bound.
+  //
+  // Both writers can legitimately re-observe the same gateway statement:
+  // the webhook controller REPROCESSES a delivery whose `WebhookEvent` row
+  // exists but was never stamped `processedAt` (fix 5 in
+  // webhooks.controller.ts), and the reconciliation sweep re-asks the gateway
+  // about the same order every 2 minutes for as long as it stays a candidate
+  // — an order sitting in `PENDING`/`FAILED` whose gateway answer is still
+  // `FAILED` is queried on every single pass, by design. Without this key
+  // that is one new row every two minutes, forever, for an order nothing is
+  // happening to.
+  //
+  // The key is "one row per distinct thing the gateway said": a state change
+  // on the same transaction (`PENDING` then `PAID`) is a different statement
+  // and gets its own row, as is a different amount on the same transaction
+  // and status (which is what a partial refund of a partial refund looks
+  // like). Writers insert with `ON CONFLICT DO NOTHING`
+  // (`createMany({skipDuplicates:true})`), so a re-observation is a silent
+  // no-op rather than an error to handle at six call sites.
+  //
+  // `providerRef` is NULLABLE and Postgres treats NULLs as DISTINCT in a
+  // unique index, so a row without one gets NO protection from this
+  // constraint — the same property, and the same caveat, as `WebhookEvent`'s
+  // tenant-less rows (note 4 of 20260814090000_webhook_event_tenant_scoped_unique).
+  // That is acceptable because BOTH of today's writers always have a gateway
+  // transaction id in hand before they reach the ledger: the webhook path
+  // gets a non-optional `NormalizedPaymentEvent.providerRef`, and the
+  // reconciliation path returns early unless one resolved. Any future writer
+  // that records an attempt with no gateway reference must bring its own
+  // dedupe.
+  @@unique([tenantId, provider, providerRef, status, amountCents])
   @@index([orderId])
+  // "Show me this order's payment history, newest first" — the query the
+  // admin order detail page will run, and the one a support engineer runs by
+  // hand. `tenantId` leads so it also serves "everything this tenant's
+  // gateways have said", and so it is usable under the RLS predicate.
+  @@index([tenantId, orderId, createdAt(sort: Desc)])
 }
 
 model WebhookEvent {
@@ -540,6 +736,19 @@ model WebhookEvent {
   // grant + RLS policy for `ventia_app`; see that migration for why a tenant
   // can now read (and only read) its own rows here.
   @@index([tenantId, result, processedAt(sort: Desc)])
+  // Declared to match the index 20260815160000_webhook_event_order_id already
+  // created in the database. It answers the reverse of the alerts list's
+  // question — "what did the gateway ever tell us about THIS order?" — which
+  // is the natural support query once the link exists, and which would
+  // otherwise scan.
+  //
+  // It was missing here, which is not cosmetic: Prisma diffs the schema
+  // against the migration history, so every `migrate dev` / `migrate diff`
+  // emitted a spurious `DROP INDEX` for it. Anyone who accepted that diff
+  // would have silently dropped a real index in production, and anyone who
+  // rejected it had to re-reject it on every subsequent migration. Found while
+  // adding the WhatsApp tables; the drift predates that work.
+  @@index([tenantId, orderId])
 }
 
 // What a merchant DID about a `paid_order_not_settleable` alert. A small
@@ -638,6 +847,10 @@ model Conversation {
   messages   Message[]
 
   @@index([tenantId, startedAt])
+  // Serves the platform-wide retention sweep, which does not constrain
+  // tenantId and so cannot use the index above. See
+  // migrations/20260819150000_conversation_retention_indexes.
+  @@index([startedAt], map: "Conversation_retention_sweep_idx")
 }
 
 model Message {
@@ -650,9 +863,40 @@ model Message {
   inputTokens    Int          @default(0)
   outputTokens   Int          @default(0)
   createdAt      DateTime     @default(now())
+
+  /// The provider's own id for an inbound message (`InboundMessage.externalId`
+  /// in packages/whatsapp), used to drop duplicate deliveries. Both WhatsApp
+  /// providers retry, and both retry carrying the SAME id.
+  ///
+  /// NULL for every web-widget message, which has no provider id — and NULL is
+  /// why the unique index below is not a problem for them: Postgres treats
+  /// NULLs as distinct in a unique index, so any number of null rows coexist.
+  /// (Looks wrong at a glance; it is the same property `WebhookEvent` relies
+  /// on for its tenant-less rows.)
+  externalId     String?
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
-  @@index([conversationId])
+  // `createdAt` second so the retention sweep's "any message since the
+  // cutoff?" anti-join is a range probe that stops at the first hit, rather
+  // than a read of every message in a long-running thread. Serves plain
+  // conversationId lookups too — a composite index answers any prefix of its
+  // own key.
+  @@index([conversationId, createdAt])
+  /// Inbound dedupe, enforced by Postgres rather than a cache, because a
+  /// duplicate here costs money: a retried delivery that slips through becomes
+  /// a second agent turn — the model is called twice, the merchant's AI budget
+  /// is charged twice, and the shopper is answered twice. A cache can fail
+  /// open; a unique index cannot.
+  ///
+  /// Scoped to the tenant, NOT globally unique on `externalId`. Provider
+  /// message ids are namespaced by the provider, not by us, and two tenants
+  /// can legitimately be reached through the same provider account — under a
+  /// global key, whichever tenant was written second would have its message
+  /// permanently swallowed. That is not hypothetical: it is exactly the
+  /// shared-gateway bug fixed for `WebhookEvent` in
+  /// 20260814090000_webhook_event_tenant_scoped_unique (fix 4 in
+  /// services/api/src/payments/webhooks.controller.ts).
+  @@unique([tenantId, externalId])
 }
 
 model AgentUsage {
@@ -665,6 +909,79 @@ model AgentUsage {
   messagesCount Int    @default(0)
 
   @@unique([tenantId, month])
+}
+
+// ---- WhatsApp channel ----
+
+/// One connected WhatsApp number, per docs/superpowers/specs/2026-08-18-p5-whatsapp-design.md §1.
+///
+/// This table exists instead of another key under `Tenant.settings` for one
+/// reason: inbound routing. Every other webhook in this codebase carries the
+/// tenant in its path (`/webhooks/payments/:provider/:tenantId`), but Meta
+/// delivers ONE webhook per app covering every number under it, so the only
+/// thing identifying the tenant is `phone_number_id` inside the payload. A
+/// payload-derived value has to be looked up, so it must be a real indexed
+/// column.
+///
+/// A row here is exactly what `WhatsAppConfig` (packages/whatsapp) is
+/// assembled from: `externalId` and `verifyToken` directly, `token` /
+/// `appSecret` / `baseUrl` by decrypting `credentialsEnc` in the API.
+model WhatsAppNumber {
+  id       String             @id @default(uuid()) @db.Uuid
+  tenantId String             @db.Uuid
+  provider WhatsAppProviderId
+
+  /// THE routing key. Cloud: `phone_number_id`; Evolution: the instance name.
+  ///
+  /// Globally `@unique`, deliberately NOT `@@unique([tenantId, externalId])`.
+  /// An inbound delivery carries this value and nothing else, so if two
+  /// tenants could claim the same one the lookup would return two rows and
+  /// routing would be ambiguous — and "ambiguous" here means one store's
+  /// customers reaching another store's agent, leaking their conversation and
+  /// their order data. This is a safety property enforced by the database, not
+  /// a tidiness constraint: the application-layer check ("is this number
+  /// already registered?") is racy, a UNIQUE index is not.
+  externalId String @unique
+
+  /// Human-readable number for the admin UI ("+57 300 123 4567"). Display
+  /// only — never used for routing, which is always `externalId`.
+  displayPhone String
+
+  /// pending | connected | disabled. `pending` until the provider handshake
+  /// completes; `disabled` is how a merchant turns the channel off without
+  /// losing the credentials. Free `String` like `Order.status` and
+  /// `Conversation.status`, matching this schema's existing convention for
+  /// lifecycle fields that the admin flow owns.
+  status String @default("pending")
+
+  /// AES-256-GCM blob (`base64(iv):base64(tag):base64(ciphertext)`), the same
+  /// scheme and the same key as payment-provider credentials — see
+  /// services/api/src/payments/encryption.ts. Holds the provider token, plus
+  /// the Meta app secret (Cloud) or the instance base URL (Evolution).
+  ///
+  /// Nullable because a row is created by the admin flow BEFORE the merchant
+  /// has finished pasting credentials (`status = 'pending'`).
+  ///
+  /// NOT readable by tenant-scoped code: `ventia_app` has a column-level
+  /// SELECT grant that excludes this column and `verifyToken`. See the
+  /// migration for the full reasoning.
+  credentialsEnc String?
+
+  /// Meta's `hub.verify_token`, echoed back during the GET handshake. A shared
+  /// secret, so it lives under the same column-level revocation as
+  /// `credentialsEnc`. Null for Evolution, which has no such handshake.
+  verifyToken String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Cascade + this index: the admin "WhatsApp" tab lists a tenant's numbers,
+  /// and a deleted tenant must not leave a live routing entry behind — an
+  /// orphaned row would keep matching inbound deliveries for a store that no
+  /// longer exists.
+  @@index([tenantId])
 }
 
 // ---- Content / Notifications / Platform ----
@@ -691,16 +1008,37 @@ model NotificationLog {
   createdAt      DateTime @default(now())
 }
 
+/// Ventia's commercial relationship with ONE merchant (SPEC §6 M9, §8).
+///
+/// Platform-owned, not tenant-owned: `ventia_app` has no privilege on this
+/// table at all (see migration 20260819170000_subscription_platform_owned),
+/// so it is reachable only through `platformDb` — the operator API and the
+/// auto-suspend sweep. A merchant never reads or writes their own price or
+/// paid-until date.
+///
+/// EXACTLY ONE row per tenant (`tenantId` is unique): this is current state,
+/// not a ledger. "v1 manual" means an operator records that a merchant paid
+/// and moves `paidUntil` forward; the HISTORY of those moves lives in
+/// `AuditLog` (`platform.tenant.subscription_recorded`), which already
+/// records who changed what, when, from which value — everything a payment
+/// history would, on the table built for exactly that. A second row per
+/// tenant would instead force every reader to decide which one governs, and
+/// the auto-suspend sweep is one of those readers.
 model Subscription {
   id         String    @id @default(uuid()) @db.Uuid
-  tenantId   String    @db.Uuid
+  tenantId   String    @unique @db.Uuid
   plan       Plan
   priceCents Int
+  /// The instant the paid period ends. NULLABLE, and the null case is load-
+  /// bearing: it means "recorded, no payment date on file", which the sweep
+  /// treats as not-delinquent. See subscription-sweep.worker.ts.
   paidUntil  DateTime?
   notes      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
   tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  @@index([tenantId])
+  @@index([paidUntil])
 }
 
 // ---- Staff invites ----

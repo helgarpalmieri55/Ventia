@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation';
+import { CONSOLE_PATH } from '../../../lib/impersonation';
 import { getMe } from '../../../lib/session';
 
 /** Sibling to `(app)`'s layout — see that file's doc comment for why
@@ -12,6 +13,8 @@ import { getMe } from '../../../lib/session';
 export default async function SetupLayout({ children }: { children: React.ReactNode }) {
   const session = await getMe();
   if (session.kind === 'anonymous') redirect('/login');
+  // Never invite a Ventia operator with a lapsed grant to found a store.
+  if (session.kind === 'impersonation-ended') redirect(CONSOLE_PATH);
 
   return <main className="mx-auto flex min-h-screen max-w-2xl flex-col justify-center p-6">{children}</main>;
 }
