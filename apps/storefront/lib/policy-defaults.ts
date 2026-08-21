@@ -1,8 +1,8 @@
-/** es-CO fallback copy for the four policy content types, used when
+/** es-CO fallback copy for the storefront's policy content types, used when
  * `GET /v1/storefront/content/:type` 404s (the merchant hasn't written that
  * page yet) so a storefront visitor never sees a raw 404 for these. */
 export const POLICY_DEFAULTS: Record<
-  'policy_shipping' | 'policy_returns' | 'policy_privacy' | 'about',
+  'policy_shipping' | 'policy_returns' | 'policy_privacy' | 'policy_terms' | 'about',
   { title: string; bodyMd: string }
 > = {
   policy_shipping: {
@@ -44,6 +44,47 @@ export const POLICY_DEFAULTS: Record<
         'autorización que dio para tratarlos.',
       'Para ejercerlos, escríbale a la tienda por los medios que aparecen en la página de contacto. Si no ' +
         'recibe respuesta, puede acudir a la Superintendencia de Industria y Comercio (SIC).',
+    ].join('\n\n'),
+  },
+  /**
+   * The términos y condiciones fallback is deliberately NOT a contract, for
+   * exactly the reason `policy_privacy` above is not a policy — and the stakes
+   * here are, if anything, more direct.
+   *
+   * A generated-and-published-by-default set of terms would be US writing, in
+   * the merchant's name, the clauses that govern their sales: delivery times
+   * they never agreed to, a returns procedure nobody at that store follows,
+   * an exclusion list for the derecho de retracto covering products they may
+   * not even sell. Ley 1480 de 2011 makes the *proveedor* — the merchant —
+   * answerable for every one of those statements before the SIC. The
+   * generator (`POST /v1/admin/content/policy_terms/generate`) exists so the
+   * merchant can produce, read, complete and publish that text themselves;
+   * until they do, this page must not pretend it exists.
+   *
+   * What it says instead is the half that is true no matter what the merchant
+   * has published: the Estatuto del Consumidor's rights attach to the SALE,
+   * not to the existence of a terms page. A shopper reading this has a
+   * retracto, a garantía legal and (when they paid electronically) a reversión
+   * del pago whether or not this store ever wrote a word. Saying only "esta
+   * tienda no ha configurado sus términos" would leave them thinking the
+   * opposite. The contact page (`/contacto`, this app's `about` content type)
+   * is the channel the merchant actually answers on.
+   */
+  policy_terms: {
+    title: 'Términos y condiciones',
+    bodyMd: [
+      'Esta tienda todavía no ha publicado sus términos y condiciones.',
+      'Eso no cambia los derechos que usted ya tiene. La Ley 1480 de 2011 (Estatuto del Consumidor) se ' +
+        'los reconoce por el solo hecho de comprar a distancia, y ninguna tienda puede reducirlos: puede ' +
+        'retractarse de la compra dentro de los cinco (5) días hábiles siguientes a recibir el producto y ' +
+        'recuperar todo el dinero que pagó; tiene garantía legal de un (1) año sobre los productos nuevos, ' +
+        'salvo que se le anuncie un plazo mayor; y, si pagó con tarjeta, PSE u otro instrumento de pago ' +
+        'electrónico, puede pedir la reversión del pago cuando no reciba el producto, reciba uno distinto ' +
+        'o defectuoso, o sea víctima de un fraude.',
+      'Antes de comprar, pregúntele a la tienda por el tiempo de entrega, el costo del envío y el ' +
+        'procedimiento de cambios y devoluciones, por los medios que aparecen en la página de contacto. Si ' +
+        'no recibe respuesta o considera que se desconocieron sus derechos, puede acudir a la ' +
+        'Superintendencia de Industria y Comercio (SIC).',
     ].join('\n\n'),
   },
   about: {

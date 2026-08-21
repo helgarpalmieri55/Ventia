@@ -80,6 +80,8 @@
  * renders sanely; the reverse would not have been true.
  */
 
+import { HINT, PlaceholderTracker, formatSpanishDate, joinEs, type GeneratedDocument } from './document-template';
+
 /** Product name of the platform this store runs on. Named in the policy
  * because a shopper is entitled to know who stores their data on the
  * merchant's behalf (the Encargado del Tratamiento), and because the merchant
@@ -138,75 +140,9 @@ export interface PrivacyPolicyTenantData {
   effectiveDate: Date;
 }
 
-export interface GeneratedPrivacyPolicy {
-  /** Suggested `TenantContent.title`. */
-  title: string;
-  /** Suggested `TenantContent.bodyMd`. */
-  bodyMd: string;
-  /**
-   * Human-readable list of the `[COMPLETAR: ...]` markers the merchant still
-   * has to fill in, so the admin UI can show a checklist instead of making
-   * them hunt through the text. Empty for a fully-configured store.
-   */
-  placeholders: string[];
-}
-
-const MONTHS_ES = [
-  'enero',
-  'febrero',
-  'marzo',
-  'abril',
-  'mayo',
-  'junio',
-  'julio',
-  'agosto',
-  'septiembre',
-  'octubre',
-  'noviembre',
-  'diciembre',
-];
-
-/**
- * "19 de agosto de 2026", in Colombian civil time.
- *
- * Hand-rolled rather than `Intl.DateTimeFormat('es-CO')` for two reasons: the
- * output must not depend on the Node build's ICU data (a `small-icu` runtime
- * would silently produce English), and the date must be Colombia's, not the
- * server's. Colombia is UTC-5 year-round with no DST, so a fixed offset is
- * exact here rather than an approximation.
- */
-function formatSpanishDate(date: Date): string {
-  const bogota = new Date(date.getTime() - 5 * 60 * 60 * 1000);
-  return `${bogota.getUTCDate()} de ${MONTHS_ES[bogota.getUTCMonth()]} de ${bogota.getUTCFullYear()}`;
-}
-
-/** Collects `[COMPLETAR: ...]` markers as the document is built. */
-class PlaceholderTracker {
-  readonly hints: string[] = [];
-
-  /**
-   * The value, or a loud, self-explanatory marker in its place.
-   *
-   * The whole point is that a missing field NEVER produces `undefined`, an
-   * empty gap, or — worst of all — a sentence that silently reads as a
-   * complete legal statement while missing the fact that made it one. A
-   * merchant scanning the generated text has to be able to see what is still
-   * theirs to write.
-   */
-  fill(value: string | null | undefined, hint: string): string {
-    const trimmed = typeof value === 'string' ? value.trim() : '';
-    if (trimmed.length > 0) return trimmed;
-    if (!this.hints.includes(hint)) this.hints.push(hint);
-    return `[COMPLETAR: ${hint}]`;
-  }
-}
-
-/** Joins a list the way Spanish does: "a, b y c". */
-function joinEs(items: string[]): string {
-  if (items.length === 0) return '';
-  if (items.length === 1) return items[0];
-  return `${items.slice(0, -1).join(', ')} y ${items[items.length - 1]}`;
-}
+/** {@link renderPrivacyPolicy}'s result — the shared shape, named for this
+ * document so call sites and tests read as being about the policy. */
+export type GeneratedPrivacyPolicy = GeneratedDocument;
 
 /**
  * The one thing the merchant — and only the merchant — must understand before
@@ -231,15 +167,15 @@ export function renderPrivacyPolicy(data: PrivacyPolicyTenantData): GeneratedPri
   const t = new PlaceholderTracker();
   const store = data.storeName.trim();
 
-  const legalName = t.fill(data.legalName, 'razón social o nombre completo del titular de la tienda');
-  const taxId = t.fill(data.taxId, 'NIT o número de cédula');
-  const email = t.fill(data.contactEmail, 'correo electrónico de contacto de la tienda');
-  const phone = t.fill(data.contactPhone, 'teléfono o WhatsApp de contacto');
-  const address = t.fill(data.addressLine, 'dirección del domicilio del negocio');
-  const municipio = t.fill(data.municipio, 'municipio del domicilio');
-  const departamento = t.fill(data.departamento, 'departamento del domicilio');
+  const legalName = t.fill(data.legalName, HINT.legalName);
+  const taxId = t.fill(data.taxId, HINT.taxId);
+  const email = t.fill(data.contactEmail, HINT.contactEmail);
+  const phone = t.fill(data.contactPhone, HINT.contactPhone);
+  const address = t.fill(data.addressLine, HINT.address);
+  const municipio = t.fill(data.municipio, HINT.municipio);
+  const departamento = t.fill(data.departamento, HINT.departamento);
   const domain = data.domain?.trim() ?? null;
-  const site = domain ? `https://${domain}` : t.fill(null, 'dirección web de la tienda');
+  const site = domain ? `https://${domain}` : t.fill(null, HINT.site);
   const effective = formatSpanishDate(data.effectiveDate);
 
   // "nuestro asistente virtual Sofía" reads badly; "Sofía, nuestro asistente

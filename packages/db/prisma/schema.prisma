@@ -75,11 +75,22 @@ enum WhatsAppProviderId {
   cloud
 }
 
+/// The storefront's publishable content pages. `about` is the /contacto page
+/// (historical name); `faq` has no route of its own and is only read by the
+/// agent's `get_store_info` tool.
+///
+/// `policy_terms` is the *términos y condiciones* — the "condiciones
+/// generales del contrato" Ley 1480 de 2011 art. 50 lit. d) requires an
+/// online seller to keep published, accessible and downloadable both before
+/// and after the transaction. Every other page here presupposes it: the
+/// shipping page says when a parcel arrives, the returns page says how a
+/// change is handled, and neither states what the sale contract actually is.
 enum TenantContentType {
   faq
   policy_shipping
   policy_returns
   policy_privacy
+  policy_terms
   about
 }
 

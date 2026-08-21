@@ -3,17 +3,24 @@ import { FOOTER_LINKS } from '../components/site-footer';
 import { POLICY_DEFAULTS } from '../lib/policy-defaults';
 
 describe('SiteFooter links', () => {
-  it('links every policy page, /privacidad included', () => {
+  it('links every policy page, /privacidad and /terminos-y-condiciones included', () => {
     // Ley 1581 art. 12 / Decreto 1074 art. 2.2.2.25.3.1: the política de
     // tratamiento must be PUT IN THE KNOWLEDGE of the Titular, not merely
     // exist at a URL. Before the footer existed, nothing in the entire
-    // storefront linked to any of these four pages — the only way to read a
+    // storefront linked to any of these pages — the only way to read a
     // store's privacy policy was to guess its path.
+    //
+    // `/terminos-y-condiciones` is here for the same kind of reason and an
+    // even more literal one: Ley 1480 art. 50 lit. d) requires the
+    // condiciones generales del contrato to be accessible for consultation,
+    // printing and download BEFORE and after the transaction. This footer is
+    // the only "before" in the storefront.
     expect(FOOTER_LINKS.map((l) => l.href).sort()).toEqual([
       '/cambios-y-devoluciones',
       '/contacto',
       '/envios',
       '/privacidad',
+      '/terminos-y-condiciones',
     ]);
   });
 

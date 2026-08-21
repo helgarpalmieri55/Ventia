@@ -5,11 +5,12 @@ import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.de
 import { parseOr400, type ParsableSchema } from '../catalog/parse';
 import { writeAudit } from '../catalog/audit';
 import { PrivacyPolicyService } from './privacy-policy.service';
+import { TermsService } from './terms.service';
 
 /** Mirrors the `TenantContentType` enum in packages/db/prisma/schema.prisma
  * and the identical list in storefront/content.controller.ts — the storefront
  * READS these, this controller is where a merchant WRITES them. */
-const VALID_TYPES = ['faq', 'policy_shipping', 'policy_returns', 'policy_privacy', 'about'] as const;
+const VALID_TYPES = ['faq', 'policy_shipping', 'policy_returns', 'policy_privacy', 'policy_terms', 'about'] as const;
 
 function parseType(type: string): TenantContentType {
   if (!(VALID_TYPES as readonly string[]).includes(type)) {
@@ -90,7 +91,10 @@ export class AdminContentController {
   // `design:paramtypes`, so implicit constructor injection resolves to
   // `undefined` and fails at call time rather than at boot — same caution as
   // every other controller here (see settings.controller.ts).
-  constructor(@Inject(PrivacyPolicyService) private readonly privacyPolicy: PrivacyPolicyService) {}
+  constructor(
+    @Inject(PrivacyPolicyService) private readonly privacyPolicy: PrivacyPolicyService,
+    @Inject(TermsService) private readonly terms: TermsService,
+  ) {}
 
   @Get()
   async list(@AdminSession() session: AdminSessionContext) {
@@ -167,5 +171,26 @@ export class AdminContentController {
   @HttpCode(200)
   async generatePrivacyPolicy(@AdminSession() session: AdminSessionContext) {
     return this.privacyPolicy.generate(session.tenantId);
+  }
+
+  /**
+   * Fills the Ley 1480 términos y condiciones template with THIS store's data
+   * and returns it for review. Same contract as the privacy generator above,
+   * for the same reasons: writes nothing, owner-only, `@HttpCode(200)`
+   * because a POST that creates nothing should not answer 201, and the
+   * merchant-facing disclaimer travels in the RESPONSE rather than inside
+   * `bodyMd` so it can never reach a shopper.
+   *
+   * A second endpoint rather than `POST :type/generate` with a switch: the
+   * two generators return different disclaimers and take different store
+   * facts, `:type` would accept `faq`/`about`/`policy_shipping` and have to
+   * 400 them back, and `impersonation-policy.ts` already reasons about these
+   * routes by their literal last segment.
+   */
+  @Post('policy_terms/generate')
+  @Roles('owner')
+  @HttpCode(200)
+  async generateTerms(@AdminSession() session: AdminSessionContext) {
+    return this.terms.generate(session.tenantId);
   }
 }

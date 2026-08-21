@@ -3,7 +3,7 @@ import { tenantDb } from '@ventia/db';
 import { PublicTenantGuard } from './public-tenant.guard';
 import { StorefrontTenantId } from './storefront-tenant.decorator';
 
-const VALID_TYPES = ['faq', 'policy_shipping', 'policy_returns', 'policy_privacy', 'about'] as const;
+const VALID_TYPES = ['faq', 'policy_shipping', 'policy_returns', 'policy_privacy', 'policy_terms', 'about'] as const;
 type ContentType = (typeof VALID_TYPES)[number];
 
 @Controller('v1/storefront/content')

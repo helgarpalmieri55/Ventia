@@ -10,6 +10,7 @@ import {
   CONTENT_TYPES,
   fetchContent,
   generatePrivacyPolicy,
+  generateTerms,
   saveContent,
   type ContentItem,
   type ContentType,
@@ -17,9 +18,42 @@ import {
 } from '../lib/content-api';
 
 /**
+ * The content types this app can draft for the merchant, and the copy that
+ * explains why they would want it.
+ *
+ * A table rather than two `type === '...'` branches: the two generators are
+ * identical in every way that touches this component — a POST that writes
+ * nothing, a `{ title, bodyMd, placeholders, disclaimer }` result, and the
+ * same "ask before replacing what the merchant wrote" rule — and the only
+ * thing that differs is which endpoint and which sentence. A second branch
+ * would be a second copy of the confirm/replace flow to keep in sync, which
+ * is exactly where a guard rail quietly stops guarding one of the two.
+ */
+const GENERATORS: Partial<Record<ContentType, { heading: string; blurb: string; run: () => Promise<GeneratedPolicy> }>> =
+  {
+    policy_terms: {
+      heading: 'Términos y condiciones',
+      blurb:
+        'En Colombia, una tienda en línea debe tener publicadas las condiciones generales de sus ventas y ' +
+        'debe informarle al cliente, antes de que compre, su derecho de retracto y el plazo para ejercerlo ' +
+        '(Ley 1480 de 2011). Podemos redactarte un borrador con los datos de tu tienda: tu identificación, ' +
+        'tus medios de pago, tus opciones de envío y tus zonas de contra entrega.',
+      run: generateTerms,
+    },
+    policy_privacy: {
+      heading: 'Política de tratamiento de datos personales',
+      blurb:
+        'En Colombia, toda tienda que recoja datos de sus clientes debe publicar su política de tratamiento ' +
+        'de datos personales (Ley 1581 de 2012). Podemos redactarte un borrador con los datos de tu tienda ' +
+        'para que lo revises y lo ajustes.',
+      run: generatePrivacyPolicy,
+    },
+  };
+
+/**
  * Contenido tab: the storefront's policy/content pages editor (docs/SPEC.md §6
  * M8, "policy pages editor"), including the Ley 1581 privacy-policy generator
- * required by §9.
+ * required by §9 and the Ley 1480 términos y condiciones generator.
  *
  * The generator never publishes. It fills the editor, the merchant reads and
  * edits it, and a separate "Guardar" writes it — mirroring the API, where
@@ -80,6 +114,8 @@ export function ContenidoTab() {
   }
 
   async function handleGenerate() {
+    const generator = GENERATORS[type];
+    if (!generator) return;
     // Guard rail, not a nag: only asks when there is something to lose.
     if (bodyMd.trim().length > 0 && !confirmReplace) {
       setConfirmReplace(true);
@@ -89,7 +125,7 @@ export function ContenidoTab() {
     setError(null);
     setSaved(false);
     try {
-      const result = await generatePrivacyPolicy();
+      const result = await generator.run();
       setGenerated(result);
       setTitle(result.title);
       setBodyMd(result.bodyMd);
@@ -145,6 +181,7 @@ export function ContenidoTab() {
   }
 
   const storefrontPath = CONTENT_PATHS[type];
+  const generator = GENERATORS[type];
 
   return (
     <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
@@ -166,14 +203,10 @@ export function ContenidoTab() {
           : 'No se publica como página: la usa tu asistente de IA para responder.'}
       </p>
 
-      {type === 'policy_privacy' ? (
+      {generator ? (
         <div className="flex flex-col gap-3 rounded-md border border-border p-3">
-          <p className="text-sm font-medium text-foreground">Política de tratamiento de datos personales</p>
-          <p className="text-xs text-muted-foreground">
-            En Colombia, toda tienda que recoja datos de sus clientes debe publicar su política de tratamiento de
-            datos personales (Ley 1581 de 2012). Podemos redactarte un borrador con los datos de tu tienda para que
-            lo revises y lo ajustes.
-          </p>
+          <p className="text-sm font-medium text-foreground">{generator.heading}</p>
+          <p className="text-xs text-muted-foreground">{generator.blurb}</p>
           {confirmReplace ? (
             <Alert variant="warning" className="flex flex-col gap-2">
               <p className="text-sm">
@@ -204,8 +237,11 @@ export function ContenidoTab() {
           {generated ? (
             <>
               {/* The one thing the merchant must understand and the shopper
-                  must never be shown: this is a template, and the Responsable
-                  del Tratamiento is the merchant, not the platform. */}
+                  must never be shown: this is a template, and the party who
+                  answers for it — Responsable del Tratamiento under Ley 1581,
+                  proveedor under Ley 1480 — is the merchant, not the platform.
+                  It arrives in the API RESPONSE, never inside `bodyMd`, so
+                  there is no path by which it reaches a published page. */}
               <Alert variant="warning">{generated.disclaimer}</Alert>
               {generated.placeholders.length > 0 ? (
                 <div className="flex flex-col gap-1">
@@ -223,6 +259,13 @@ export function ContenidoTab() {
                   Llenamos todos los datos con la información de tu tienda. Revísalo y publícalo.
                 </Alert>
               )}
+              {type === 'policy_terms' ? (
+                <p className="text-xs text-muted-foreground">
+                  Este borrador ya describe tus medios de pago, tus opciones de envío y tus zonas de contra
+                  entrega tal como los tienes configurados hoy. Si los cambias, vuelve a generarlo o edita el
+                  texto: lo que quede publicado es lo que te pueden exigir.
+                </p>
+              ) : null}
             </>
           ) : null}
         </div>

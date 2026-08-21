@@ -1,0 +1,55 @@
+-- Adds `policy_terms` to `TenantContentType`: the *términos y condiciones*
+-- page.
+--
+-- A store could already publish envíos, cambios y devoluciones, privacidad,
+-- preguntas frecuentes and contacto — everything EXCEPT the document that
+-- says what the sale itself is. Ley 1480 de 2011 (Estatuto del Consumidor)
+-- art. 50 lit. d) obliges an online seller to keep "las condiciones generales
+-- de sus contratos" published in the same medium, "fácilmente accesibles y
+-- disponibles para su consulta, impresión y descarga, antes y después de
+-- realizada la transacción", and art. 46 num. 4 obliges informing the derecho
+-- de retracto and its term BEFORE the purchase. Neither obligation has
+-- anywhere to live in this enum today, so the pages that do exist end up
+-- carrying contract terms in the margins of a shipping policy, or nowhere.
+--
+-- The value is named `policy_terms` for the same reason its three siblings
+-- are named `policy_*`: `TenantContent` has a `@@unique([tenantId, type])`,
+-- so the enum member IS the page's identity, and the prefix is what makes
+-- "the policy pages" a set you can enumerate (see `VALID_TYPES` in
+-- services/api/src/settings/content.controller.ts and its storefront twin).
+--
+-- ## Why this migration adds the value and does nothing else
+--
+-- Prisma applies each migration file inside ONE transaction, and PostgreSQL
+-- refuses to let a transaction use an enum value it added itself. Measured on
+-- this repo's own Postgres (pgvector/pgvector:pg16, the image
+-- services/api/test/helpers.ts starts) with this repo's Prisma (6.19.3),
+-- against a scratch migration containing exactly two statements:
+--
+--   ALTER TYPE "Probe" ADD VALUE 'b';
+--   SELECT 'b'::"Probe";
+--
+--   -> Error: P3018 ... Database error code: 55P04
+--      ERROR: unsafe use of new value "b" of enum type "Probe"
+--      HINT: New enum values must be committed before they can be used.
+--
+-- The ADD VALUE on its own commits fine (verified separately inside an
+-- explicit BEGIN/COMMIT on the same server) — it is the *use* that is
+-- refused. So the rule this file obeys is: nothing that mentions
+-- 'policy_terms' as a value may share a migration with the ALTER TYPE that
+-- creates it. No backfill, no seed row, no UPDATE, no CHECK constraint. There
+-- is nothing to backfill anyway — a store that has not written its terms
+-- simply has no `TenantContent` row, exactly like the other five types — but
+-- the constraint holds even when there IS something, and a future migration
+-- that wants to write this value has to be a SECOND file.
+--
+-- `BEFORE 'about'` rather than a bare append, so the type's value order
+-- matches the order the members are declared in schema.prisma. Nothing
+-- ORDER BYs this column, so the ordering buys no behaviour; what it buys is a
+-- clean `prisma migrate diff --from-migrations --to-schema-datamodel
+-- --exit-code`, which compares the migrated type against the declared one.
+--
+-- No GRANT statement, for the reason 20260819160000_order_privacy_authorization
+-- gives: 20260723182728_rls granted table-level DML on "TenantContent" to
+-- `ventia_app`, and a type gains no privileges of its own here.
+ALTER TYPE "TenantContentType" ADD VALUE 'policy_terms' BEFORE 'about';

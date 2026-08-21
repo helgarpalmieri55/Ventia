@@ -1,16 +1,25 @@
 import { apiFetch } from './api';
 
-/** The five `TenantContent.type` values (see packages/db/prisma/schema.prisma's
+/** The six `TenantContent.type` values (see packages/db/prisma/schema.prisma's
  * `TenantContentType`), duplicated here as a plain union rather than imported
  * — apps/admin has no dependency on services/api, same as lib/checklist.ts. */
-export const CONTENT_TYPES = ['about', 'policy_shipping', 'policy_returns', 'policy_privacy', 'faq'] as const;
+export const CONTENT_TYPES = [
+  'about',
+  'policy_shipping',
+  'policy_returns',
+  'policy_terms',
+  'policy_privacy',
+  'faq',
+] as const;
 export type ContentType = (typeof CONTENT_TYPES)[number];
 
-/** es-CO labels, in the order a merchant most likely fills them in. */
+/** es-CO labels, in the order a merchant most likely fills them in. The two
+ * that name a law are the two this app can generate a draft for. */
 export const CONTENT_LABELS: Record<ContentType, string> = {
   about: 'Contacto',
   policy_shipping: 'Envíos',
   policy_returns: 'Cambios y devoluciones',
+  policy_terms: 'Términos y condiciones (Ley 1480)',
   policy_privacy: 'Datos personales (Ley 1581)',
   faq: 'Preguntas frecuentes',
 };
@@ -23,6 +32,7 @@ export const CONTENT_PATHS: Record<ContentType, string | null> = {
   about: '/contacto',
   policy_shipping: '/envios',
   policy_returns: '/cambios-y-devoluciones',
+  policy_terms: '/terminos-y-condiciones',
   policy_privacy: '/privacidad',
   faq: null,
 };
@@ -33,7 +43,7 @@ export interface ContentItem {
   bodyMd: string | null;
 }
 
-/** `GET /v1/admin/content` — always returns all five rows, with nulls for the
+/** `GET /v1/admin/content` — always returns all six rows, with nulls for the
  * ones this store has not written yet. */
 export function fetchContent(): Promise<{ items: ContentItem[] }> {
   return apiFetch<{ items: ContentItem[] }>('/v1/admin/content');
@@ -64,4 +74,18 @@ export interface GeneratedPolicy {
  * publishing is a separate, explicit {@link saveContent} call. */
 export function generatePrivacyPolicy(): Promise<GeneratedPolicy> {
   return apiFetch<GeneratedPolicy>('/v1/admin/content/policy_privacy/generate', { method: 'POST' });
+}
+
+/** `POST /v1/admin/content/policy_terms/generate` — fills the Ley 1480
+ * términos y condiciones template with this store's identity, payment
+ * methods, shipping options and COD zones. Same contract as
+ * {@link generatePrivacyPolicy}: writes nothing, and the `disclaimer` it
+ * returns is for the merchant's screen only, never for the published page.
+ *
+ * Unlike the privacy generator, a FULLY configured store still gets
+ * `placeholders` back — delivery time and invoicing are facts about the
+ * merchant's business that this platform holds nowhere, and a contract is the
+ * wrong document to guess them in. */
+export function generateTerms(): Promise<GeneratedPolicy> {
+  return apiFetch<GeneratedPolicy>('/v1/admin/content/policy_terms/generate', { method: 'POST' });
 }

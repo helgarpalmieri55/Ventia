@@ -7,21 +7,7 @@ import {
   type GeneratedPrivacyPolicy,
   type PrivacyPolicyTenantData,
 } from './privacy-policy.template';
-
-type JsonRecord = Record<string, unknown>;
-
-function asRecord(value: Prisma.JsonValue | null | undefined): JsonRecord {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
-}
-
-/** Same ordering everywhere the three gateways are enumerated (see
- * `ALL_PROVIDER_IDS` in settings.controller.ts) so the generated sentence is
- * stable across regenerations rather than following JSON key order. */
-const PROVIDER_ORDER = ['wompi', 'mercadopago', 'epayco'] as const;
+import { asRecord, asString, connectedPaymentProviders } from './tenant-settings';
 
 export interface PrivacyPolicyGeneration extends GeneratedPrivacyPolicy {
   /** Merchant-facing warning. Never part of `bodyMd` — see the template's
@@ -70,16 +56,13 @@ export class PrivacyPolicyService {
     const settings = asRecord(tenant.settings);
     const storeInfo = asRecord(settings.storeInfo as Prisma.JsonValue | undefined);
     const payments = asRecord(settings.payments as Prisma.JsonValue | undefined);
-    const providersJson = asRecord(payments.providers as Prisma.JsonValue | undefined);
     const agentConfig = asRecord(tenant.agentConfig);
 
     // A provider counts as "we use this to charge shoppers" only once real
-    // credentials are saved — same signal `maskedProviderView` in
-    // settings.controller.ts calls `connected`, read the same way (presence of
-    // the encrypted private key), never by decrypting anything.
-    const paymentProviders = PROVIDER_ORDER.filter(
-      (id) => typeof asRecord(providersJson[id] as Prisma.JsonValue | undefined).privateKeyEncrypted === 'string',
-    );
+    // credentials are saved — see `connectedPaymentProviders`, which the
+    // términos generator reads the same way so the two published documents
+    // cannot name different gateways for the same store.
+    const paymentProviders = connectedPaymentProviders(payments);
 
     const primaryDomain = domains.find((d) => d.isPrimary) ?? domains[0];
 
@@ -103,7 +86,7 @@ export class PrivacyPolicyService {
       municipio: asString(storeInfo.municipio),
       departamento: asString(storeInfo.departamento),
       codEnabled: payments.codEnabled === true,
-      paymentProviders: [...paymentProviders],
+      paymentProviders,
       // Same definition of "this store has an AI agent" the storefront widget
       // uses (`agentEnabled` in tenants/domain-resolver.ts): a plan with a
       // non-zero monthly message allowance.

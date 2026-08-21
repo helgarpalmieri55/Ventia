@@ -16,6 +16,14 @@ import Link from 'next/link';
  * read a store's privacy policy was to guess its path. A policy nobody can
  * navigate to has not been published in any sense the law recognises.
  *
+ * Ley 1480 de 2011 art. 50 lit. d) says the same thing about the sale
+ * contract, and says it twice over: the condiciones generales must be
+ * "fácilmente accesibles y disponibles para su consulta, impresión y
+ * descarga, antes y después de realizada la transacción". `/terminos-y-condiciones`
+ * is therefore not an optional fifth link — it is the one document whose
+ * legal duty is specifically about being REACHABLE, and it is reachable from
+ * exactly one place in this storefront: here.
+ *
  * The checkout's authorization checkbox links straight to `/privacidad` for
  * the same reason, but that link only exists on one page, at the one moment
  * the shopper is trying to finish paying. This one is on every page, before
@@ -41,6 +49,15 @@ import Link from 'next/link';
  * testing-library — see vitest.config.ts). The list, not the markup, is the
  * part with a legal obligation attached to it. */
 export const FOOTER_LINKS: { href: string; label: string }[] = [
+  // First, because it is the document the other three sit inside: the
+  // condiciones generales del contrato Ley 1480 de 2011 art. 50 lit. d)
+  // requires an online seller to keep "fácilmente accesibles y disponibles
+  // para su consulta, impresión y descarga, ANTES y después de realizada la
+  // transacción". "Antes" is the word that puts it here rather than only in
+  // the checkout: art. 46 num. 4 obliges informing the derecho de retracto
+  // and its term before the purchase, and a shopper cannot read a term they
+  // cannot reach.
+  { href: '/terminos-y-condiciones', label: 'Términos y condiciones' },
   { href: '/envios', label: 'Envíos' },
   { href: '/cambios-y-devoluciones', label: 'Cambios y devoluciones' },
   // Named "Tratamiento de datos" rather than the bare "Privacidad" the page's
