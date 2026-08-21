@@ -1,5 +1,6 @@
 import { CONVERSATIONS_PATH } from './conversations-api';
 import { CUSTOMERS_PATH } from './customers-api';
+import { DOMAINS_PATH } from './domains-api';
 import { ALERTS_PATH } from './payment-alerts-api';
 
 export type Role = 'owner' | 'staff';
@@ -56,6 +57,17 @@ const CATALOG_ITEMS: NavItem[] = [
 const OWNER_ONLY_ITEMS: NavItem[] = [
   { href: '/equipo', label: 'Equipo' },
   { href: '/configuracion', label: 'Configuración' },
+  // Owner-only, mirroring `@Roles('owner')` on CustomDomainsController — the
+  // whole resource is owner-only there, not just its writes, so a staff
+  // session cannot even list domains.
+  //
+  // Its own item rather than a Configuración tab: a merchant who bought a
+  // domain goes looking for the word "dominio", and the page is also where
+  // they find the address their store ALREADY has, which is worth a permanent
+  // route rather than being buried three clicks deep. Next to Configuración
+  // because it is account administration, and before Lanzamiento, which stays
+  // last.
+  { href: DOMAINS_PATH, label: 'Dominios' },
   { href: '/lanzamiento', label: 'Lanzamiento' },
 ];
 

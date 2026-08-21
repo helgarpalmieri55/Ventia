@@ -115,8 +115,17 @@ export class CustomDomainsController {
 
   @Delete(':id')
   async remove(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
-    const removed = await this.domains.remove(session.tenantId, id);
-    if (!removed) throw new HttpException({ error: 'DOMAIN_NOT_FOUND' }, 404);
+    const result = await this.domains.remove(session.tenantId, id);
+    if (!result.ok) {
+      // 404 for "not yours" (a tenant must not learn another's ids exist);
+      // 409 for the two refusals, because the request is well-formed and the
+      // merchant can act on it — promote another domain, or keep this one.
+      if (result.reason === 'not_found') throw new HttpException({ error: 'DOMAIN_NOT_FOUND' }, 404);
+      throw new HttpException(
+        { error: result.reason === 'is_primary' ? 'DOMAIN_IS_PRIMARY' : 'DOMAIN_LAST' },
+        409,
+      );
+    }
     await writeAudit(session, 'domain.remove', 'TenantDomain', id, {});
     return { ok: true };
   }

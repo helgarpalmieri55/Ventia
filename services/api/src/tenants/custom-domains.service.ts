@@ -231,9 +231,44 @@ export class CustomDomainsService {
     }));
   }
 
-  async remove(tenantId: string, domainId: string): Promise<boolean> {
-    const result = await platformDb.tenantDomain.deleteMany({ where: { id: domainId, tenantId } });
-    return result.count > 0;
+  /**
+   * Removes a domain, refusing the two cases that leave the store worse than
+   * the merchant intended.
+   *
+   * This used to be an unconditional `deleteMany`, which allowed both:
+   *
+   * **Deleting the last domain.** A tenant with no `TenantDomain` row has no
+   * address at all: `DomainResolver` cannot resolve it, so the storefront is
+   * unreachable, and `whatsapp-inbound.service.ts#storefrontBaseUrl` builds
+   * links from `''`. It is also not self-recoverable — `add()` is gated on the
+   * `customDomain` plan feature, so a `basico` merchant who deleted their own
+   * subdomain could not put it back.
+   *
+   * **Deleting the primary while others remain.** `find(d => d.isPrimary)`
+   * then returns `undefined` and `storefrontBaseUrl` falls through to its
+   * alphabetical tie-break, so the host in every link the agent sends to
+   * shoppers changes — silently, and to whichever domain happens to sort
+   * first. Reassigning primary automatically would be worse: it would pick a
+   * new public address for the store without anyone deciding it. Making the
+   * merchant promote another domain first is the only version where the
+   * store's address changes because someone chose it.
+   *
+   * Returns a discriminated result rather than a boolean so the caller can
+   * distinguish "not yours" from the two refusals without re-querying.
+   */
+  async remove(
+    tenantId: string,
+    domainId: string,
+  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'is_primary' | 'last_domain' }> {
+    const row = await platformDb.tenantDomain.findFirst({ where: { id: domainId, tenantId } });
+    if (!row) return { ok: false, reason: 'not_found' };
+
+    const total = await platformDb.tenantDomain.count({ where: { tenantId } });
+    if (total <= 1) return { ok: false, reason: 'last_domain' };
+    if (row.isPrimary) return { ok: false, reason: 'is_primary' };
+
+    await platformDb.tenantDomain.delete({ where: { id: domainId } });
+    return { ok: true };
   }
 }
 

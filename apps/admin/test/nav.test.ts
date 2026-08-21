@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { navItems } from '../lib/nav';
 
 describe('navItems', () => {
-  it('gives owners all 10 items in order, with es-CO labels', () => {
+  it('gives owners all 11 items in order, with es-CO labels', () => {
     const items = navItems('owner');
 
-    expect(items).toHaveLength(10);
+    expect(items).toHaveLength(11);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
@@ -16,6 +16,7 @@ describe('navItems', () => {
       'Conversaciones',
       'Equipo',
       'Configuración',
+      'Dominios',
       'Lanzamiento',
     ]);
   });
@@ -65,6 +66,15 @@ describe('navItems', () => {
     // customer lookup they need for fulfilment.
     expect(navItems('owner').some((item) => item.href === '/clientes')).toBe(true);
     expect(navItems('staff').some((item) => item.href === '/clientes')).toBe(true);
+  });
+
+  it('keeps /dominios out of the staff sidebar, mirroring the API\'s owner-only guard', () => {
+    // CustomDomainsController is `@Roles('owner')` at the CLASS level — unlike
+    // orders/customers/conversations, where only some handlers are restricted.
+    // A staff session cannot even list domains (403 FORBIDDEN_ROLE from `GET
+    // /v1/admin/domains`), so a link would only ever lead to an error page.
+    expect(navItems('owner').some((item) => item.href === '/dominios')).toBe(true);
+    expect(navItems('staff').some((item) => item.href === '/dominios')).toBe(false);
   });
 
   it('every item has a distinct href', () => {

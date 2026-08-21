@@ -43,6 +43,21 @@ const MESSAGES: Record<string, string> = {
   WHATSAPP_NUMBER_ALREADY_CONNECTED:
     'Ese número ya está conectado en otra tienda. Revisa el identificador que ingresaste; si de verdad es tuyo, contacta soporte.',
   WHATSAPP_NUMBER_NOT_FOUND: 'No encontramos este número de WhatsApp. Actualiza la página.',
+  // `TenantDomain.domain` is globally unique because it is what tenant
+  // resolution keys on, so the API refuses to move a domain between stores
+  // (custom-domains.controller.ts answers 409 even when the claimant is this
+  // same tenant). Worded without saying WHO has it — the merchant cannot be
+  // told about another store — and naming the one case they can fix
+  // themselves: they already added it here.
+  DOMAIN_ALREADY_REGISTERED:
+    'Ese dominio ya está registrado. Si ya lo agregaste en esta misma tienda, aparece en la lista de arriba; si no, escríbenos para revisarlo.',
+  DOMAIN_NOT_FOUND: 'No encontramos este dominio. Actualiza la página.',
+  // `POST /v1/admin/domains/:id/primary` on a domain whose `verifiedAt` is
+  // null. The page only offers that action on verified domains, so this is
+  // the stale-tab case — worded as the next step ("verify it first") rather
+  // than as a failure, because nothing the merchant did was wrong.
+  DOMAIN_NOT_VERIFIED:
+    'Primero tenemos que verificar este dominio. Publica el registro TXT que te mostramos y pulsa Verificar.',
   NETWORK: 'No pudimos conectar con el servidor. Verifica tu conexión.',
   UNKNOWN: 'Ocurrió un error inesperado. Intenta de nuevo.',
 };

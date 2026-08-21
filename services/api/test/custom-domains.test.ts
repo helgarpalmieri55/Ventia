@@ -259,6 +259,60 @@ describe('POST /v1/admin/domains/:id/primary — being the domain, not just havi
   });
 });
 
+describe('DELETE /v1/admin/domains/:id — las dos negativas', () => {
+  it('REFUSES to delete the tenant\'s last domain', async () => {
+    // Un comercio sin ninguna fila TenantDomain no tiene dirección: el
+    // DomainResolver no lo resuelve, la tienda es inalcanzable, y
+    // storefrontBaseUrl arma enlaces desde ''. Tampoco es recuperable desde el
+    // panel: `add()` está limitado por plan, así que un comercio en básico que
+    // borre su propio subdominio no puede volver a ponerlo.
+    // `signUpWithTenant` crea el tenant directamente, sin pasar por
+    // onboarding, así que no trae dominio: se lo damos aquí para que tenga
+    // exactamente uno, que es el estado que esta prueba persigue.
+    const solo = await signUpWithTenant('domains-last@demo.co', 'owner');
+    const only = await prisma.tenantDomain.create({
+      data: { tenantId: solo.tenantId, domain: 'solo-domain.example.com', isPrimary: true, verifiedAt: new Date() },
+    });
+
+    const res = await request(app.getHttpServer())
+      .delete(`/v1/admin/domains/${only.id}`)
+      .set('Cookie', solo.cookie);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('DOMAIN_LAST');
+    expect(await prisma.tenantDomain.count({ where: { tenantId: solo.tenantId } })).toBe(1);
+  });
+
+  it('REFUSES to delete the primary while others remain', async () => {
+    // Borrar el principal deja `find(d => d.isPrimary)` en undefined, y
+    // storefrontBaseUrl cae a su desempate alfabético: el host de cada enlace
+    // que el agente manda a los compradores cambia, en silencio, al dominio que
+    // ordene primero. Reasignar el principal automáticamente sería peor —
+    // elegiría una dirección pública nueva sin que nadie lo decidiera.
+    await prisma.tenantDomain.create({
+      data: { tenantId, domain: 'secondary-del.example.com', isPrimary: false, verifiedAt: new Date() },
+    });
+    const primary = await prisma.tenantDomain.findFirstOrThrow({ where: { tenantId, isPrimary: true } });
+
+    const res = await request(app.getHttpServer())
+      .delete(`/v1/admin/domains/${primary.id}`)
+      .set('Cookie', cookie);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('DOMAIN_IS_PRIMARY');
+    expect(await prisma.tenantDomain.findUnique({ where: { id: primary.id } })).not.toBeNull();
+  });
+
+  it('deletes a non-primary domain when another remains', async () => {
+    const extra = await prisma.tenantDomain.create({
+      data: { tenantId, domain: 'deleteme-ok.example.com', isPrimary: false, verifiedAt: new Date() },
+    });
+    const res = await request(app.getHttpServer())
+      .delete(`/v1/admin/domains/${extra.id}`)
+      .set('Cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(await prisma.tenantDomain.findUnique({ where: { id: extra.id } })).toBeNull();
+  });
+});
+
 describe('domain verification', () => {
   it('marks verified when the expected TXT record is published', async () => {
     const added = await domains.add(tenantId, 'verifyme.example.com');
