@@ -348,10 +348,24 @@ export class AgentToolsService {
     const parsed = getStoreInfoInput.safeParse(rawInput);
     if (!parsed.success) return fail('parámetros inválidos para get_store_info');
 
+    // `payments` used to point at `policy_privacy`, which meant a shopper
+    // asking "¿qué medios de pago aceptan?" was answered out of the data-
+    // treatment policy — a document about personal data that says nothing
+    // about payment. The terms are where medios de pago actually live (their
+    // section 8: online gateways, the fifteen-minute reservation, contra
+    // entrega and the departamentos where it is unavailable), so that is what
+    // the topic resolves to now.
+    //
+    // `terms` is its own topic as well, because the questions it answers are
+    // not payment questions: retracto, garantía, plazos de entrega. Without
+    // it, a shopper asking about the derecho de retracto got "esta tienda
+    // todavía no ha publicado información sobre ese tema" even after the
+    // merchant published their terms.
     const TOPIC_TO_TYPE = {
       shipping: 'policy_shipping',
       returns: 'policy_returns',
-      payments: 'policy_privacy',
+      payments: 'policy_terms',
+      terms: 'policy_terms',
       contact: 'about',
       about: 'about',
     } as const;

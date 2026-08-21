@@ -259,6 +259,30 @@ describe('agent tools — what the model may not sell', () => {
     expect(res.ok).toBe(true);
     expect((res.data as { body: string }).body).toContain('3 días');
   });
+
+  it('answers `terms` and `payments` out of the terms, not the privacy policy', async () => {
+    // Two bugs in one mapping. `terms` did not exist, so a shopper asking
+    // about the derecho de retracto — the thing Ley 1480 gives them five days
+    // to use — was told the store had published nothing, even when it had.
+    // And `payments` pointed at `policy_privacy`, so "¿qué medios de pago
+    // aceptan?" was answered out of a document about personal data that says
+    // nothing about payment. Medios de pago live in the terms (their section
+    // 8), which is where both topics resolve now.
+    await prisma.tenantContent.create({
+      data: {
+        tenantId: tenantAId,
+        type: 'policy_terms',
+        title: 'Términos y condiciones',
+        bodyMd: 'Puede pagar con Wompi o contra entrega. Tiene cinco (5) días hábiles para retractarse.',
+      },
+    });
+
+    for (const topic of ['terms', 'payments'] as const) {
+      const res = await tools.execute({ tenantId: tenantAId }, 'get_store_info', { topic });
+      expect(res.ok, topic).toBe(true);
+      expect((res.data as { body: string }).body, topic).toContain('cinco (5) días hábiles');
+    }
+  });
 });
 
 describe('agent tools — cart creation', () => {

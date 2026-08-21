@@ -79,7 +79,7 @@ export const getOrderStatusInput = z.object({
 export type GetOrderStatusInput = z.infer<typeof getOrderStatusInput>;
 
 export const getStoreInfoInput = z.object({
-  topic: z.enum(['shipping', 'returns', 'payments', 'contact', 'about']),
+  topic: z.enum(['shipping', 'returns', 'payments', 'terms', 'contact', 'about']),
 });
 export type GetStoreInfoInput = z.infer<typeof getStoreInfoInput>;
 
@@ -224,7 +224,7 @@ export const AGENT_TOOL_JSON_SCHEMAS: Record<AgentToolName, AgentToolJsonSchema>
     properties: {
       topic: {
         type: 'string',
-        enum: ['shipping', 'returns', 'payments', 'contact', 'about'],
+        enum: ['shipping', 'returns', 'payments', 'terms', 'contact', 'about'],
         description: 'Qué tema consultar de la información publicada por la tienda.',
       },
     },
