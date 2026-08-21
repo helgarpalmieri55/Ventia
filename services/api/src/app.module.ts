@@ -8,6 +8,7 @@ import { CheckoutModule } from './checkout/checkout.module';
 import { HealthController } from './health/health.controller';
 import { ObservabilityModule } from './observability/observability.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
+import { OpsModule } from './ops/ops.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentAlertsModule } from './payment-alerts/payment-alerts.module';
 import { SettingsModule } from './settings/settings.module';
@@ -36,6 +37,7 @@ export { REDIS_CLIENT };
     CheckoutModule,
     ObservabilityModule,
     OnboardingModule,
+    OpsModule,
     OrdersModule,
     PaymentAlertsModule,
     SettingsModule,

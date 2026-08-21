@@ -954,7 +954,35 @@ model AgentUsage {
   month         String // "2026-07"
   inputTokens   Int    @default(0)
   outputTokens  Int    @default(0)
+  /// DEAD since it was added, and kept only so the column can be dropped in a
+  /// separate migration once nothing reads it. Nothing ever wrote it —
+  /// `AgentBudgetService.record()` incremented the three counters around it
+  /// and never this one — so every operator screen that read it reported
+  /// every tenant as costing exactly zero. `costMicroUsd` replaces it.
   costCents     Int    @default(0)
+  /// What the model calls for this tenant-month actually cost, in MILLIONTHS
+  /// of one US dollar.
+  ///
+  /// Micro-dollars and not cents because a single shopper turn costs a small
+  /// fraction of a cent: rounding each increment to whole cents rounds almost
+  /// every one of them to zero, which is precisely how `costCents` managed to
+  /// stay empty while looking like it worked.
+  ///
+  /// USD and not COP because that is the currency the model API bills in.
+  /// Converting here would bake one day's exchange rate into a stored number
+  /// and make a month's total unreconstructable; the OPS side converts, where
+  /// the rate is a reporting choice rather than a permanent fact.
+  ///
+  /// `BigInt` because `Int` tops out at ~2.1e9 micro-USD — about USD 2,147 for
+  /// one tenant in one month. No current plan can reach that (10,000 messages
+  /// is the largest allowance), but per-message overage is on the table and
+  /// would make it reachable by a busy store. A column that silently wraps is
+  /// worse than one that is slightly awkward to serialize.
+  ///
+  /// Written from `agent-pricing.ts`, which returns null when prices are not
+  /// configured — in that case this stays 0 and every reader is told the
+  /// pricing is unconfigured rather than being handed a fabricated zero.
+  costMicroUsd  BigInt @default(0)
   messagesCount Int    @default(0)
 
   @@unique([tenantId, month])

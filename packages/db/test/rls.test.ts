@@ -474,3 +474,53 @@ describe('Subscription is platform-owned, not tenant-owned', () => {
     ).rejects.toThrow(/[Uu]nique constraint/);
   });
 });
+
+describe('AgentUsage: readable by its tenant, except what it costs us', () => {
+  beforeAll(async () => {
+    const month = new Date().toISOString().slice(0, 7);
+    await prisma.agentUsage.create({
+      data: { tenantId: T1, month, messagesCount: 12, inputTokens: 900, outputTokens: 300, costMicroUsd: 4_200n },
+    });
+  });
+
+  it('a tenant can still read its own meter', async () => {
+    // 20260818090000_agent_usage deliberately kept SELECT so a merchant can see
+    // their month against their plan. Adding the cost column must not have
+    // taken that away.
+    const rows = await asTenant(T1, (tx) =>
+      tx.$queryRaw<{ messagesCount: number }[]>`SELECT "messagesCount", "inputTokens" FROM "AgentUsage"`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.messagesCount).toBe(12);
+  });
+
+  it('a tenant CANNOT read what its messages cost the platform', async () => {
+    // The margin on a merchant's own plan is not the merchant's data. This is
+    // a column-level grant, and it only works because the migration REVOKED
+    // the table-level SELECT and re-granted per column: `REVOKE SELECT (col)`
+    // against a table-level grant silently does nothing, which is exactly what
+    // the first version of that migration did.
+    await expect(
+      asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT "costMicroUsd" FROM "AgentUsage"`),
+    ).rejects.toThrow(/permission denied/i);
+
+    await expect(
+      asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT "costCents" FROM "AgentUsage"`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('`SELECT *` is refused too, rather than quietly omitting the column', async () => {
+    // The failure mode worth pinning: a star select must not succeed by
+    // dropping the columns the role cannot see.
+    await expect(
+      asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT * FROM "AgentUsage"`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('a tenant still cannot write the meter at all', async () => {
+    // Unchanged from 20260818090000: a cap a tenant can write to is not a cap.
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`UPDATE "AgentUsage" SET "messagesCount" = 0`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+});

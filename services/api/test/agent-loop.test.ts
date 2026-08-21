@@ -143,6 +143,42 @@ describe('agent loop — a plain answer', () => {
     expect(usage?.inputTokens).toBe(10);
     expect(usage?.outputTokens).toBe(5);
   });
+
+  it('prices the turn at write time when model prices are configured', async () => {
+    const { INPUT_PRICE_ENV, OUTPUT_PRICE_ENV } = await import('../src/agent/agent-pricing');
+    process.env[INPUT_PRICE_ENV] = '3';
+    process.env[OUTPUT_PRICE_ENV] = '15';
+    await prisma.agentUsage.deleteMany({ where: { tenantId } });
+
+    try {
+      scripted = [textResponse('listo')];
+      await agent.respond({ tenantId, message: 'hola' });
+
+      // 10 input @ $3/Mtok = 30 micro-USD; 5 output @ $15/Mtok = 75. Total 105.
+      // Priced HERE rather than derived on read: these rows are monthly
+      // aggregates, so pricing them later would charge January's tokens at
+      // whatever a dashboard's load time says the price is.
+      const usage = await prisma.agentUsage.findFirst({ where: { tenantId } });
+      expect(Number(usage?.costMicroUsd)).toBe(105);
+    } finally {
+      delete process.env[INPUT_PRICE_ENV];
+      delete process.env[OUTPUT_PRICE_ENV];
+    }
+  });
+
+  it('leaves cost at zero — and says nothing about it — when prices are unset', async () => {
+    // The counters still work. What must NOT happen is a fabricated cost: the
+    // predecessor column reported every tenant as free precisely because
+    // nothing wrote it and everything read it as 0.
+    await prisma.agentUsage.deleteMany({ where: { tenantId } });
+    scripted = [textResponse('listo')];
+
+    await agent.respond({ tenantId, message: 'hola' });
+
+    const usage = await prisma.agentUsage.findFirst({ where: { tenantId } });
+    expect(usage?.messagesCount).toBe(1);
+    expect(Number(usage?.costMicroUsd)).toBe(0);
+  });
 });
 
 describe('agent loop — tool dispatch', () => {

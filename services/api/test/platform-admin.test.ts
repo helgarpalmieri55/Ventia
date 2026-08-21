@@ -376,7 +376,11 @@ describe('GET /v1/platform/tenants', () => {
         messagesCount: 300,
         inputTokens: 12_000,
         outputTokens: 4_000,
-        costCents: 87,
+        // Micro-USD, the column the agent actually writes. This used to seed
+        // `costCents: 87` — a column nothing has ever written, which is why
+        // the operator console reported every tenant as free. Seeding a dead
+        // field made this assertion pass while the product was broken.
+        costMicroUsd: 870_000n,
       },
     });
 
@@ -397,10 +401,37 @@ describe('GET /v1/platform/tenants', () => {
       messagesLimit: 3000,
       inputTokens: 12_000,
       outputTokens: 4_000,
-      costCents: 87,
       percentUsed: 10,
     });
+    // Cost is derived from `costMicroUsd`, and is `null` rather than 0 while
+    // model prices are unconfigured — which they are in this suite. A zero
+    // here would be the exact fabrication the old column produced.
+    expect(row.ai.costCents).toBeNull();
+    expect(row.ai.costConfigured).toBe(false);
     expect(res.body.month).toBe(thisMonth());
+  });
+
+  it('reports a real cost once model prices are configured', async () => {
+    const cookie = await operatorCookie(OPERATOR_EMAIL);
+    const { INPUT_PRICE_ENV, OUTPUT_PRICE_ENV } = await import('../src/agent/agent-pricing');
+    process.env[INPUT_PRICE_ENV] = '3';
+    process.env[OUTPUT_PRICE_ENV] = '15';
+
+    try {
+      const res = await request(app.getHttpServer())
+        .get('/v1/platform/tenants')
+        .query({ q: 'café del' })
+        .set('cookie', cookie);
+
+      const row = res.body.tenants.find((t: { plan: string }) => t.plan === 'pro');
+      // 870,000 micro-USD = $0.87 = 87 cents.
+      expect(row.ai.costCents).toBe(87);
+      expect(row.ai.costMicroUsd).toBe(870_000);
+      expect(row.ai.costConfigured).toBe(true);
+    } finally {
+      delete process.env[INPUT_PRICE_ENV];
+      delete process.env[OUTPUT_PRICE_ENV];
+    }
   });
 
   it('searches case-insensitively on name and slug, and filters by status and plan', async () => {

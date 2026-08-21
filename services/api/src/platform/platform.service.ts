@@ -9,6 +9,7 @@ import {
 } from '@ventia/core';
 import { REDIS_CLIENT } from '../common/redis.module';
 import { currentYearMonth } from '../agent/agent-budget.service';
+import { agentPricing, microUsdToCents } from '../agent/agent-pricing';
 import type { PlatformOperatorContext } from './platform-operator.decorator';
 import { SYSTEM_OPERATOR, writePlatformAudit, type PlatformActor } from './platform-audit';
 import { subscriptionWindow, type SubscriptionDueState } from './subscription-window';
@@ -404,7 +405,21 @@ export class PlatformService {
       messagesLimit: limit,
       inputTokens: usage?.inputTokens ?? 0,
       outputTokens: usage?.outputTokens ?? 0,
-      costCents: usage?.costCents ?? 0,
+      // Derived from `costMicroUsd`, NOT read off the `costCents` column.
+      // That column was never written by anything, so this line used to report
+      // every tenant on the platform as costing exactly zero — an operator
+      // screen answering "what is my margin?" with a confident lie.
+      //
+      // `null` when the operator has not configured model prices, so the UI
+      // can say "no configurado" instead of drawing a zero that looks like a
+      // measurement. See agent-pricing.ts.
+      costCents: costCentsOf(usage),
+      /** Full precision for a caller doing its own arithmetic — the OPS feed
+       * aggregates across tenants, where rounding each one to cents first
+       * would lose most of the total. */
+      costMicroUsd: usage ? Number(usage.costMicroUsd) : 0,
+      /** Whether `costCents`/`costMicroUsd` mean anything at all. */
+      costConfigured: agentPricing() !== null,
       /** Null rather than 0 when there is no limit to be a percentage of —
        * "0% used" would read as healthy for a tenant that is actually hard-
        * capped at zero. */
@@ -485,7 +500,19 @@ interface AgentUsageRow {
   messagesCount: number;
   inputTokens: number;
   outputTokens: number;
-  costCents: number;
+  /** Prisma maps a Postgres BIGINT to a JS `bigint`, which `JSON.stringify`
+   * refuses outright. Every read converts to `number` at this boundary — safe
+   * well past any realistic total, since one micro-USD is 1e-6 of a dollar and
+   * `Number.MAX_SAFE_INTEGER` micro-USD is over nine billion dollars. */
+  costMicroUsd: bigint;
+}
+
+/** Whole cents for a tenant-month, or `null` when model prices are not
+ * configured — in which case the stored cost is 0 because nothing could be
+ * computed, and reporting that as "$0.00" would be a fabrication. */
+function costCentsOf(usage: AgentUsageRow | undefined): number | null {
+  if (agentPricing() === null) return null;
+  return microUsdToCents(Number(usage?.costMicroUsd ?? 0n));
 }
 
 interface TenantLimitsRow {

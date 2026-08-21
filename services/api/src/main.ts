@@ -14,6 +14,7 @@ import { ReconciliationWorker } from './payments/reconciliation.worker';
 import { StockReservationWorker } from './payments/stock-reservation.worker';
 import { ConversationRetentionWorker } from './agent/conversation-retention.worker';
 import { SubscriptionSweepWorker } from './platform/subscription-sweep.worker';
+import { OpsPushWorker } from './ops/ops-push.worker';
 
 export async function createApp(): Promise<INestApplication> {
   // bodyParser: false — better-auth's toNodeHandler needs the raw (unparsed)
@@ -264,6 +265,12 @@ async function boot(): Promise<void> {
   // graph. SubscriptionSweepWorker implements no Nest lifecycle hook, so
   // registering it in PlatformModule starts nothing on its own.
   await app.get(SubscriptionSweepWorker).start();
+
+  // The OPS feed's push half. Same no-lifecycle-hook discipline as its four
+  // siblings above, and it additionally no-ops unless OPS_PUSH_URL and the OPS
+  // token are both set — so a deployment that only wants the pull endpoint
+  // (or neither) opens no Redis connection here at all.
+  await app.get(OpsPushWorker).start();
 
   // Express-level errors — i.e. anything that calls `next(err)` from
   // MIDDLEWARE rather than throwing inside a controller. `TenantMiddleware`

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { platformDb } from '@ventia/db';
 import { isPlanFeatureEnabledOn, loadPlanLimits } from '../common/plan-limits';
+import { priceMicroUsd } from './agent-pricing';
 
 /**
  * The per-tenant monthly AI budget (docs/SPEC.md §7): "at 90% → merchant
@@ -115,6 +116,15 @@ export class AgentBudgetService {
     now: Date = new Date(),
   ): Promise<void> {
     const month = currentYearMonth(now);
+    // Priced HERE, at write time, rather than derived on read from the token
+    // totals. These rows are monthly aggregates, so a later read would have to
+    // price January's tokens at whatever the price happens to be when someone
+    // opens the dashboard — which is not what January cost. `null` when prices
+    // are not configured (see agent-pricing.ts): the column then stays 0, and
+    // readers are told the pricing is unconfigured rather than being handed a
+    // fabricated zero. That distinction is the whole reason this column exists
+    // instead of `costCents`, which nothing ever wrote.
+    const costMicroUsd = priceMicroUsd(tokens) ?? 0;
     // An upsert on the (tenantId, month) unique key rather than
     // find-then-create: two shoppers answered in the same instant would
     // otherwise race to create the month's row, and one of the counts would be
@@ -128,11 +138,15 @@ export class AgentBudgetService {
         messagesCount: 1,
         inputTokens: tokens.inputTokens,
         outputTokens: tokens.outputTokens,
+        costMicroUsd,
       },
       update: {
         messagesCount: { increment: 1 },
         inputTokens: { increment: tokens.inputTokens },
         outputTokens: { increment: tokens.outputTokens },
+        // Atomic like its siblings: two shoppers answered in the same instant
+        // must add both costs, not race and keep one.
+        costMicroUsd: { increment: costMicroUsd },
       },
     });
   }
