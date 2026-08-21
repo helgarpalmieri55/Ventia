@@ -101,6 +101,18 @@ export class CustomDomainsController {
     return { verified };
   }
 
+  /** Makes a verified domain the store's public address — see
+   * `CustomDomainsService#setPrimary` for why connecting a domain is not the
+   * same as being it. 409 rather than 400 on an unverified domain: the request
+   * is well-formed, the domain is simply not ready yet. */
+  @Post(':id/primary')
+  async setPrimary(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
+    const promoted = await this.domains.setPrimary(session.tenantId, id);
+    if (!promoted) throw new HttpException({ error: 'DOMAIN_NOT_VERIFIED' }, 409);
+    await writeAudit(session, 'domain.set_primary', 'TenantDomain', id, { domain: promoted.domain });
+    return { ok: true, domain: promoted.domain };
+  }
+
   @Delete(':id')
   async remove(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
     const removed = await this.domains.remove(session.tenantId, id);

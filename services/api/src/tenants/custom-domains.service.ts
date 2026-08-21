@@ -113,6 +113,61 @@ export class CustomDomainsService {
   }
 
   /**
+   * Promotes a verified domain to the tenant's PRIMARY address.
+   *
+   * ## Why this has to exist for a custom domain to mean anything
+   *
+   * Connecting a domain and BEING that domain are different things, and until
+   * this method the platform only did the first. `add()` creates every custom
+   * domain with `isPrimary: false`, and the only row that ever carried
+   * `isPrimary: true` was the `${slug}.${root}` subdomain minted at onboarding.
+   *
+   * That matters because `isPrimary` is what the rest of the system reads to
+   * answer "where does this store live":
+   *
+   *   - `whatsapp-inbound.service.ts#storefrontBaseUrl` orders by it to build
+   *     the links the agent sends to real shoppers.
+   *   - `privacy-policy.service.ts` quotes it as the store's web address in the
+   *     published política de tratamiento.
+   *
+   * So a merchant could point `mitienda.com` here, pass DNS verification and
+   * get a certificate, while their customers kept receiving WhatsApp links to
+   * `mitienda.ventia.co` and their own privacy policy kept naming a domain they
+   * did not choose. Both consumers already read `isPrimary` correctly; what was
+   * missing was any way to change it.
+   *
+   * ## Verified only
+   *
+   * An unverified domain must never become primary. `verifiedAt` is the only
+   * evidence the merchant controls the name, and promoting an unverified one
+   * would put a hostname nobody has proven into every outbound link and into a
+   * legal document — and, because `isDomainAllowed` refuses to issue a
+   * certificate for it, those links would land on a TLS error.
+   *
+   * ## Exactly one primary
+   *
+   * Demote-then-promote in ONE transaction. Two primaries would make
+   * `find(d => d.isPrimary)` return whichever row the database happened to
+   * yield first, so a shopper's link host would change run to run. Postgres has
+   * no partial unique index here to lean on, so the transaction is the
+   * guarantee.
+   *
+   * Returns `null` when the domain does not belong to this tenant or is not
+   * verified, so the caller can tell those apart from success without this
+   * method deciding the HTTP status.
+   */
+  async setPrimary(tenantId: string, id: string): Promise<{ id: string; domain: string } | null> {
+    const row = await platformDb.tenantDomain.findFirst({ where: { id, tenantId } });
+    if (!row || !row.verifiedAt) return null;
+
+    return platformDb.$transaction(async (tx) => {
+      await tx.tenantDomain.updateMany({ where: { tenantId, isPrimary: true }, data: { isPrimary: false } });
+      const promoted = await tx.tenantDomain.update({ where: { id }, data: { isPrimary: true } });
+      return { id: promoted.id, domain: promoted.domain };
+    });
+  }
+
+  /**
    * The TXT value a merchant must publish. Derived from the domain and the
    * tenant rather than random, so it is stable across retries — a merchant who
    * reloads the page mid-setup must not be handed a different token than the

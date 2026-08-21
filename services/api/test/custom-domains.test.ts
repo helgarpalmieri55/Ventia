@@ -198,6 +198,67 @@ describe('GET /internal/tls-ask — the issuance gate', () => {
   });
 });
 
+describe('POST /v1/admin/domains/:id/primary — being the domain, not just having it', () => {
+  it('promotes a verified domain and demotes the platform subdomain', async () => {
+    // The point of a custom domain. `isPrimary` is what
+    // whatsapp-inbound.service.ts reads to build the links the agent sends to
+    // real shoppers, and what privacy-policy.service.ts quotes as the store's
+    // web address. Until this endpoint existed, a merchant could connect
+    // `mitienda.com`, verify it and get a certificate while their customers
+    // kept receiving links to `mitienda.ventia.localhost`.
+    const root = process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost';
+    const sub = await prisma.tenantDomain.create({
+      data: { tenantId, domain: `primary-sub.${root}`, isPrimary: true, verifiedAt: new Date() },
+    });
+    const custom = await prisma.tenantDomain.create({
+      data: { tenantId, domain: 'promoteme.example.com', isPrimary: false, verifiedAt: new Date() },
+    });
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/admin/domains/${custom.id}/primary`)
+      .set('Cookie', cookie);
+    expect(res.status).toBe(201);
+
+    expect((await prisma.tenantDomain.findUniqueOrThrow({ where: { id: custom.id } })).isPrimary).toBe(true);
+    // Exactly one primary: two would make `find(d => d.isPrimary)` return
+    // whichever row the database yielded first, so a shopper's link host would
+    // change run to run.
+    expect((await prisma.tenantDomain.findUniqueOrThrow({ where: { id: sub.id } })).isPrimary).toBe(false);
+    expect(await prisma.tenantDomain.count({ where: { tenantId, isPrimary: true } })).toBe(1);
+  });
+
+  it('REFUSES to promote an unverified domain', async () => {
+    // `verifiedAt` is the only evidence the merchant controls the name.
+    // Promoting an unverified one puts a hostname nobody has proven into every
+    // outbound link and into a published legal document — and since
+    // isDomainAllowed refuses it a certificate, those links land on a TLS
+    // error.
+    const unverified = await prisma.tenantDomain.create({
+      data: { tenantId, domain: 'notyet.example.com', isPrimary: false },
+    });
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/admin/domains/${unverified.id}/primary`)
+      .set('Cookie', cookie);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('DOMAIN_NOT_VERIFIED');
+    expect((await prisma.tenantDomain.findUniqueOrThrow({ where: { id: unverified.id } })).isPrimary).toBe(false);
+  });
+
+  it('REFUSES another tenant\'s domain', async () => {
+    const other = await signUpWithTenant('domains-primary-other@demo.co', 'owner');
+    const theirs = await prisma.tenantDomain.create({
+      data: { tenantId: other.tenantId, domain: 'theirs-primary.example.com', isPrimary: false, verifiedAt: new Date() },
+    });
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/admin/domains/${theirs.id}/primary`)
+      .set('Cookie', cookie);
+    expect(res.status).toBe(409);
+    expect((await prisma.tenantDomain.findUniqueOrThrow({ where: { id: theirs.id } })).isPrimary).toBe(false);
+  });
+});
+
 describe('domain verification', () => {
   it('marks verified when the expected TXT record is published', async () => {
     const added = await domains.add(tenantId, 'verifyme.example.com');
