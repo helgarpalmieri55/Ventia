@@ -45,7 +45,7 @@ export type TxtResolver = (hostname: string) => Promise<string[][]>;
  * if the two ever disagreed, tenants would be issued addresses the TLS gate
  * would then refuse.
  */
-function platformRootDomain(): string {
+export function platformRootDomain(): string {
   return (process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost').trim().toLowerCase();
 }
 
@@ -63,6 +63,30 @@ function platformRootDomain(): string {
 export function isPlatformSubdomain(domain: string, root: string = platformRootDomain()): boolean {
   return domain === root || domain.endsWith(`.${root}`);
 }
+
+/**
+ * Why a verification attempt did not succeed, in the merchant's terms.
+ *
+ * Every one of these is a 200 to the merchant — see `verify`'s doc comment —
+ * but they call for different next steps, and "no pudimos verificar" with no
+ * further detail is the message that makes someone give up on a DNS record
+ * that is one typo away from working:
+ *
+ * - `not_found` — the id is not this tenant's. Not a DNS problem at all.
+ * - `dns_unreachable` — the lookup itself failed (NXDOMAIN, timeout). Expected
+ *   for minutes after the record is published; the answer is "wait".
+ * - `record_missing` — the zone answered, with nothing at that host. Either
+ *   the record was never created or it was created under the wrong name (the
+ *   classic being `_ventia-verify.tienda.com.tienda.com`, from pasting the
+ *   full name into a provider that already appends the zone).
+ * - `record_mismatch` — something IS published there and it is not our token.
+ *   A stale value from an earlier attempt, or a partial copy-paste. This is
+ *   the case worth separating: the merchant did the work and still needs to
+ *   fix something, which is very different from having done nothing yet.
+ */
+export type DomainVerifyFailure = 'not_found' | 'dns_unreachable' | 'record_missing' | 'record_mismatch';
+
+export type DomainVerifyResult = { verified: true } | { verified: false; reason: DomainVerifyFailure };
 
 @Injectable()
 export class CustomDomainsService {
@@ -189,26 +213,32 @@ export class CustomDomainsService {
    * error: a merchant who just added the record is genuinely in that state for
    * minutes, and an error page would make them think they had done it wrong.
    */
-  async verify(tenantId: string, domainId: string, resolveTxt: TxtResolver = defaultResolveTxt): Promise<boolean> {
+  async verify(
+    tenantId: string,
+    domainId: string,
+    resolveTxt: TxtResolver = defaultResolveTxt,
+  ): Promise<DomainVerifyResult> {
     const row = await platformDb.tenantDomain.findFirst({ where: { id: domainId, tenantId } });
-    if (!row) return false;
-    if (row.verifiedAt) return true;
+    if (!row) return { verified: false, reason: 'not_found' };
+    if (row.verifiedAt) return { verified: true };
 
     const expected = this.verificationToken(tenantId, row.domain);
     let records: string[][];
     try {
       records = await resolveTxt(`${VERIFICATION_HOST_PREFIX}.${row.domain}`);
     } catch {
-      return false;
+      return { verified: false, reason: 'dns_unreachable' };
     }
+
+    if (records.length === 0) return { verified: false, reason: 'record_missing' };
 
     // TXT values arrive as arrays of chunks; a long value is split by the DNS
     // protocol itself and must be rejoined before comparison.
     const found = records.some((chunks) => chunks.join('').trim() === expected);
-    if (!found) return false;
+    if (!found) return { verified: false, reason: 'record_mismatch' };
 
     await platformDb.tenantDomain.update({ where: { id: row.id }, data: { verifiedAt: new Date() } });
-    return true;
+    return { verified: true };
   }
 
   /** Registers a domain against a tenant, unverified. */

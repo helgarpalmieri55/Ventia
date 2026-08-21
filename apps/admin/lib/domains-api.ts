@@ -10,9 +10,10 @@ import { apiFetch } from './api';
  * this app cannot import from `services/api/src`. Every shape here was read
  * off the controller/service, not assumed:
  *
- *   GET    /v1/admin/domains          -> { items, customDomainEnabled, verificationHost }
+ *   GET    /v1/admin/domains          -> { items, customDomainEnabled, verificationHost,
+ *                                          platformRootDomain, pointsTo, apexIp }
  *   POST   /v1/admin/domains          -> 201 { id, domain, token }
- *   POST   /v1/admin/domains/:id/verify -> 200 { verified }   (200 even when false)
+ *   POST   /v1/admin/domains/:id/verify -> 200 { verified, reason? }  (200 even when false)
  *   DELETE /v1/admin/domains/:id      -> { ok: true }
  */
 
@@ -57,6 +58,23 @@ export interface DomainsResponse {
    * hardcoded here: a mistyped host is the most common reason verification
    * never completes, and two copies of the string are two chances to drift. */
   verificationHost: string;
+  /** The platform's own zone (`ventia.co`), straight from the server's
+   * `PLATFORM_ROOT_DOMAIN`. This used to be guessed from the admin panel's own
+   * hostname, which was exact only when the panel was reached at
+   * `admin.${root}` and simply wrong on `localhost:3001`. */
+  platformRootDomain: string;
+  /** Where the merchant CNAMEs their own domain: this tenant's free
+   * `${slug}.${root}` address.
+   *
+   * NOT whichever domain is currently primary. A custom domain can be promoted
+   * to primary, and telling a merchant to point `mitienda.com` at
+   * `mitienda.com` is instructing them to build a loop. */
+  pointsTo: string;
+  /** The A record for a bare apex (`mitienda.com`), where most DNS providers
+   * refuse a CNAME. `null` when the operator has not set `PLATFORM_APEX_IP`,
+   * in which case the panel asks the merchant to contact support rather than
+   * showing an address that would black-hole their store. */
+  apexIp: string | null;
 }
 
 /** `POST /v1/admin/domains`'s 201 body. Note there is no `verified` field —
@@ -67,11 +85,20 @@ export interface DomainAdded {
   token: string;
 }
 
+/** Why a verification attempt failed — mirrors `DomainVerifyFailure` in
+ * `services/api/src/tenants/custom-domains.service.ts`. */
+export type DomainVerifyFailure = 'not_found' | 'dns_unreachable' | 'record_missing' | 'record_mismatch';
+
 /** `POST /v1/admin/domains/:id/verify`. Answers 200 with `verified: false`
  * for "not yet", deliberately — see the controller: minutes of DNS
- * propagation is the expected state, not an error. */
+ * propagation is the expected state, not an error.
+ *
+ * `reason` is present exactly when `verified` is false. Optional on the type
+ * anyway, so a panel deployed against an API that predates the field degrades
+ * to the generic message instead of rendering `undefined`. */
 export interface DomainVerifyResult {
   verified: boolean;
+  reason?: DomainVerifyFailure;
 }
 
 export function listDomains(): Promise<DomainsResponse> {
@@ -157,74 +184,20 @@ export const INVALID_DOMAIN_MESSAGE =
 /* -------------------------------------------------------------------------- */
 
 /**
- * The platform's own zone (`ventia.co`, `ventia.localhost`, …).
+ * The platform's own zone used to be DERIVED here, from the admin panel's own
+ * hostname with the primary row as a fallback, because `GET /v1/admin/domains`
+ * did not send it. That guess was exact only when the panel was reached at
+ * `admin.${root}`: on `localhost:3001` it produced nothing, and on the
+ * fallback path a promoted three-label custom domain (`tienda.mitienda.com`)
+ * produced the root `mitienda.com`, which would then read `www.mitienda.com`
+ * as ours and tell a merchant their unconfigured domain already worked.
  *
- * ## Why this is derived and not read
- *
- * The API does not send it. `GET /v1/admin/domains` returns rows plus the
- * plan flag plus the TXT host, and this app has no `PLATFORM_ROOT_DOMAIN` of
- * its own — the one place that guessed it (`app/_components/checklist-panel.tsx`'s
- * `ROOT_DOMAIN = 'ventia.localhost'`) is simply wrong in production. Adding
- * `platformRootDomain` to that response is one line on the server and would
- * retire this whole function; it is written up in the handoff notes.
- *
- * ## Why not from `isPrimary`
- *
- * It used to be: the only `isPrimary` row was the `${slug}.${root}` subdomain.
- * `POST /:id/primary` ended that — a merchant's own `mitienda.com` can now be
- * primary, and stripping its first label would yield `com`, which would then
- * match every other `.com` domain as "inside our zone" and tell a merchant
- * their unconfigured domain already works.
- *
- * ## What it uses instead
- *
- * 1. **The admin panel's own hostname.** The admin is served at
- *    `admin.${root}` — `admin.ventia.localhost` in the dev stack
- *    (docker/Caddyfile) and `admin.${PLATFORM_ROOT_DOMAIN}` in production
- *    (docs/deploying.md §6 lists `apex`, `api.`, `admin.`, `cdn.` as the
- *    known hostnames). Dropping its first label is exact whenever the panel is
- *    reached by its real address.
- * 2. **The primary row**, only as a fallback for when it is not — a developer
- *    on `http://localhost:3001`, where step 1 yields nothing.
- *
- * Both steps require the remainder to still contain a dot, which is what keeps
- * `mitienda.com` from producing the root `com`.
- *
- * Residual limitation, stated rather than hidden: on the fallback path a
- * promoted three-label custom domain (`tienda.mitienda.com`) yields the root
- * `mitienda.com`, so a sibling (`www.mitienda.com`) would read as ours. It
- * needs the panel to be reached off its canonical hostname AND a promoted
- * subdomain-shaped custom domain; {@link domainState} additionally refuses to
- * call anything unverified "ours", which keeps the misread off every domain a
- * merchant is still setting up.
+ * The response now carries `platformRootDomain` straight from the server's
+ * `PLATFORM_ROOT_DOMAIN` — the only place that actually knows it — so the
+ * derivation is gone rather than kept as a fallback. A fallback would just be
+ * the same wrong answer, arriving only in the cases nobody tests.
  */
-export function platformRootDomain(items: readonly TenantDomain[], adminHostname?: string | null): string | null {
-  const fromAdmin = parentZone(adminHostname);
-  if (fromAdmin) return fromAdmin;
-  return parentZone(items.find((item) => item.isPrimary)?.domain);
-}
 
-/** `admin.ventia.co` -> `ventia.co`; `mitienda.com` -> null (`com` is not a
- * zone we could own); `localhost` -> null. */
-function parentZone(host: string | null | undefined): string | null {
-  if (typeof host !== 'string') return null;
-  const value = host.trim().toLowerCase();
-  const dot = value.indexOf('.');
-  if (dot < 0) return null;
-  const remainder = value.slice(dot + 1);
-  return remainder.includes('.') ? remainder : null;
-}
-
-/**
- * Whether a domain lives inside the platform's own zone — the free
- * `${slug}.${root}` address — rather than being a domain the merchant owns.
- *
- * Mirrors `isPlatformSubdomain` on the server, INCLUDING the leading dot in
- * the suffix test. Without that dot `evilventia.co` matches root `ventia.co`,
- * and this UI would tell the owner of a lookalike domain that their store is
- * already being served there for free — the same class of mistake the server
- * comment calls out, in the half of the stack that sets expectations.
- */
 export function isPlatformDomain(domain: string, root: string | null): boolean {
   if (!root) return false;
   return domain === root || domain.endsWith(`.${root}`);
@@ -343,7 +316,14 @@ export function canBecomePrimary(domain: TenantDomain, state: DomainState): bool
 export function primaryChangeConsequences(nextDomain: string, currentDomain: string | null): string[] {
   const consequences = [
     `Los enlaces que el asistente le envíe a tus clientes por WhatsApp van a usar ${nextDomain}.`,
-    `La dirección de tu tienda que aparece en tu política de tratamiento de datos pasa a ser ${nextDomain}.`,
+    // Both documents name the primary domain, and both are GENERATED, not
+    // live: `privacy-policy.service.ts` and `terms.service.ts` each read the
+    // primary row at generation time and the result is then published as
+    // stored text. So promoting a domain does not rewrite what a shopper is
+    // reading right now — it changes what the next regeneration says. Telling
+    // the merchant otherwise would leave them believing a published legal
+    // document updated itself.
+    `Tu política de tratamiento de datos y tus términos y condiciones nombran la dirección de tu tienda. Los textos ya publicados no cambian solos: la próxima vez que los vuelvas a generar van a decir ${nextDomain}.`,
   ];
   if (currentDomain) {
     consequences.push(
@@ -401,22 +381,55 @@ export interface VerificationHelp {
 /**
  * What to tell a merchant when `verify` answered `{ verified: false }`.
  *
- * **What the API can and cannot tell us.** `POST /:id/verify` returns a bare
- * boolean: `CustomDomainsService#verify` collapses "the lookup threw"
- * (NXDOMAIN, timeout) and "records came back but none matched" into the same
- * `false`. So this UI genuinely does not know whether the record is missing
- * or whether its value is wrong, and it must not pretend to — telling someone
- * "el valor no coincide" when the record simply has not propagated sends them
- * to re-type a value that was already correct. (The API change that would fix
- * this is one field; it is described in the handoff notes.)
+ * The API now says WHICH failure it was, so this no longer has to hedge. It
+ * used to receive a bare boolean that collapsed "the lookup threw" with
+ * "records came back and none matched", and hedging was the only honest thing
+ * to do: telling someone "el valor no coincide" when their record simply had
+ * not propagated sent them to re-type a value that was already correct.
  *
- * What we CAN do is stop repeating the same sentence. The first failure is
- * overwhelmingly propagation, and the honest answer is "not yet, this takes
- * time". From the second failure on, propagation is no longer the most likely
- * story, so we name every cause we know of — including both of the ones the
- * boolean conflates — with the exact values to compare against.
+ * The three DNS reasons want genuinely different advice:
+ *
+ * - `dns_unreachable` is almost always propagation on the first try, so the
+ *   first attempt gets "wait" and nothing else. Repeat attempts are no longer
+ *   plausibly propagation, so they get the full checklist.
+ * - `record_missing` means the zone answered and there is nothing at that
+ *   host. Waiting is not the fix; the name is. That checklist leads with the
+ *   duplicated-zone mistake, which is what produces this exact result.
+ * - `record_mismatch` means something IS published there and it is not ours.
+ *   The merchant did the work — the value is what needs correcting, so that is
+ *   the only thing this says. Repeating "espera un rato" here would be wrong.
  */
-export function verificationHelp(attempts: number, record: DnsRecord): VerificationHelp {
+export function verificationHelp(
+  reason: DomainVerifyFailure | undefined,
+  attempts: number,
+  record: DnsRecord,
+): VerificationHelp {
+  const nameCheck = `En el campo "nombre" o "host" escribe solo ${record.host}. Casi todos los proveedores le agregan tu dominio automáticamente, y si escribes el nombre completo queda ${record.name}.${record.domain}, que no sirve.`;
+  const valueCheck = `El valor debe quedar idéntico a ${record.value}, sin comillas, sin espacios al inicio o al final y sin cortarlo.`;
+  const typeCheck = 'El tipo del registro debe ser TXT. Un registro A o CNAME con ese nombre no nos sirve para verificar.';
+  const savedCheck =
+    'Si tu proveedor tiene un botón de "guardar" o "publicar cambios" aparte, revisa que hayas quedado con los cambios guardados.';
+
+  if (reason === 'record_mismatch') {
+    return {
+      headline: `Encontramos un registro TXT en ${record.name}, pero con otro valor.`,
+      checks: [valueCheck, 'Si dejaste un registro de un intento anterior, bórralo: nos quedamos con el que no coincide.'],
+      footnote:
+        'No hace falta esperar: el registro ya está publicado, solo hay que corregir el valor. Después de guardarlo puede tardar unos minutos en verse desde acá.',
+    };
+  }
+
+  if (reason === 'record_missing') {
+    return {
+      headline: `Tu dominio responde, pero no hay ningún registro TXT en ${record.name}.`,
+      checks: [nameCheck, typeCheck, savedCheck],
+      footnote:
+        'Si acabas de crearlo, dale unos minutos y vuelve a intentar. Si ya lleva un rato, casi siempre es que el nombre del registro quedó distinto.',
+    };
+  }
+
+  // `dns_unreachable` and anything an older API sends: the lookup itself did
+  // not get an answer.
   if (attempts <= 1) {
     return {
       headline: `Todavía no vemos el registro TXT en ${record.name}.`,
@@ -428,12 +441,7 @@ export function verificationHelp(attempts: number, record: DnsRecord): Verificat
 
   return {
     headline: `Seguimos sin encontrar el registro TXT en ${record.name}.`,
-    checks: [
-      `En el campo "nombre" o "host" escribe solo ${record.host}. Casi todos los proveedores le agregan tu dominio automáticamente, y si escribes el nombre completo queda ${record.name}.${record.domain}, que no sirve.`,
-      `El valor debe quedar idéntico a ${record.value}, sin comillas, sin espacios al inicio o al final y sin cortarlo.`,
-      'El tipo del registro debe ser TXT. Un registro A o CNAME con ese nombre no nos sirve para verificar.',
-      'Si tu proveedor tiene un botón de "guardar" o "publicar cambios" aparte, revisa que hayas quedado con los cambios guardados.',
-    ],
+    checks: [nameCheck, valueCheck, typeCheck, savedCheck],
     footnote:
       'Si ya revisaste todo eso, espera un rato más y vuelve a intentar: algunos proveedores tardan varias horas en publicar un registro nuevo.',
   };

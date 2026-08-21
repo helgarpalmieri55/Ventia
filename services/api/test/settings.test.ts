@@ -59,6 +59,36 @@ describe('GET /v1/admin/settings', () => {
       payments: { codEnabled: false },
     });
   });
+
+  it("returns the store's real public address, not one the panel guesses", async () => {
+    // The launch screen used to build this itself as
+    // `http://${slug}.ventia.localhost` — a dead link on any deployment other
+    // than this repo's dev stack, and the first thing a merchant clicks after
+    // pressing "Lanzar tienda".
+    const { cookie } = await signUpWithTenant('settings-store-url@demo.co', 'owner');
+    const root = process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost';
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/settings').set('cookie', cookie);
+
+    expect(res.body.storeUrl).toBe(`http://settings-store-url.${root}`);
+  });
+
+  it('uses https for a real root domain and http only for reserved local names', async () => {
+    // The direction that matters: a production deployment must never hand a
+    // merchant a plaintext link to their own live store. `.localhost` is a
+    // reserved TLD (RFC 6761), so the http branch cannot apply to anything
+    // publicly registrable.
+    const previous = process.env.PLATFORM_ROOT_DOMAIN;
+    process.env.PLATFORM_ROOT_DOMAIN = 'ventia.co';
+    try {
+      const { cookie } = await signUpWithTenant('settings-https@demo.co', 'owner');
+      const res = await request(app.getHttpServer()).get('/v1/admin/settings').set('cookie', cookie);
+      expect(res.body.storeUrl).toBe('https://settings-https.ventia.co');
+    } finally {
+      if (previous === undefined) delete process.env.PLATFORM_ROOT_DOMAIN;
+      else process.env.PLATFORM_ROOT_DOMAIN = previous;
+    }
+  });
 });
 
 describe('PATCH /v1/admin/settings/store', () => {

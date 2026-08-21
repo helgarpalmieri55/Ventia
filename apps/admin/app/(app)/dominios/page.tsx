@@ -16,7 +16,6 @@ import {
   isPlatformDomain,
   listDomains,
   normalizeDomainInput,
-  platformRootDomain,
   primaryChangeConsequences,
   removeDomain,
   setPrimaryDomain,
@@ -26,6 +25,7 @@ import {
   verifyDomain,
   type DnsRecord,
   type DomainState,
+  type DomainVerifyFailure,
   type DomainsResponse,
   type TenantDomain,
 } from '../../../lib/domains-api';
@@ -76,18 +76,12 @@ export default function DominiosPage() {
     void load();
   }, [load]);
 
-  /**
-   * The platform's own zone, derived (the API does not send it — see
-   * `platformRootDomain`). `window.location.hostname` is read inside the
-   * memo rather than during module evaluation: this component is still
-   * server-rendered once, and on that pass `data` is null, so the only markup
-   * the server produces is the spinner — identical on both sides, no
-   * hydration mismatch.
-   */
-  const platformRoot = useMemo(
-    () => platformRootDomain(data?.items ?? [], typeof window === 'undefined' ? null : window.location.hostname),
-    [data],
-  );
+  /** The platform's own zone, straight from the API. It used to be guessed
+   * from `window.location.hostname`, which was wrong on `localhost:3001` and
+   * could mistake a merchant's own sibling domain for one of ours. `null`
+   * until the first load resolves, which is what `domainState` already
+   * expects. */
+  const platformRoot = data?.platformRootDomain ?? null;
 
   const stateOf = useCallback(
     (domain: TenantDomain): DomainState =>
@@ -161,6 +155,8 @@ export default function DominiosPage() {
                 domain={domain}
                 state="platform"
                 primaryDomain={primary?.domain ?? null}
+                pointsTo={data.pointsTo}
+                apexIp={data.apexIp}
                 verificationHost={data.verificationHost}
                 onPatched={patchDomain}
                 onPromoted={markPrimary}
@@ -189,6 +185,8 @@ export default function DominiosPage() {
                   domain={domain}
                   state={stateOf(domain)}
                   primaryDomain={primary?.domain ?? null}
+                  pointsTo={data.pointsTo}
+                  apexIp={data.apexIp}
                   verificationHost={data.verificationHost}
                   onPatched={patchDomain}
                   onPromoted={markPrimary}
@@ -265,6 +263,8 @@ function DomainCard({
   domain,
   state,
   primaryDomain,
+  pointsTo,
+  apexIp,
   verificationHost,
   onPatched,
   onPromoted,
@@ -272,7 +272,12 @@ function DomainCard({
 }: {
   domain: TenantDomain;
   state: DomainState;
+  /** Only for the "your customers still see another address" copy on an
+   * already-working domain — NOT for the CNAME instruction, which is
+   * `pointsTo`. */
   primaryDomain: string | null;
+  pointsTo: string;
+  apexIp: string | null;
   verificationHost: string;
   onPatched: (id: string, patch: Partial<TenantDomain>) => void;
   onPromoted: (id: string) => void;
@@ -285,6 +290,9 @@ function DomainCard({
   /** Consecutive failed checks in THIS session. Drives how much detail the
    * "not yet" answer carries — see `verificationHelp`. */
   const [failures, setFailures] = useState(0);
+  /** Why the last check failed, when the API said. Drives WHICH advice the
+   * merchant gets, where `failures` only drives how much of it. */
+  const [failureReason, setFailureReason] = useState<DomainVerifyFailure | undefined>(undefined);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   /** Only for the check that just happened in this session — the row's own
    * badge is what tells a merchant who comes back tomorrow. */
@@ -297,10 +305,12 @@ function DomainCard({
       const result = await verifyDomain(domain.id);
       if (result.verified) {
         setFailures(0);
+        setFailureReason(undefined);
         setJustVerified(true);
         onPatched(domain.id, { verified: true });
       } else {
         setFailures((n) => n + 1);
+        setFailureReason(result.reason);
       }
     } catch (e) {
       setVerifyError(e instanceof ApiError ? errorMessage(e) : 'Ocurrió un error inesperado. Intenta de nuevo.');
@@ -350,7 +360,7 @@ function DomainCard({
     }
   }
 
-  const help = failures > 0 ? verificationHelp(failures, record) : null;
+  const help = failures > 0 ? verificationHelp(failureReason, failures, record) : null;
 
   return (
     <div className="flex flex-col gap-4 rounded-md border border-border p-4">
@@ -402,7 +412,13 @@ function DomainCard({
       ) : null}
 
       {state === 'pending' ? (
-        <PendingSetup record={record} primaryDomain={primaryDomain} help={help} verifyError={verifyError} />
+        <PendingSetup
+          record={record}
+          pointsTo={pointsTo}
+          apexIp={apexIp}
+          help={help}
+          verifyError={verifyError}
+        />
       ) : null}
 
       {justVerified && state === 'active' ? (
@@ -484,12 +500,17 @@ function DomainCard({
  */
 function PendingSetup({
   record,
-  primaryDomain,
+  pointsTo,
+  apexIp,
   help,
   verifyError,
 }: {
   record: DnsRecord;
-  primaryDomain: string | null;
+  /** The tenant's `${slug}.${root}` address — the CNAME target. Not the
+   * primary domain: a promoted custom domain would make this instruction a
+   * loop. */
+  pointsTo: string;
+  apexIp: string | null;
   help: ReturnType<typeof verificationHelp> | null;
   verifyError: string | null;
 }) {
@@ -541,9 +562,17 @@ function PendingSetup({
           El registro TXT solo nos sirve para comprobar que el dominio es tuyo; además tiene que apuntar a tu tienda.
           Si tu dominio empieza por una palabra (<code className="font-mono">www.{record.domain}</code> o{' '}
           <code className="font-mono">tienda.{record.domain}</code>), crea un registro CNAME hacia{' '}
-          <code className="break-all font-mono">{primaryDomain ?? 'tu dirección de Ventia'}</code>. Si es el dominio
-          a secas ({record.domain}), la mayoría de proveedores no permite un CNAME ahí: escríbenos y te damos la
-          dirección IP para el registro A.
+          <code className="break-all font-mono">{pointsTo}</code>.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Si es el dominio a secas ({record.domain}), la mayoría de proveedores no permite un CNAME ahí.{' '}
+          {apexIp ? (
+            <>
+              Crea un registro A hacia <CopyableValue value={apexIp} label="la dirección IP" />.
+            </>
+          ) : (
+            'Escríbenos y te damos la dirección IP para el registro A.'
+          )}
         </p>
       </div>
 

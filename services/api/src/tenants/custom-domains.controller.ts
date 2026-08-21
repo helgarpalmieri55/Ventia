@@ -4,7 +4,7 @@ import { AdminSessionGuard } from '../admin/admin-session.guard';
 import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.decorator';
 import { writeAudit } from '../catalog/audit';
 import { assertPlanFeature, isPlanFeatureEnabled } from '../common/plan-limits';
-import { CustomDomainsService, normalizeDomain } from './custom-domains.service';
+import { CustomDomainsService, normalizeDomain, platformRootDomain } from './custom-domains.service';
 
 /**
  * Caddy's on-demand TLS gate. `GET /internal/tls-ask?domain=<host>`.
@@ -43,6 +43,14 @@ export class TlsAskController {
  * Plan-gated on `TenantLimits.customDomain` — SPEC §5 lists it as a plan
  * entitlement, and without the gate the tier boundary is decorative.
  */
+/** `PLATFORM_APEX_IP`, or `null` when it is unset or blank. Deliberately not
+ * defaulted: an apex A record pointing at the wrong host does not degrade, it
+ * takes the merchant's store off the internet. */
+function apexIpOrNull(): string | null {
+  const value = (process.env.PLATFORM_APEX_IP ?? '').trim();
+  return value.length > 0 ? value : null;
+}
+
 @Controller('v1/admin/domains')
 @UseGuards(AdminSessionGuard)
 @Roles('owner')
@@ -51,9 +59,11 @@ export class CustomDomainsController {
 
   @Get()
   async list(@AdminSession() session: AdminSessionContext) {
-    const [items, customDomainEnabled] = await Promise.all([
+    const root = platformRootDomain();
+    const [items, customDomainEnabled, tenant] = await Promise.all([
       this.domains.listForTenant(session.tenantId),
       isPlanFeatureEnabled(session.tenantId, 'customDomain'),
+      platformDb.tenant.findUniqueOrThrow({ where: { id: session.tenantId }, select: { slug: true } }),
     ]);
     return {
       items,
@@ -62,6 +72,28 @@ export class CustomDomainsController {
       // the exact record rather than describing it in prose — a mistyped host
       // is the most common reason verification never completes.
       verificationHost: '_ventia-verify',
+      // The platform's own zone. The admin panel used to derive this from its
+      // own hostname because the API never sent it, which is exact only when
+      // the panel is reached at `admin.${root}` — wrong on `localhost:3001`,
+      // and a guess everywhere else. The server is the only place that knows
+      // it (`PLATFORM_ROOT_DOMAIN`), so the server sends it.
+      platformRootDomain: root,
+      // Where a merchant's own domain has to point.
+      //
+      // The tenant's free subdomain, NOT whichever domain is currently
+      // primary: `POST /:id/primary` lets a custom domain become primary, and
+      // a UI that told the merchant to CNAME `mitienda.com` at
+      // `mitienda.com` would be instructing them to build a loop. This address
+      // exists from provisioning and never stops resolving here, whatever else
+      // the store is called.
+      pointsTo: `${tenant.slug}.${root}`,
+      // The A record for a merchant whose domain is the bare apex, where most
+      // DNS providers refuse a CNAME. `null` when the platform operator has
+      // not set `PLATFORM_APEX_IP` — the UI then falls back to asking the
+      // merchant to contact support, which is what it already did, rather than
+      // this endpoint inventing an address that would silently black-hole a
+      // live store.
+      apexIp: apexIpOrNull(),
     };
   }
 
@@ -94,11 +126,15 @@ export class CustomDomainsController {
 
   @Post(':id/verify')
   async verify(@AdminSession() session: AdminSessionContext, @Param('id') id: string) {
-    const verified = await this.domains.verify(session.tenantId, id);
-    if (verified) await writeAudit(session, 'domain.verify', 'TenantDomain', id, {});
+    const result = await this.domains.verify(session.tenantId, id);
+    if (result.verified) await writeAudit(session, 'domain.verify', 'TenantDomain', id, {});
     // 200 either way: "not yet" is the expected state for minutes after a
     // merchant adds the record, and an error would read as "you did it wrong".
-    return { verified };
+    //
+    // `reason` rides along on the failures so the panel can say which of them
+    // happened. Additive — `verified` still carries the same meaning it always
+    // did, so a client that ignores `reason` behaves exactly as before.
+    return result;
   }
 
   /** Makes a verified domain the store's public address — see

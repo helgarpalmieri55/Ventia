@@ -9,7 +9,6 @@ import {
   domainStateExplanation,
   isPlatformDomain,
   normalizeDomainInput,
-  platformRootDomain,
   primaryChangeConsequences,
   storefrontUrl,
   verificationHelp,
@@ -53,38 +52,6 @@ describe('normalizeDomainInput', () => {
     expect(normalizeDomainInput('exa mple.com')).toBeNull();
     expect(normalizeDomainInput('')).toBeNull();
     expect(normalizeDomainInput(null)).toBeNull();
-  });
-});
-
-describe('platformRootDomain', () => {
-  it('derives the zone from the admin panel\'s own hostname', () => {
-    // The admin is served at `admin.${root}` — docker/Caddyfile in dev,
-    // docs/deploying.md §6 in production.
-    expect(platformRootDomain([platformSub], 'admin.ventia.co')).toBe('ventia.co');
-    expect(platformRootDomain([], 'admin.ventia.localhost')).toBe('ventia.localhost');
-  });
-
-  it('prefers the admin hostname over the primary row, which may now be a merchant\'s own domain', () => {
-    // `POST /:id/primary` means the primary row is no longer necessarily ours.
-    const items = [row({ domain: 'mitienda.com', isPrimary: true, verified: true }), platformSub];
-    expect(platformRootDomain(items, 'admin.ventia.co')).toBe('ventia.co');
-  });
-
-  it('NEVER derives a public suffix like `com` from a promoted custom domain', () => {
-    // The dangerous case: root `com` would make every `.com` domain read as
-    // being inside our zone, i.e. "already working, do nothing".
-    const items = [row({ domain: 'mitienda.com', isPrimary: true, verified: true })];
-    expect(platformRootDomain(items, 'localhost')).toBeNull();
-    expect(platformRootDomain(items, null)).toBeNull();
-  });
-
-  it('falls back to the primary row when the panel is reached off its canonical host', () => {
-    expect(platformRootDomain([platformSub], 'localhost')).toBe('ventia.co');
-  });
-
-  it('returns null when there is nothing to derive from', () => {
-    expect(platformRootDomain([], null)).toBeNull();
-    expect(platformRootDomain([row({ isPrimary: false })], null)).toBeNull();
   });
 });
 
@@ -186,18 +153,15 @@ describe('verificationRecord', () => {
 describe('verificationHelp', () => {
   const record = verificationRecord(row({ domain: 'mitienda.com', token: 'tok' }), '_ventia-verify');
 
-  it('treats the first failure as propagation and says so', () => {
-    const help = verificationHelp(1, record);
+  it('treats a first unreachable lookup as propagation and says only that', () => {
+    const help = verificationHelp('dns_unreachable', 1, record);
     expect(help.headline).toContain('_ventia-verify.mitienda.com');
     expect(help.checks).toEqual([]);
     expect(help.footnote).toContain('volver más tarde');
   });
 
-  it('names every cause it could be from the second failure on', () => {
-    // `POST /:id/verify` answers a bare boolean: "no record" and "wrong value"
-    // arrive identically. So the copy must not pick one — it has to cover
-    // both, plus the wrong-record-type case, with the exact values to compare.
-    const help = verificationHelp(2, record);
+  it('names every cause once the lookup keeps failing', () => {
+    const help = verificationHelp('dns_unreachable', 2, record);
     const checks = help.checks.join(' ');
     expect(checks).toContain('_ventia-verify.mitienda.com.mitienda.com'); // the doubled name
     expect(checks).toContain('tok'); // the value to compare against
@@ -205,13 +169,35 @@ describe('verificationHelp', () => {
     expect(help.checks.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('never claims to know which of the two it is', () => {
+  it('does not tell the merchant to wait when the record is simply absent', () => {
+    // The zone answered. Waiting is not the fix — the record name is — so the
+    // very first failure gets the full checklist rather than "es lo normal".
+    const help = verificationHelp('record_missing', 1, record);
+    expect(help.checks.length).toBeGreaterThanOrEqual(3);
+    expect(help.checks.join(' ')).toContain('_ventia-verify.mitienda.com.mitienda.com');
+    expect(help.footnote).not.toContain('volver más tarde');
+  });
+
+  it('points at the value, and only the value, on a mismatch', () => {
+    // The merchant published something. Repeating the whole checklist here —
+    // or telling them to wait — sends them to re-check things that are already
+    // right. This is the case the old bare-boolean API could not distinguish.
+    const help = verificationHelp('record_mismatch', 1, record);
+    expect(help.headline).toContain('otro valor');
+    expect(help.checks.join(' ')).toContain('tok');
+    expect(help.checks.join(' ')).not.toContain('TXT. Un registro A');
+    expect(help.footnote).toContain('No hace falta esperar');
+  });
+
+  it('never claims a mismatch the API did not report', () => {
+    // An older API sends no reason at all. The copy must stay at "we do not
+    // see it", which is a statement about us, rather than asserting the value
+    // is wrong.
     for (const attempts of [1, 2, 7]) {
-      const help = verificationHelp(attempts, record);
-      // "we do not see it" is a statement about us; "the value does not match"
-      // would be a claim the API never made.
+      const help = verificationHelp(undefined, attempts, record);
       expect(help.headline).toMatch(/(no vemos|sin encontrar)/);
     }
+    expect(verificationHelp('dns_unreachable', 5, record).headline).not.toContain('otro valor');
   });
 });
 
@@ -259,10 +245,22 @@ describe('canBecomePrimary', () => {
 });
 
 describe('primaryChangeConsequences', () => {
-  it('names the two things the merchant\'s CUSTOMERS will see change', () => {
+  it('names every place the merchant\'s CUSTOMERS will see the address change', () => {
     const lines = primaryChangeConsequences('mitienda.com', 'demo-moda.ventia.co').join(' ');
     expect(lines).toContain('WhatsApp');
     expect(lines).toContain('política de tratamiento de datos');
+    // The terms name the domain too (`terms.service.ts` reads the primary row
+    // exactly as the privacy policy does), and used to go unmentioned.
+    expect(lines).toContain('términos y condiciones');
+  });
+
+  it('does not claim a published document rewrites itself', () => {
+    // Both documents are generated and then PUBLISHED as stored text. Saying
+    // the address "pasa a ser" the new one would tell a merchant their live
+    // legal pages already updated, when what actually changed is the next
+    // regeneration.
+    const lines = primaryChangeConsequences('mitienda.com', 'demo-moda.ventia.co').join(' ');
+    expect(lines).toContain('no cambian solos');
   });
 
   it('says the old address keeps working, because that is the scary reading', () => {

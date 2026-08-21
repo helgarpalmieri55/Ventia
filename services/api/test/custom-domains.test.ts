@@ -321,7 +321,7 @@ describe('domain verification', () => {
 
     const ok = await domains.verify(tenantId, added.id, resolver);
 
-    expect(ok).toBe(true);
+    expect(ok).toEqual({ verified: true });
     expect(resolver).toHaveBeenCalledWith('_ventia-verify.verifyme.example.com');
     const row = await prisma.tenantDomain.findUniqueOrThrow({ where: { id: added.id } });
     expect(row.verifiedAt).not.toBeNull();
@@ -334,14 +334,20 @@ describe('domain verification', () => {
     const token = domains.verificationToken(tenantId, 'chunked.example.com');
     const resolver = vi.fn().mockResolvedValue([[token.slice(0, 10), token.slice(10)]]);
 
-    expect(await domains.verify(tenantId, added.id, resolver)).toBe(true);
+    expect(await domains.verify(tenantId, added.id, resolver)).toEqual({ verified: true });
   });
 
-  it('does NOT verify on a wrong token', async () => {
+  it('does NOT verify on a wrong token, and says the value is the problem', async () => {
+    // `record_mismatch` and not a bare failure: the merchant published
+    // something, so the panel can point them at the value instead of telling
+    // them to wait for propagation that already happened.
     const added = await domains.add(tenantId, 'wrongtoken.example.com');
     const resolver = vi.fn().mockResolvedValue([['not-the-token']]);
 
-    expect(await domains.verify(tenantId, added.id, resolver)).toBe(false);
+    expect(await domains.verify(tenantId, added.id, resolver)).toEqual({
+      verified: false,
+      reason: 'record_mismatch',
+    });
     const row = await prisma.tenantDomain.findUniqueOrThrow({ where: { id: added.id } });
     expect(row.verifiedAt).toBeNull();
   });
@@ -352,7 +358,23 @@ describe('domain verification', () => {
     const added = await domains.add(tenantId, 'nxdomain.example.com');
     const resolver = vi.fn().mockRejectedValue(new Error('ENOTFOUND'));
 
-    await expect(domains.verify(tenantId, added.id, resolver)).resolves.toBe(false);
+    await expect(domains.verify(tenantId, added.id, resolver)).resolves.toEqual({
+      verified: false,
+      reason: 'dns_unreachable',
+    });
+  });
+
+  it('separates "the zone answered with nothing there" from "the lookup failed"', async () => {
+    // Different advice: an empty answer means the record name is wrong (or it
+    // was never created), and waiting will not fix it. A failed lookup is
+    // ordinary propagation.
+    const added = await domains.add(tenantId, 'emptyzone.example.com');
+    const resolver = vi.fn().mockResolvedValue([]);
+
+    expect(await domains.verify(tenantId, added.id, resolver)).toEqual({
+      verified: false,
+      reason: 'record_missing',
+    });
   });
 
   it('cannot verify another tenant\'s domain', async () => {
@@ -362,7 +384,10 @@ describe('domain verification', () => {
     });
     const resolver = vi.fn().mockResolvedValue([[domains.verificationToken(otherId, 'foreign.example.com')]]);
 
-    expect(await domains.verify(tenantId, foreign.id, resolver)).toBe(false);
+    expect(await domains.verify(tenantId, foreign.id, resolver)).toEqual({
+      verified: false,
+      reason: 'not_found',
+    });
     expect(resolver).not.toHaveBeenCalled();
   });
 
@@ -372,6 +397,71 @@ describe('domain verification', () => {
     expect(a).toBe(b);
     // ...and a different one per tenant, so knowing the domain is not enough.
     expect(domains.verificationToken('00000000-0000-0000-0000-000000000000', 'stable.example.com')).not.toBe(a);
+  });
+});
+
+describe('GET /v1/admin/domains — lo que la UI necesita para dar instrucciones', () => {
+  it("returns the platform zone and the tenant's own address to point at", async () => {
+    const root = process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost';
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { slug: true } });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/domains').set('cookie', cookie);
+
+    expect(res.status).toBe(200);
+    // The panel used to guess the zone from its own hostname, which is exact
+    // only when it is reached at `admin.${root}`.
+    expect(res.body.platformRootDomain).toBe(root);
+    // The CNAME target is the tenant's free subdomain, NOT whatever is
+    // currently primary: `POST /:id/primary` lets a custom domain become
+    // primary, and pointing `mitienda.com` at `mitienda.com` is a loop.
+    expect(res.body.pointsTo).toBe(`${tenant.slug}.${root}`);
+    expect(res.body.verificationHost).toBe('_ventia-verify');
+  });
+
+  it('keeps naming the free subdomain even after a custom domain becomes primary', async () => {
+    const { cookie: ownCookie, tenantId: ownId } = await signUpWithTenant('domains-points-to@demo.co', 'owner');
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: ownId }, select: { slug: true } });
+    const root = process.env.PLATFORM_ROOT_DOMAIN ?? 'ventia.localhost';
+    await prisma.tenantDomain.create({
+      data: { tenantId: ownId, domain: `${tenant.slug}.${root}`, isPrimary: false, verifiedAt: new Date() },
+    });
+    await prisma.tenantDomain.create({
+      data: { tenantId: ownId, domain: 'promovido.example.com', isPrimary: true, verifiedAt: new Date() },
+    });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/domains').set('cookie', ownCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.pointsTo).toBe(`${tenant.slug}.${root}`);
+    expect(res.body.pointsTo).not.toBe('promovido.example.com');
+  });
+
+  it('reports no apex IP rather than inventing one when the operator has not set it', async () => {
+    // A wrong A record does not degrade — it takes the merchant's store off
+    // the internet. `null` makes the panel ask them to contact support.
+    const previous = process.env.PLATFORM_APEX_IP;
+    delete process.env.PLATFORM_APEX_IP;
+    try {
+      const res = await request(app.getHttpServer()).get('/v1/admin/domains').set('cookie', cookie);
+      expect(res.body.apexIp).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env.PLATFORM_APEX_IP;
+      else process.env.PLATFORM_APEX_IP = previous;
+    }
+  });
+
+  it('returns the apex IP when the operator has set one', async () => {
+    const previous = process.env.PLATFORM_APEX_IP;
+    process.env.PLATFORM_APEX_IP = '  203.0.113.10  ';
+    try {
+      const res = await request(app.getHttpServer()).get('/v1/admin/domains').set('cookie', cookie);
+      // Trimmed: a stray space pasted into an env file must not reach a DNS
+      // panel as part of the address.
+      expect(res.body.apexIp).toBe('203.0.113.10');
+    } finally {
+      if (previous === undefined) delete process.env.PLATFORM_APEX_IP;
+      else process.env.PLATFORM_APEX_IP = previous;
+    }
   });
 });
 

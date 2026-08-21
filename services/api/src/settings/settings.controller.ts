@@ -13,6 +13,8 @@ import { AdminSession, Roles, type AdminSessionContext } from '../admin/roles.de
 import { parseOr400 } from '../catalog/parse';
 import { writeAudit } from '../catalog/audit';
 import { PaymentsService } from '../payments/payments.service';
+import { platformRootDomain } from '../tenants/custom-domains.service';
+import { tenantStorefrontBaseUrl } from '../tenants/tenant-public-url';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -333,6 +335,25 @@ export class SettingsController {
       name,
       slug,
       status,
+      /**
+       * The browser-reachable address of this store — what the launch screen
+       * links to once the merchant presses "Lanzar tienda".
+       *
+       * The admin panel used to build this itself as
+       * `http://${slug}.ventia.localhost`, with the root hardcoded. That link
+       * is dead on every deployment that is not this repo's dev stack, and
+       * plaintext even where it is not: the two things a merchant is most
+       * likely to click right after launching.
+       *
+       * Built from the free `${slug}.${root}` subdomain rather than whichever
+       * domain is primary. That address exists from provisioning and never
+       * stops resolving, whereas a custom domain reaches this screen only if
+       * the merchant already finished a DNS setup they usually have not — and
+       * a launch screen linking to a domain that does not resolve yet reads as
+       * "the launch failed". `tenantStorefrontBaseUrl` picks the scheme, so a
+       * real domain gets https and the `.localhost` dev stack gets http.
+       */
+      storeUrl: tenantStorefrontBaseUrl(`${slug}.${platformRootDomain()}`),
       storeInfo,
       theme,
       payments: {

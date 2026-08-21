@@ -164,9 +164,13 @@ No por tamaño, sino por lo que desbloquea a lo demás:
 1. **Decidir cuentas de comprador** (§4) — completas, versión por teléfono, o
    invitado como hoy. Bloquea lista de deseos, direcciones guardadas y parte
    del checkout.
-2. **`CartSource` + tiempo de entrega + categorías anidadas.** Los tres son
-   cambios pequeños de esquema que desbloquean gráficos, copy de tienda y
-   navegación. Hacerlos juntos, en una migración.
+2. ~~**`CartSource` + tiempo de entrega + categorías anidadas.**~~ **Hecho**
+   (`edf3b48`), en una sola migración. Con un matiz sobre lo que decía este
+   documento: `CartSource` no se tocó. Ya respondía QUIÉN armó el carrito y es
+   lo que cuenta el KPI de ventas asistidas por IA; lo que faltaba era DÓNDE
+   estaba el comprador, que ahora es `SalesChannel`, una columna aparte en
+   `Cart` y en `Order`. Un pedido que el agente cerró por WhatsApp es las dos
+   cosas a la vez.
 3. **La capa de temas** (`product.md` §4), porque el hero, la franja y las
    insignias del diseño no tienen dónde vivir hasta que exista.
 4. **`GET /dashboard`** con lo derivable. Da el tablero sin tiempo real.
@@ -175,6 +179,32 @@ No por tamaño, sino por lo que desbloquea a lo demás:
 6. **`POST /ai/command`**, decidiendo antes su presupuesto y su plan.
 7. **Tiempo real, Analítica, Finanzas, Addi, cupones** — cada uno con su propia
    discusión.
+
+### Fuera de esta lista, ya hecho
+
+El paquete de dominios propios, porque la petición de conectar un dominio no
+podía esperar a la lista:
+
+- `GET /v1/admin/domains` devuelve `platformRootDomain`, `pointsTo` y `apexIp`.
+  El panel adivinaba la zona de la plataforma a partir de su propio hostname —
+  exacto solo si se entra por `admin.ventia.co`, equivocado en
+  `localhost:3001`, y por el camino de respaldo podía leer el
+  `www.mitienda.com` del comerciante como si fuera nuestro.
+- `pointsTo` es el subdominio gratis del comercio, NO el dominio principal. Las
+  instrucciones anteriores decían que apuntara el CNAME al principal, así que
+  en cuanto alguien promovía `mitienda.com` la pantalla le pedía apuntar
+  `mitienda.com` hacia `mitienda.com`.
+- `POST /:id/verify` dice POR QUÉ falló, y el panel da consejos distintos según
+  el caso. Antes colapsaba "no existe el registro" con "el valor está mal" en
+  un mismo `false`, así que el texto tenía que cubrir los dos y mandaba a
+  revisar cosas que ya estaban bien.
+- `PLATFORM_APEX_IP`, opcional y sin valor por defecto, para el comerciante
+  cuyo dominio es la raíz pelada. Sin configurar devuelve `null` y el panel
+  sigue pidiendo que escriban: un registro A hacia una dirección equivocada no
+  se degrada, deja la tienda fuera de internet.
+- La pantalla de lanzamiento enlazaba a `http://{slug}.ventia.localhost`
+  escrito a mano. Enlace muerto en producción, y es lo primero que un
+  comerciante toca después de lanzar.
 
 ---
 

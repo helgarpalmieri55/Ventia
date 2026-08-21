@@ -13,6 +13,21 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().int().default(4000),
   API_URL: z.string().url().default('http://api.ventia.localhost'),
   PLATFORM_ROOT_DOMAIN: z.string().min(1).default('ventia.localhost'),
+  /**
+   * The public IPv4 address the platform's reverse proxy answers on, shown to
+   * a merchant whose custom domain is a bare apex (`mitienda.com`) — most DNS
+   * providers refuse a CNAME at the zone root, so an A record is the only way
+   * to point one here.
+   *
+   * Optional, and unset means the panel tells the merchant to contact support
+   * instead. NO default: every other host in this file degrades to something
+   * harmless when it is wrong, but an apex A record pointing at an address the
+   * platform does not answer on takes a live storefront off the internet, and
+   * a guessed value would do exactly that on every deployment that never set
+   * it. `GET /v1/admin/domains` returns `null` rather than a placeholder for
+   * the same reason.
+   */
+  PLATFORM_APEX_IP: z.string().min(1).optional(),
   S3_ENDPOINT: z.string().url().default('http://localhost:9000'),
   S3_ACCESS_KEY: z.string().min(1).default('ventia'),
   S3_SECRET_KEY: z.string().min(1).default('ventia-secret'),

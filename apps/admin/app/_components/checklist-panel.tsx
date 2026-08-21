@@ -23,14 +23,15 @@ interface OnboardingGetResponse {
 interface SettingsResponse {
   slug: string;
   status: string;
+  /** The store's public address, built server-side from
+   * `PLATFORM_ROOT_DOMAIN` — see `settings.controller.ts`'s `toResponse`. */
+  storeUrl: string;
 }
 
 interface LaunchResponse {
   status: 'live';
   checklist?: Checklist;
 }
-
-const ROOT_DOMAIN = 'ventia.localhost';
 
 export interface ChecklistPanelProps {
   /** Called once `POST /v1/admin/launch` succeeds — lets an embedding wizard
@@ -49,7 +50,7 @@ export interface ChecklistPanelProps {
 export function ChecklistPanel({ onLaunched }: ChecklistPanelProps) {
   const router = useRouter();
   const [checklist, setChecklist] = useState<Checklist | null>(null);
-  const [slug, setSlug] = useState<string | null>(null);
+  const [storeUrl, setStoreUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -72,7 +73,7 @@ export function ChecklistPanel({ onLaunched }: ChecklistPanelProps) {
         fetchContent().catch(() => null),
       ]);
       setChecklist(onboarding.checklist);
-      setSlug(settings.slug);
+      setStoreUrl(settings.storeUrl ?? null);
       setStatus(settings.status);
       setHasPrivacyPolicy(
         content === null
@@ -133,7 +134,10 @@ export function ChecklistPanel({ onLaunched }: ChecklistPanelProps) {
 
   const items = checklistItems(checklist);
   const isLive = status === 'live';
-  const storeUrl = slug ? `http://${slug}.${ROOT_DOMAIN}` : null;
+  // From the API, not assembled here: this panel used to hardcode
+  // `http://${slug}.ventia.localhost`, which is a dead link on any deployment
+  // other than this repo's dev stack — and it is the first thing a merchant
+  // clicks after launching.
 
   return (
     <div className="flex flex-col gap-4">
