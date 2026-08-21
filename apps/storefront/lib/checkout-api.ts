@@ -22,6 +22,23 @@ export interface ShippingQuoteLine {
   type: string;
   label: string;
   priceCents: number;
+  /** The merchant's delivery estimate in BUSINESS days, or `null` when they
+   * have not given one. Optional on the type as well as nullable: a storefront
+   * deployed against an API that predates this field would otherwise read
+   * `undefined` through a non-optional property. */
+  etaMinDays?: number | null;
+  etaMaxDays?: number | null;
+}
+
+/** The estimate as a shopper-facing phrase, or `null` when there is nothing
+ * honest to say. Business days, because that is how Colombian carriers quote
+ * and how the checkout copy elsewhere on this page reads. */
+export function formatEta(line: Pick<ShippingQuoteLine, 'etaMinDays' | 'etaMaxDays'>): string | null {
+  const min = line.etaMinDays;
+  const max = line.etaMaxDays;
+  if (typeof min !== 'number' || typeof max !== 'number' || min > max) return null;
+  if (min === max) return min === 1 ? 'Llega en 1 día hábil' : `Llega en ${min} días hábiles`;
+  return `Llega en ${min}–${max} días hábiles`;
 }
 
 export interface CheckoutSubmitInput {

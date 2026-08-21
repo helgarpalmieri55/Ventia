@@ -41,6 +41,27 @@ export interface ShippingQuoteLine {
   type: ShippingMethodType;
   label: string;
   priceCents: number;
+  /** The merchant's own delivery estimate in BUSINESS days, or `null` when
+   * they have not given one. Both ends or neither: a half-open range cannot be
+   * rendered as a sentence, so a malformed pair is treated as absent rather
+   * than shown with a missing side.
+   *
+   * `null` and not omitted, so the storefront distinguishes "this merchant has
+   * not said" from "the API is an older version that never sends it". */
+  etaMinDays: number | null;
+  etaMaxDays: number | null;
+}
+
+/** Reads a method's estimate into the shape a quote line carries, dropping
+ * pairs that are incomplete or inverted. `shippingMethodSchema` refuses both
+ * on write; this is for settings JSON written before that refinement existed. */
+function etaOf(method: ShippingMethodInput): Pick<ShippingQuoteLine, 'etaMinDays' | 'etaMaxDays'> {
+  const min = method.etaMinDays;
+  const max = method.etaMaxDays;
+  if (typeof min !== 'number' || typeof max !== 'number' || min > max) {
+    return { etaMinDays: null, etaMaxDays: null };
+  }
+  return { etaMinDays: min, etaMaxDays: max };
 }
 
 /** The `enabled === true` filter, in one place: `quote` and `priceFor` both
@@ -143,12 +164,24 @@ export class ShippingService {
     for (const method of methods) {
       switch (method.type) {
         case 'flat':
-          lines.push({ id: method.id, type: method.type, label: method.label, priceCents: method.priceCents });
+          lines.push({
+            id: method.id,
+            type: method.type,
+            label: method.label,
+            priceCents: method.priceCents,
+            ...etaOf(method),
+          });
           break;
         case 'zone': {
           const rate = method.ratesByDepartamento[departamentoCode] ?? method.defaultPriceCents;
           if (rate === undefined) break; // omit, don't fail the whole quote
-          lines.push({ id: method.id, type: method.type, label: method.label, priceCents: rate });
+          lines.push({
+            id: method.id,
+            type: method.type,
+            label: method.label,
+            priceCents: rate,
+            ...etaOf(method),
+          });
           break;
         }
         case 'free_over':
@@ -157,10 +190,17 @@ export class ShippingService {
             type: method.type,
             label: method.label,
             priceCents: method.fallbackPriceCents,
+            ...etaOf(method),
           });
           break;
         case 'pickup':
-          lines.push({ id: method.id, type: method.type, label: method.label, priceCents: 0 });
+          lines.push({
+            id: method.id,
+            type: method.type,
+            label: method.label,
+            priceCents: 0,
+            ...etaOf(method),
+          });
           break;
       }
     }

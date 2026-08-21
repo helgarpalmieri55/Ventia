@@ -491,6 +491,12 @@ export class CheckoutService {
             // so this reads as `'web'` for all non-agent traffic exactly as
             // the literal did.
             source: cart.source,
+            // Same inheritance, different question: `source` is who assembled
+            // the cart, `channel` is where the shopper was when they did. A
+            // WhatsApp basket checked out on the web is still a WhatsApp sale —
+            // the conversation is what earned it — so the order keeps the
+            // cart's channel rather than the origin of the final click.
+            channel: cart.channel,
             ...(input.paymentMethod !== 'cod'
               ? {
                   paymentProvider: input.paymentMethod,

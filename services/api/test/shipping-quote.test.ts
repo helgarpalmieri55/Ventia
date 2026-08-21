@@ -12,6 +12,7 @@ const QUOTE_TEST_DOMAINS = [
   'quote-disabled.ventia.localhost',
   'quote-unset.ventia.localhost',
   'quote-free-over.ventia.localhost',
+  'quote-broken-eta.ventia.localhost',
 ];
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
@@ -25,6 +26,7 @@ let zoneTenantId: string;
 let disabledTenantId: string;
 let unsetTenantId: string;
 let freeOverTenantId: string;
+let brokenEtaTenantId: string;
 
 beforeAll(async () => {
   db = await startTestDb();
@@ -49,7 +51,17 @@ beforeAll(async () => {
       status: 'live',
       settings: {
         shipping: {
-          methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000, enabled: true }],
+          methods: [
+            {
+              id: 'flat-1',
+              type: 'flat',
+              label: 'Envío estándar',
+              priceCents: 12000,
+              enabled: true,
+              etaMinDays: 2,
+              etaMaxDays: 5,
+            },
+          ],
         },
       },
     },
@@ -106,6 +118,38 @@ beforeAll(async () => {
   disabledTenantId = disabledTenant.id;
   await prisma.tenantDomain.create({
     data: { tenantId: disabledTenantId, domain: 'quote-disabled.ventia.localhost', isPrimary: true },
+  });
+
+  // Estimates that `shippingMethodSchema` refuses today, but which can sit in
+  // `settings` JSON from before that refinement existed: half a range, and an
+  // inverted one. Neither can be rendered as a sentence, so the quote has to
+  // report them as absent rather than pass a broken pair to the storefront.
+  const brokenEtaTenant = await prisma.tenant.create({
+    data: {
+      slug: 'quote-broken-eta',
+      name: 'Quote Broken Eta',
+      status: 'live',
+      settings: {
+        shipping: {
+          methods: [
+            { id: 'half', type: 'flat', label: 'Medio rango', priceCents: 1000, enabled: true, etaMinDays: 3 },
+            {
+              id: 'inverted',
+              type: 'flat',
+              label: 'Rango invertido',
+              priceCents: 2000,
+              enabled: true,
+              etaMinDays: 9,
+              etaMaxDays: 2,
+            },
+          ],
+        },
+      },
+    },
+  });
+  brokenEtaTenantId = brokenEtaTenant.id;
+  await prisma.tenantDomain.create({
+    data: { tenantId: brokenEtaTenantId, domain: 'quote-broken-eta.ventia.localhost', isPrimary: true },
   });
 
   // settings.shipping entirely unset (settings is null) — must yield [] from
@@ -168,7 +212,18 @@ describe('GET /v1/storefront/checkout/shipping-quote', () => {
         .query({ departamento })
         .set('x-tenant-domain', 'quote-flat.ventia.localhost');
       expect(res.status).toBe(200);
-      expect(res.body).toEqual([{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12000 }]);
+      expect(res.body).toEqual([
+        {
+          id: 'flat-1',
+          type: 'flat',
+          label: 'Envío estándar',
+          priceCents: 12000,
+          // The merchant's own estimate, carried through so the checkout can
+          // show "Llega en 2–5 días hábiles" next to the price.
+          etaMinDays: 2,
+          etaMaxDays: 5,
+        },
+      ]);
     }
   });
 
@@ -178,7 +233,12 @@ describe('GET /v1/storefront/checkout/shipping-quote', () => {
       .query({ departamento: '11' })
       .set('x-tenant-domain', 'quote-zone.ventia.localhost');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([{ id: 'zone-1', type: 'zone', label: 'Envío por zona', priceCents: 8000 }]);
+    // `null`, not absent: a merchant who has not stated a delivery time is a
+    // different thing from an API that cannot report one, and the storefront
+    // has to be able to tell them apart.
+    expect(res.body).toEqual([
+      { id: 'zone-1', type: 'zone', label: 'Envío por zona', priceCents: 8000, etaMinDays: null, etaMaxDays: null },
+    ]);
   });
 
   it('omits (not a 500) a zone method with neither a specific rate nor a defaultPriceCents for this departamento', async () => {
@@ -196,7 +256,24 @@ describe('GET /v1/storefront/checkout/shipping-quote', () => {
       .query({ departamento: '11' })
       .set('x-tenant-domain', 'quote-disabled.ventia.localhost');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([{ id: 'pickup-on', type: 'pickup', label: 'Recoger en tienda', priceCents: 0 }]);
+    expect(res.body).toEqual([
+      { id: 'pickup-on', type: 'pickup', label: 'Recoger en tienda', priceCents: 0, etaMinDays: null, etaMaxDays: null },
+    ]);
+  });
+
+  it('reports a half-filled or inverted delivery estimate as absent, keeping the method itself', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/storefront/checkout/shipping-quote')
+      .query({ departamento: '11' })
+      .set('x-tenant-domain', 'quote-broken-eta.ventia.localhost');
+
+    expect(res.status).toBe(200);
+    // The methods still ship — a bad estimate is not a reason to hide an
+    // option the merchant priced. Only the estimate is dropped.
+    expect(res.body).toEqual([
+      { id: 'half', type: 'flat', label: 'Medio rango', priceCents: 1000, etaMinDays: null, etaMaxDays: null },
+      { id: 'inverted', type: 'flat', label: 'Rango invertido', priceCents: 2000, etaMinDays: null, etaMaxDays: null },
+    ]);
   });
 
   it('a tenant with settings.shipping entirely unset returns [] (not a crash)', async () => {
@@ -215,7 +292,14 @@ describe('GET /v1/storefront/checkout/shipping-quote', () => {
       .set('x-tenant-domain', 'quote-free-over.ventia.localhost');
     expect(res.status).toBe(200);
     expect(res.body).toEqual([
-      { id: 'free-over-1', type: 'free_over', label: 'Envío gratis desde $100.000', priceCents: 15000 },
+      {
+        id: 'free-over-1',
+        type: 'free_over',
+        label: 'Envío gratis desde $100.000',
+        priceCents: 15000,
+        etaMinDays: null,
+        etaMaxDays: null,
+      },
     ]);
   });
 

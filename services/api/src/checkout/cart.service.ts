@@ -113,7 +113,12 @@ export class CartService {
     // add ever writes a Cart row for a given cookie.
     let cart = cookieKey ? await db.cart.findFirst({ where: { tenantId, cookieKey } }) : null;
     if (!cart) {
-      cart = await db.cart.create({ data: { tenantId, cookieKey: randomUUID(), source: 'web' } });
+      cart = await db.cart.create({
+        // `source: 'web'` (a human built it) and `channel: 'web'` (they were on
+        // the storefront) are both the column default; spelled out because this
+        // is the site the other two cart creators are read against.
+        data: { tenantId, cookieKey: randomUUID(), source: 'web', channel: 'web' },
+      });
     }
 
     const existingLine = await db.cartItem.findFirst({

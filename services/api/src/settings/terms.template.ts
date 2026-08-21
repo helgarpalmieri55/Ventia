@@ -263,6 +263,46 @@ function describeShippingMethod(method: ShippingMethodInput): string | null {
 }
 
 /**
+ * The overall delivery window across every enabled method: the fastest method's
+ * floor and the slowest method's ceiling.
+ *
+ * Callers must have already established that every method has an estimate —
+ * summarising a partial set would state a range narrower than the one a shopper
+ * can actually end up with, which in a document governed by Ley 1480 is a
+ * promise the merchant did not make.
+ */
+function etaSummary(methods: ShippingMethodInput[]): string {
+  const mins = methods.map((m) => m.etaMinDays as number);
+  const maxs = methods.map((m) => m.etaMaxDays as number);
+  const min = Math.min(...mins);
+  const max = Math.max(...maxs);
+  if (min === max) return min === 1 ? '1 día hábil' : `${min} días hábiles`;
+  return `entre ${min} y ${max} días hábiles`;
+}
+
+/**
+ * The merchant's own delivery estimate for one method, as a clause that can be
+ * appended to that method's sentence — or `null` when they have not given one.
+ *
+ * Business days, phrased as the shopper will read it. The singular case
+ * ("1 día hábil") is spelled out because "entre 1 y 1 días hábiles" is the kind
+ * of sentence that makes a legal document look machine-written, which is
+ * exactly what undermines it.
+ *
+ * `shippingMethodSchema` already guarantees the two halves arrive together and
+ * in order; the checks here are for shipping settings written before that
+ * refinement existed, which are still sitting in `TenantSettings` JSON.
+ */
+function describeEta(method: ShippingMethodInput): string | null {
+  const min = method.etaMinDays;
+  const max = method.etaMaxDays;
+  if (typeof min !== 'number' || typeof max !== 'number') return null;
+  if (min > max) return null;
+  if (min === max) return min === 1 ? 'Entrega estimada: 1 día hábil.' : `Entrega estimada: ${min} días hábiles.`;
+  return `Entrega estimada: entre ${min} y ${max} días hábiles.`;
+}
+
+/**
  * Renders the full términos y condiciones for one store. Pure: same input,
  * same output — no clock, no database, no environment. `effectiveDate` is an
  * input for exactly that reason.
@@ -297,10 +337,25 @@ export function renderTerms(data: TermsTenantData): GeneratedTerms {
   const providers = data.paymentProviders.map((id) => PROVIDER_DISPLAY_NAMES[id] ?? id).filter((n) => n.length > 0);
   const hasOnlinePayment = providers.length > 0;
 
-  const shippingLines = data.shippingMethods
-    .filter((m) => m && m.enabled === true)
-    .map(describeShippingMethod)
+  const enabledMethods = data.shippingMethods.filter((m) => m && m.enabled === true);
+
+  const shippingLines = enabledMethods
+    .map((method) => {
+      const line = describeShippingMethod(method);
+      if (line === null) return null;
+      const eta = describeEta(method);
+      return eta === null ? line : `${line} ${eta}`;
+    })
     .filter((line): line is string => line !== null);
+
+  // The per-method clauses above are the specific answer; this is the summary
+  // sentence art. 50 lit. h) expects, and it stays a `[COMPLETAR: …]` when no
+  // enabled method carries an estimate — which is the honest outcome, because
+  // the platform genuinely does not know how long this merchant takes.
+  const deliveryTimeSummary =
+    enabledMethods.length > 0 && enabledMethods.every((m) => describeEta(m) !== null)
+      ? etaSummary(enabledMethods)
+      : null;
 
   const restrictedNames = data.codRestrictedDepartamentos
     .map((code) => DEPARTAMENTOS.find((d) => d.code === code)?.name ?? null)
@@ -490,7 +545,7 @@ export function renderTerms(data: TermsTenantData): GeneratedTerms {
       'municipio que seleccione. Nos aseguramos de que la entrega se haga efectivamente en esa dirección y ' +
       'de que la reciba usted o la persona que usted autorice.',
   );
-  p(`Tiempo estimado de entrega: ${t.fill(null, TERMS_HINT.deliveryTime)}.`);
+  p(`Tiempo estimado de entrega: ${t.fill(deliveryTimeSummary, TERMS_HINT.deliveryTime)}.`);
   p(
     'En todo caso, y salvo que hayamos pactado expresamente otra cosa con usted, le entregamos su pedido a ' +
       'más tardar dentro de los treinta (30) días calendario siguientes al día en que lo hizo. Si no ' +

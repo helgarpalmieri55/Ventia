@@ -190,6 +190,76 @@ describe('/v1/admin/categories', () => {
     expect(joinRows).toHaveLength(0);
   });
 
+  it('nests categories, and refuses the shapes that would break navigation', async () => {
+    const { cookie } = await signUpWithTenant('cat-tree@demo.co', 'owner');
+
+    const post = (body: unknown) =>
+      request(app.getHttpServer()).post('/v1/admin/categories').set('cookie', cookie).send(body);
+    const patch = (id: string, body: unknown) =>
+      request(app.getHttpServer()).patch(`/v1/admin/categories/${id}`).set('cookie', cookie).send(body);
+
+    const mujer = await post({ name: 'Mujer' });
+    expect(mujer.status).toBe(201);
+    expect(mujer.body.parentId).toBeNull();
+
+    const ropa = await post({ name: 'Ropa Mujer', parentId: mujer.body.id });
+    expect(ropa.status).toBe(201);
+    expect(ropa.body.parentId).toBe(mujer.body.id);
+
+    const vestidos = await post({ name: 'Vestidos', parentId: ropa.body.id });
+    expect(vestidos.status).toBe(201);
+
+    // Four levels is past MAX_CATEGORY_DEPTH — the breadcrumb and the header
+    // menu are built for three.
+    const tooDeep = await post({ name: 'Vestidos Largos', parentId: vestidos.body.id });
+    expect(tooDeep.status).toBe(400);
+    expect(tooDeep.body).toEqual({ error: 'CATEGORY_TOO_DEEP' });
+
+    // A cycle would make every breadcrumb render an infinite loop.
+    const cycle = await patch(mujer.body.id, { parentId: vestidos.body.id });
+    expect(cycle.status).toBe(400);
+    expect(cycle.body).toEqual({ error: 'CATEGORY_CYCLE' });
+
+    const self = await patch(ropa.body.id, { parentId: ropa.body.id });
+    expect(self.status).toBe(400);
+    expect(self.body).toEqual({ error: 'CATEGORY_PARENT_SELF' });
+
+    // Un-nesting has to be expressible: an explicit null promotes a category
+    // back to a root, which is different from omitting the field.
+    const promoted = await patch(ropa.body.id, { parentId: null });
+    expect(promoted.status).toBe(200);
+    expect(promoted.body.parentId).toBeNull();
+
+    // ...and omitting it leaves the parent alone rather than clearing it.
+    const renamed = await patch(vestidos.body.id, { name: 'Vestidos Cortos' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.parentId).toBe(ropa.body.id);
+  });
+
+  it("refuses a parent from another store rather than linking the two trees", async () => {
+    // Postgres will not catch this: foreign key checks are not subject to
+    // row-level security, so the constraint is satisfied by any real category
+    // id and the tenant check has to be our own.
+    const mine = await signUpWithTenant('cat-tree-mine@demo.co', 'owner');
+    const theirs = await signUpWithTenant('cat-tree-theirs@demo.co', 'owner');
+
+    const foreign = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', theirs.cookie)
+      .send({ name: 'Ajena' });
+    expect(foreign.status).toBe(201);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/admin/categories')
+      .set('cookie', mine.cookie)
+      .send({ name: 'Mía', parentId: foreign.body.id });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'PARENT_NOT_FOUND' });
+
+    const created = await platformDb.category.findMany({ where: { tenantId: mine.tenantId } });
+    expect(created).toHaveLength(0);
+  });
+
   it('writeAudit is best-effort: invalid tenantId does not throw', async () => {
     // Attempt to write audit with an invalid UUID tenantId. The Postgres uuid
     // cast will reject this, but writeAudit must swallow the error and resolve.

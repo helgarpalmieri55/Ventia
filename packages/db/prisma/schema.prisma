@@ -55,9 +55,29 @@ enum PaymentStatus {
   COD
 }
 
+/// QUIÉN armó el carrito, no dónde estaba el comprador. `agent` es lo que
+/// sostiene la atribución de P4 — `agent-admin.controller.ts` cuenta pedidos
+/// con este valor para mostrarle al comerciante qué vendió la IA — así que sus
+/// dos valores no se tocan. El canal es una dimensión aparte: ver SalesChannel.
 enum CartSource {
   web
   agent
+}
+
+/// DÓNDE estaba el comprador. Ortogonal a CartSource: un pedido que la IA armó
+/// por WhatsApp es `source: agent` + `channel: whatsapp`, y hasta ahora ese
+/// segundo hecho se perdía — todo pedido de la IA se veía igual viniera del
+/// chat de la tienda o de WhatsApp.
+///
+/// `instagram` no tiene todavía un camino de entrada en el código; existe
+/// porque el comerciante sí vende por ahí y va a querer registrarlo, y porque
+/// el anillo de "canales de venta" del diseño lo pide. `other` es para eso
+/// mismo: una venta que entró por un camino que la plataforma no modela.
+enum SalesChannel {
+  web
+  whatsapp
+  instagram
+  other
 }
 
 enum ConversationChannel {
@@ -232,10 +252,26 @@ model Category {
   name     String
   slug     String
   position Int     @default(0)
+  /// Categoría padre, para la miga de pan `Inicio › Mujer › Ropa` del diseño y
+  /// para el menú de categorías. `null` = categoría de primer nivel.
+  ///
+  /// `onDelete: SetNull` y no `Cascade`, deliberadamente: borrar "Mujer" no
+  /// puede llevarse "Ropa" y con ella la relación de cada producto que colgaba
+  /// de ahí. Los hijos suben a primer nivel, que es visible y reparable; un
+  /// borrado en cascada de catálogo no lo es.
+  ///
+  /// La profundidad y los ciclos NO los impone la base de datos — una fila
+  /// puede apuntarse a sí misma sin violar la llave foránea. Eso se valida en
+  /// `categories.service.ts` antes de escribir; el índice de abajo existe para
+  /// que esa validación (recorrer los ancestros) no cueste un escaneo.
+  parentId String? @db.Uuid
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryTree")
   tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   products ProductCategory[]
 
   @@unique([tenantId, slug])
+  @@index([tenantId, parentId])
 }
 
 model Product {
@@ -326,7 +362,8 @@ model Cart {
   id        String     @id @default(uuid()) @db.Uuid
   tenantId  String     @db.Uuid
   cookieKey String
-  source    CartSource @default(web)
+  source    CartSource   @default(web)
+  channel   SalesChannel @default(web)
   expiresAt DateTime?
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
@@ -485,6 +522,7 @@ model Order {
   taxCents             Int
   totalCents           Int
   source               CartSource    @default(web)
+  channel              SalesChannel  @default(web)
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
   tenant               Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)

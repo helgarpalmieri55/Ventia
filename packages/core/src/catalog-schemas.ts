@@ -9,6 +9,16 @@ export const categoryInputSchema = z.object({
   name: z.string().min(1).max(80),
   slug: z.string().min(1).max(60).optional(),
   position: z.number().int().min(0).optional(),
+  // Nullable AND optional, and they mean different things: omitted leaves the
+  // parent as it is (the update schema is this one `.partial()`), while an
+  // explicit `null` promotes the category back to a root. Without the
+  // nullable case there would be no way to un-nest one.
+  //
+  // Every other rule about the parent — it must exist in this tenant, it must
+  // not close a cycle, the tree must stay inside MAX_CATEGORY_DEPTH — needs
+  // the rest of the tenant's categories to answer, so it lives in
+  // services/api/src/catalog/category-tree.ts rather than here.
+  parentId: z.string().uuid().nullable().optional(),
 });
 
 export const productInputSchema = z.object({

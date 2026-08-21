@@ -18,6 +18,7 @@ import { parseOr400 } from './parse';
 import { writeAudit } from './audit';
 import { assertUuidOr404 } from './uuid';
 import { revalidateStorefrontTag } from '../storefront/revalidate';
+import { rejectCategoryParent } from './category-tree';
 
 const categoryUpdateSchema = categoryInputSchema.partial();
 
@@ -42,10 +43,37 @@ export class CategoriesController {
     });
   }
 
+  /**
+   * Validates a proposed parent against the tenant's current tree, throwing
+   * the HTTP error it deserves.
+   *
+   * The existence check is deliberately its own query rather than trust in the
+   * foreign key: Postgres does not apply row-level security to foreign key
+   * checks, so a `parentId` copied from another store's category would satisfy
+   * the constraint and quietly link the two tenants' trees together. Reading it
+   * through `tenantDb` is what makes a foreign id a 404.
+   *
+   * `categoryId` is `null` on create — see `rejectCategoryParent`.
+   */
+  private async assertParentAllowed(
+    tenantId: string,
+    categoryId: string | null,
+    parentId: string,
+  ): Promise<void> {
+    const db = tenantDb(tenantId);
+    const parent = await db.category.findFirst({ where: { id: parentId, tenantId }, select: { id: true } });
+    if (!parent) throw new HttpException({ error: 'PARENT_NOT_FOUND' }, 404);
+
+    const nodes = await db.category.findMany({ where: { tenantId }, select: { id: true, parentId: true } });
+    const rejection = rejectCategoryParent(nodes, categoryId, parentId);
+    if (rejection) throw new HttpException({ error: rejection }, 400);
+  }
+
   @Post()
   async create(@AdminSession() session: AdminSessionContext, @Body() body: unknown) {
     const input = parseOr400(categoryInputSchema, body);
     const slug = input.slug ?? slugify(input.name);
+    if (input.parentId) await this.assertParentAllowed(session.tenantId, null, input.parentId);
 
     try {
       const category = await tenantDb(session.tenantId).category.create({
@@ -54,6 +82,7 @@ export class CategoriesController {
           name: input.name,
           slug,
           position: input.position ?? 0,
+          parentId: input.parentId ?? null,
         },
       });
       await writeAudit(session, 'category.create', 'Category', category.id, input);
@@ -69,6 +98,10 @@ export class CategoriesController {
   async update(@AdminSession() session: AdminSessionContext, @Param('id') id: string, @Body() body: unknown) {
     assertUuidOr404(id);
     const input = parseOr400(categoryUpdateSchema, body);
+    // `input.parentId` is falsy for both "not sent" and an explicit `null`,
+    // and neither needs checking: leaving the parent alone cannot break the
+    // tree, and promoting a category to a root can only make it shallower.
+    if (input.parentId) await this.assertParentAllowed(session.tenantId, id, input.parentId);
 
     try {
       const category = await tenantDb(session.tenantId).category.update({

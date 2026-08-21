@@ -476,6 +476,57 @@ describe('renderTerms (pure)', () => {
     );
   });
 
+  it('states the delivery estimate the merchant configured, per method and overall', () => {
+    const rendered = renderTerms({
+      ...base,
+      shippingMethods: [
+        { id: 'a', type: 'flat', label: 'Envío estándar', priceCents: 1_200_000, enabled: true, etaMinDays: 2, etaMaxDays: 5 },
+        { id: 'b', type: 'pickup', label: 'Recoger en tienda', enabled: true, etaMinDays: 1, etaMaxDays: 1 },
+      ],
+    });
+
+    expect(rendered.bodyMd).toContain('Entrega estimada: entre 2 y 5 días hábiles.');
+    // Singular spelled out — "entre 1 y 1 días hábiles" reads as a bug in a
+    // document the merchant is legally answerable for.
+    expect(rendered.bodyMd).toContain('Entrega estimada: 1 día hábil.');
+    // The summary spans the fastest floor to the slowest ceiling.
+    expect(rendered.bodyMd).toContain('Tiempo estimado de entrega: entre 1 y 5 días hábiles.');
+    expect(rendered.placeholders).not.toContain(
+      'tiempo estimado de entrega, por ejemplo "de 2 a 5 días hábiles en ciudades principales y de 3 a 8 en el resto del país"',
+    );
+  });
+
+  it('keeps the [COMPLETAR] marker when even one enabled method has no estimate', () => {
+    // A summary drawn from a partial set would state a window narrower than
+    // the one a shopper can actually get. Under Ley 1480 that is a delivery
+    // promise the merchant never made, so the honest output is the marker.
+    const rendered = renderTerms({
+      ...base,
+      shippingMethods: [
+        { id: 'a', type: 'flat', label: 'Envío estándar', priceCents: 1_200_000, enabled: true, etaMinDays: 2, etaMaxDays: 5 },
+        { id: 'b', type: 'pickup', label: 'Recoger en tienda', enabled: true },
+      ],
+    });
+
+    expect(rendered.bodyMd).toContain('Entrega estimada: entre 2 y 5 días hábiles.');
+    expect(rendered.bodyMd).toContain('Tiempo estimado de entrega: [COMPLETAR:');
+  });
+
+  it('ignores a disabled method when summarising the delivery window', () => {
+    // A method the shopper cannot choose must not widen or narrow the window
+    // the document states.
+    const rendered = renderTerms({
+      ...base,
+      shippingMethods: [
+        { id: 'a', type: 'flat', label: 'Envío estándar', priceCents: 1_200_000, enabled: true, etaMinDays: 2, etaMaxDays: 5 },
+        { id: 'b', type: 'flat', label: 'Envío lento', priceCents: 100, enabled: false, etaMinDays: 20, etaMaxDays: 40 },
+      ],
+    });
+
+    expect(rendered.bodyMd).toContain('Tiempo estimado de entrega: entre 2 y 5 días hábiles.');
+    expect(rendered.bodyMd).not.toContain('40 días hábiles');
+  });
+
   it('is deterministic and free of I/O', () => {
     expect(renderTerms(base)).toEqual(renderTerms(base));
   });

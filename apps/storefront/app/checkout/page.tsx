@@ -11,6 +11,7 @@ import {
   CheckoutApiError,
   fetchShippingQuote,
   submitCheckout,
+  formatEta,
   type ShippingQuoteLine,
 } from '../../lib/checkout-api';
 
@@ -481,7 +482,12 @@ export default function CheckoutPage() {
                         checked={form.shippingMethodId === line.id}
                         onChange={() => setField('shippingMethodId', line.id)}
                       />
-                      {line.label}
+                      <span className="flex flex-col">
+                        {line.label}
+                        {formatEta(line) ? (
+                          <span className="text-xs text-muted-foreground">{formatEta(line)}</span>
+                        ) : null}
+                      </span>
                     </span>
                     <span>{formatCOP(line.priceCents)}</span>
                   </label>

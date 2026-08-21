@@ -1,11 +1,26 @@
 import { Inject, Injectable } from '@nestjs/common';
 import Anthropic from '@anthropic-ai/sdk';
-import { platformDb, tenantDb } from '@ventia/db';
+import { platformDb, tenantDb, type ConversationChannel, type SalesChannel } from '@ventia/db';
 import { AGENT_TOOL_JSON_SCHEMAS, AGENT_TOOL_NAMES } from '@ventia/core';
 import { AgentToolsService } from './agent-tools.service';
 import { AgentBudgetService, BUDGET_EXHAUSTED_REPLY } from './agent-budget.service';
 import { AgentThrottleService, THROTTLED_REPLY } from './agent-throttle.service';
 import { buildSystemPrompt } from './system-prompt';
+
+/**
+ * Where a conversation's shopper is standing, as the orders/carts side names it.
+ *
+ * A total `Record` rather than a cast: `ConversationChannel` and
+ * `SalesChannel` overlap today but are not the same enum and will not stay in
+ * step — `SalesChannel` already carries `instagram` and `other`, which no
+ * conversation can be. Typing the map this way means adding a conversation
+ * channel fails to compile here until someone says what it sells as, instead
+ * of silently landing in whichever value a cast happened to produce.
+ */
+const SALES_CHANNEL_FOR: Record<ConversationChannel, SalesChannel> = {
+  web: 'web',
+  whatsapp: 'whatsapp',
+};
 
 /**
  * The agent's conversation loop (docs/SPEC.md §7): load history → call Claude
@@ -296,7 +311,12 @@ export class AgentService {
           // The tenant and the conversation come from THIS request, never from
           // anything the model produced — that is what keeps every tool scoped
           // to the store the shopper is actually talking to.
-          { tenantId, conversationId: conversation.id, handoffEnabled: budget.handoffEnabled },
+          {
+            tenantId,
+            conversationId: conversation.id,
+            handoffEnabled: budget.handoffEnabled,
+            channel: SALES_CHANNEL_FOR[conversation.channel],
+          },
           toolUse.name,
           toolUse.input,
         );

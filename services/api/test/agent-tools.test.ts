@@ -316,6 +316,38 @@ describe('agent tools — cart creation', () => {
     expect(after?.source).toBe('web');
     expect(after?.items).toHaveLength(0);
   });
+
+  it('stamps the conversation\'s channel on the cart, separately from who built it', async () => {
+    // `source` and `channel` answer different questions and must not collapse
+    // into each other: this cart was assembled by the agent (source) for a
+    // shopper standing in WhatsApp (channel). Losing either fact costs the
+    // merchant one of two reports — "how much is the AI selling" and "how much
+    // is WhatsApp selling" — and they are not the same report.
+    const res = await tools.execute(
+      { tenantId: tenantAId, channel: 'whatsapp' },
+      'create_cart_link',
+      { items: [{ variant_id: variantAId, qty: 1 }] },
+    );
+
+    expect(res.ok).toBe(true);
+    const key = new URL(`http://x${(res.data as { cart_url: string }).cart_url}`).searchParams.get('c');
+    const cart = await prisma.cart.findFirst({ where: { tenantId: tenantAId, cookieKey: key! } });
+    expect(cart?.channel).toBe('whatsapp');
+    expect(cart?.source).toBe('agent');
+  });
+
+  it('falls back to the web channel when the tool runs outside a conversation', async () => {
+    // Tests and any future non-conversational caller pass no channel. The cart
+    // must still be created rather than rejected, and must not silently claim
+    // a channel nobody was on.
+    const res = await tools.execute({ tenantId: tenantAId }, 'create_cart_link', {
+      items: [{ variant_id: variantAId, qty: 1 }],
+    });
+
+    const key = new URL(`http://x${(res.data as { cart_url: string }).cart_url}`).searchParams.get('c');
+    const cart = await prisma.cart.findFirst({ where: { tenantId: tenantAId, cookieKey: key! } });
+    expect(cart?.channel).toBe('web');
+  });
 });
 
 describe('agent tools — input handling', () => {

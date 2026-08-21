@@ -7,11 +7,14 @@ import { ApiError, apiFetch } from '../lib/api';
 import { errorMessage, fieldErrors } from '../lib/errors';
 import { centsToPesos, pesosToCents } from '../lib/format';
 import {
+  etaFromDraft,
+  etaToDraft,
   newFlatMethod,
   newFreeOverMethod,
   newPickupMethod,
   newZoneMethod,
   shippingToFormState,
+  type EtaDraft,
 } from '../lib/shipping-form';
 import type { SettingsResponse, TabProps } from '../app/(app)/configuracion/page';
 
@@ -33,9 +36,14 @@ import type { SettingsResponse, TabProps } from '../app/(app)/configuracion/page
 // A method's draft is a variant of its `ShippingMethodInput` counterpart
 // with every `*Cents` field replaced by a `*Pesos` string field. This is
 // UI-only scaffolding, not part of the `@ventia/core` schema, so it lives
-// here rather than in `lib/shipping-form.ts`.
+// here rather than in `lib/shipping-form.ts`. The one exception is the
+// delivery-estimate pair (`EtaDraft` and its two converters): it is identical
+// across all four method types and is pure string↔number logic, so it sits in
+// `lib/` where it can be tested directly — the same split `lib/format.ts`'s
+// `pesosToCents`/`centsToPesos` already have from the price fields that use
+// them.
 
-interface FlatDraft {
+interface FlatDraft extends EtaDraft {
   id: string;
   type: 'flat';
   label: string;
@@ -43,7 +51,7 @@ interface FlatDraft {
   enabled: boolean;
 }
 
-interface ZoneDraft {
+interface ZoneDraft extends EtaDraft {
   id: string;
   type: 'zone';
   label: string;
@@ -56,7 +64,7 @@ interface ZoneDraft {
   enabled: boolean;
 }
 
-interface FreeOverDraft {
+interface FreeOverDraft extends EtaDraft {
   id: string;
   type: 'free_over';
   label: string;
@@ -65,7 +73,7 @@ interface FreeOverDraft {
   enabled: boolean;
 }
 
-interface PickupDraft {
+interface PickupDraft extends EtaDraft {
   id: string;
   type: 'pickup';
   label: string;
@@ -83,6 +91,7 @@ function methodToDraft(method: ShippingMethodInput): MethodDraft {
         type: 'flat',
         label: method.label,
         priceCentsPesos: String(centsToPesos(method.priceCents)),
+        ...etaToDraft(method),
         enabled: method.enabled,
       };
     case 'zone': {
@@ -97,6 +106,7 @@ function methodToDraft(method: ShippingMethodInput): MethodDraft {
         label: method.label,
         ratesByDepartamentoPesos,
         defaultPriceCentsPesos: method.defaultPriceCents !== undefined ? String(centsToPesos(method.defaultPriceCents)) : '',
+        ...etaToDraft(method),
         enabled: method.enabled,
       };
     }
@@ -107,6 +117,7 @@ function methodToDraft(method: ShippingMethodInput): MethodDraft {
         label: method.label,
         thresholdCentsPesos: String(centsToPesos(method.thresholdCents)),
         fallbackPriceCentsPesos: String(centsToPesos(method.fallbackPriceCents)),
+        ...etaToDraft(method),
         enabled: method.enabled,
       };
     case 'pickup':
@@ -115,6 +126,7 @@ function methodToDraft(method: ShippingMethodInput): MethodDraft {
         type: 'pickup',
         label: method.label,
         instructions: method.instructions ?? '',
+        ...etaToDraft(method),
         enabled: method.enabled,
       };
   }
@@ -133,6 +145,7 @@ function draftToMethod(draft: MethodDraft): ShippingMethodInput {
         type: 'flat',
         label: draft.label,
         priceCents: pesosToCents(draft.priceCentsPesos) ?? Number.NaN,
+        ...etaFromDraft(draft),
         enabled: draft.enabled,
       };
     case 'zone': {
@@ -149,6 +162,7 @@ function draftToMethod(draft: MethodDraft): ShippingMethodInput {
         label: draft.label,
         ratesByDepartamento,
         ...(defaultTrimmed === '' ? {} : { defaultPriceCents: pesosToCents(defaultTrimmed) ?? Number.NaN }),
+        ...etaFromDraft(draft),
         enabled: draft.enabled,
       };
     }
@@ -159,6 +173,7 @@ function draftToMethod(draft: MethodDraft): ShippingMethodInput {
         label: draft.label,
         thresholdCents: pesosToCents(draft.thresholdCentsPesos) ?? Number.NaN,
         fallbackPriceCents: pesosToCents(draft.fallbackPriceCentsPesos) ?? Number.NaN,
+        ...etaFromDraft(draft),
         enabled: draft.enabled,
       };
     case 'pickup': {
@@ -168,6 +183,7 @@ function draftToMethod(draft: MethodDraft): ShippingMethodInput {
         type: 'pickup',
         label: draft.label,
         ...(instructionsTrimmed ? { instructions: instructionsTrimmed } : {}),
+        ...etaFromDraft(draft),
         enabled: draft.enabled,
       };
     }
@@ -418,6 +434,39 @@ export function EnviosTab({ settings, onSaved }: TabProps) {
                 </div>
               </div>
             ) : null}
+
+            {/* Common to every method type: how long THIS option takes. Shown
+                on the product page and at checkout, and it is what fills the
+                "tiempo estimado de entrega" line of the generated términos —
+                left blank, that line keeps its [COMPLETAR: ...] marker. */}
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label="Entrega desde (días hábiles)" htmlFor={`envios-eta-min-${method.id}`}>
+                <Input
+                  id={`envios-eta-min-${method.id}`}
+                  type="number"
+                  min={0}
+                  max={90}
+                  step="1"
+                  inputMode="numeric"
+                  value={method.etaMinDays}
+                  onChange={(event) => updateMethod(method.id, { etaMinDays: event.target.value })}
+                  placeholder="Opcional"
+                />
+              </FormField>
+              <FormField label="Entrega hasta (días hábiles)" htmlFor={`envios-eta-max-${method.id}`}>
+                <Input
+                  id={`envios-eta-max-${method.id}`}
+                  type="number"
+                  min={0}
+                  max={90}
+                  step="1"
+                  inputMode="numeric"
+                  value={method.etaMaxDays}
+                  onChange={(event) => updateMethod(method.id, { etaMaxDays: event.target.value })}
+                  placeholder="Opcional"
+                />
+              </FormField>
+            </div>
           </div>
         ))}
 

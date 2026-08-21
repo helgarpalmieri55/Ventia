@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { tenantDb } from '@ventia/db';
+import { tenantDb, type SalesChannel } from '@ventia/db';
 import {
   createCartLinkInput,
   escalateToHumanInput,
@@ -82,6 +82,19 @@ export interface AgentToolContext {
    * (`TenantLimits.humanHandoff`). Carried in rather than re-read here: the
    * loop has already loaded the plan row for the budget check. */
   handoffEnabled?: boolean;
+  /** Where the shopper is standing, derived from the conversation's channel by
+   * the loop. Stamped onto any cart `create_cart_link` builds, so a basket
+   * proposed over WhatsApp stays distinguishable from one proposed in the web
+   * widget — the agent built both, but only one of them tells the merchant
+   * that WhatsApp is selling.
+   *
+   * Deliberately separate from `Cart.source`: `source` answers WHO assembled
+   * the cart (`agent` is what the AI-assisted-sales KPI counts), `channel`
+   * answers WHERE the shopper was. An agent-built WhatsApp cart is both, and
+   * collapsing them into one column would lose whichever fact came second.
+   *
+   * Absent outside a conversation, where the column default (`web`) applies. */
+  channel?: SalesChannel;
 }
 
 @Injectable()
@@ -104,7 +117,7 @@ export class AgentToolsService {
       case 'recommend_products':
         return this.recommendProducts(tenantId, rawInput);
       case 'create_cart_link':
-        return this.createCartLink(tenantId, rawInput);
+        return this.createCartLink(ctx, rawInput);
       case 'get_order_status':
         return this.getOrderStatus(tenantId, rawInput);
       case 'get_store_info':
@@ -245,7 +258,8 @@ export class AgentToolsService {
    * "ventas asistidas por IA" KPI (SPEC.md §7) — orders inherit it at
    * checkout.
    */
-  private async createCartLink(tenantId: string, rawInput: unknown): Promise<AgentToolResult> {
+  private async createCartLink(ctx: AgentToolContext, rawInput: unknown): Promise<AgentToolResult> {
+    const { tenantId } = ctx;
     const parsed = createCartLinkInput.safeParse(rawInput);
     if (!parsed.success) return fail('parámetros inválidos para create_cart_link');
     const db = tenantDb(tenantId);
@@ -279,7 +293,7 @@ export class AgentToolsService {
     // themselves. The returned key is what the storefront opens.
     const cookieKey = randomUUID();
     const cart = await db.cart.create({
-      data: { tenantId, cookieKey, source: 'agent' },
+      data: { tenantId, cookieKey, source: 'agent', channel: ctx.channel ?? 'web' },
     });
     await db.cartItem.createMany({
       data: lines.map((line) => ({

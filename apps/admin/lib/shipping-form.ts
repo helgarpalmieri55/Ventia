@@ -101,3 +101,44 @@ export function newFreeOverMethod(): ShippingMethodInput {
 export function newPickupMethod(): ShippingMethodInput {
   return { id: crypto.randomUUID(), type: 'pickup', label: 'Recoger en tienda', enabled: true };
 }
+
+/** The delivery-estimate pair every method type carries.
+ *
+ * Kept as strings for the same reason the pesos fields are: the merchant has
+ * to be able to clear a box or type a second digit without the value being
+ * re-parsed and rounded on every keystroke. Empty means "not stated", which is
+ * a real answer — the generated términos then keep their `[COMPLETAR: …]`
+ * marker rather than inventing a delivery time for the merchant. */
+export interface EtaDraft {
+  etaMinDays: string;
+  etaMaxDays: string;
+}
+
+/** Both ends or neither — an inverted or half-filled pair saved before
+ * `shippingMethodSchema` gained its refinement is shown as blank rather than
+ * half-populated, so the merchant re-enters a range instead of saving a
+ * broken one back. */
+export function etaToDraft(method: ShippingMethodInput): EtaDraft {
+  const { etaMinDays: min, etaMaxDays: max } = method;
+  if (typeof min !== 'number' || typeof max !== 'number' || min > max) {
+    return { etaMinDays: '', etaMaxDays: '' };
+  }
+  return { etaMinDays: String(min), etaMaxDays: String(max) };
+}
+
+/** Omits the pair entirely when BOTH boxes are blank — "no estimate" is a
+ * valid answer. One blank box is not: it goes on as `NaN` so the server
+ * answers with the same VALIDATION_FAILED every other malformed field gets,
+ * rather than this tab quietly deciding what the merchant meant.
+ *
+ * The blank half is turned into `NaN` explicitly, because `Number('')` is `0`.
+ * Left to that coercion, a merchant who filled only "hasta 5 días" would save
+ * a perfectly valid-looking range starting at zero — a same-day delivery
+ * promise they never made, in a document Ley 1480 holds them to. */
+export function etaFromDraft(draft: EtaDraft): { etaMinDays?: number; etaMaxDays?: number } {
+  const min = draft.etaMinDays.trim();
+  const max = draft.etaMaxDays.trim();
+  if (min === '' && max === '') return {};
+  const parse = (value: string) => (value === '' ? Number.NaN : Number(value));
+  return { etaMinDays: parse(min), etaMaxDays: parse(max) };
+}

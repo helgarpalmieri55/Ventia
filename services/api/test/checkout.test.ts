@@ -1511,6 +1511,44 @@ describe('POST /v1/storefront/checkout — order source is inherited from the ca
       where: { tenantId: tenantAId, email: 'web-attributed@example.com' },
     });
     expect(order.source).toBe('web');
+    expect(order.channel).toBe('web');
+  });
+
+  it('carries the cart\'s channel onto the order, independently of its source', async () => {
+    // The two columns answer different questions and the checkout must not
+    // conflate them: this cart was built by the agent (source) for a shopper
+    // in WhatsApp (channel), and both facts have to survive into the order.
+    // Reading `channel` off the request instead of the cart would report every
+    // WhatsApp sale as a web sale, since the payment page is always a browser.
+    const cart = await prisma.cart.create({
+      data: {
+        tenantId: tenantAId,
+        cookieKey: crypto.randomUUID(),
+        source: 'agent',
+        channel: 'whatsapp',
+      },
+    });
+    await prisma.cartItem.create({ data: { tenantId: tenantAId, cartId: cart.id, productId: productXId, qty: 1 } });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/storefront/checkout')
+      .set('x-tenant-domain', 'checkout-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${cart.cookieKey}`)
+      .send({
+        email: 'whatsapp-attributed@example.com',
+        phone: '3009990079',
+        address: BOGOTA_ADDRESS,
+        shippingMethodId: 'flat-1',
+        paymentMethod: 'cod',
+        acceptedPrivacyPolicy: true,
+      });
+
+    expect(res.status).toBe(201);
+    const order = await prisma.order.findFirstOrThrow({
+      where: { tenantId: tenantAId, email: 'whatsapp-attributed@example.com' },
+    });
+    expect(order.channel).toBe('whatsapp');
+    expect(order.source).toBe('agent');
   });
 });
 

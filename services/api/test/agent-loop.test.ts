@@ -228,6 +228,32 @@ describe('agent loop — tool dispatch', () => {
     expect(result.ok).toBe(true);
     expect(result.data.cart_url).toContain('/carrito?c=');
   });
+
+  it("gives the cart the CONVERSATION's channel, not a hardcoded one", async () => {
+    // The channel is a server fact (which door the shopper came through), so
+    // it comes from the conversation row the same way the tenant does. A cart
+    // the agent builds mid-WhatsApp-chat has to be attributable to WhatsApp
+    // even though the shopper will finish paying in a browser.
+    const whatsappConversation = await prisma.conversation.create({
+      data: { tenantId, channel: 'whatsapp', shopperRef: '573001112233', status: 'open' },
+    });
+
+    scripted = [
+      toolUseResponse('create_cart_link', { items: [{ variant_id: variantId, qty: 1 }] }),
+      textResponse('Te dejé el carrito listo.'),
+    ];
+
+    const reply = await agent.respond({
+      tenantId,
+      conversationId: whatsappConversation.id,
+      message: 'lo quiero',
+    });
+
+    const url = (reply.toolResults[0].result as { data: { cart_url: string } }).data.cart_url;
+    const key = new URL(`http://x${url}`).searchParams.get('c');
+    const cart = await prisma.cart.findFirst({ where: { tenantId, cookieKey: key! } });
+    expect(cart?.channel).toBe('whatsapp');
+  });
 });
 
 describe('agent loop — the budget hard cap', () => {
