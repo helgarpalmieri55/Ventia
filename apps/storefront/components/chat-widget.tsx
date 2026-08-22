@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Spinner } from '@ventia/ui';
 import { formatCOP } from '../lib/format';
+import { ProductImage } from './product-image';
 import {
   cartLinkFromTool,
   productsFromTool,
@@ -207,12 +208,14 @@ function ChatBubble({ message, pending }: { message: ChatMessage; pending: boole
                 href={product.url}
                 className="flex items-center gap-3 rounded-md border border-border p-2 hover:bg-muted"
               >
-                {/* Plain <img>, not next/image: these URLs come from the
-                    tenant's own object storage at runtime and next/image would
-                    need each host allow-listed at build time. */}
-                {product.thumbnail_url ? (
-                  <img src={product.thumbnail_url} alt="" className="h-12 w-12 rounded object-cover" />
-                ) : null}
+                {/* Same box, same crop, same no-photo mark as the grid and
+                    the PDP (components/product-image.tsx) — a suggestion from
+                    the agent should look like the store it is selling. Always
+                    rendered, unlike before: the agent's tool result says
+                    outright whether the product has a photo, so a placeholder
+                    here is a fact about the product, not a gap in what we
+                    fetched. */}
+                <ProductImage src={product.thumbnail_url} alt="" className="w-12 shrink-0 rounded-md" />
                 <span className="flex min-w-0 flex-col">
                   <span className="truncate text-sm font-medium">{product.name}</span>
                   {/* The price comes from the TOOL result, never from the

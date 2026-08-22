@@ -3,6 +3,13 @@ import { vi } from 'vitest';
 /**
  * Raise the rate limits for the suite.
  *
+ * `SHOPPER_AUTH` is on this list for a reason worth stating: its production
+ * default is 20/min, far tighter than the others, because every shopper
+ * sign-in costs a real scrypt hash and the link routes send mail. A suite that
+ * registers and signs in a few dozen fixtures blows through that in seconds —
+ * and the symptom is a pile of unrelated-looking assertion failures in
+ * shopper-accounts.test.ts, not an obvious 429.
+ *
  * Every request in every test originates from 127.0.0.1, so the whole suite
  * shares ONE bucket per limiter — which the production defaults (sized for
  * real shoppers behind carrier-grade NAT, see src/common/rate-limit.ts) are
@@ -18,7 +25,7 @@ import { vi } from 'vitest';
  * Set only when absent, so a test file that wants its own values can export
  * them before this runs.
  */
-for (const name of ['AUTH', 'CHECKOUT', 'WEBHOOKS']) {
+for (const name of ['AUTH', 'CHECKOUT', 'WEBHOOKS', 'SHOPPER_AUTH']) {
   const key = `RATE_LIMIT_${name}_PER_MINUTE`;
   process.env[key] ??= '100000';
 }

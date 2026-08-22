@@ -29,6 +29,18 @@ export interface CartLineDto {
   variantId: string | null;
   qty: number;
   name: string;
+  /** The product's first image, or `null` when it has none.
+   *
+   * Projected here rather than left to the storefront: without it the cart is
+   * the one surface in the whole store that shows a shopper only text, right
+   * where they are deciding whether to pay. The alternative — a second
+   * round-trip per line to a products-by-id endpoint that does not exist — is
+   * more moving parts for the same picture.
+   *
+   * The FIRST image by `position`, matching what the grid and the product page
+   * show, so the same product does not appear as two different photos on two
+   * screens of one purchase. */
+  imageUrl: string | null;
   priceCents: number;
   taxRate: TaxRateValue;
   lineSubtotalCents: number;
@@ -286,7 +298,13 @@ export class CartService {
     const variantIds = [...new Set(items.map((i) => i.variantId).filter((v): v is string => v !== null))];
 
     const [products, variants] = await Promise.all([
-      db.product.findMany({ where: { id: { in: productIds } } }),
+      db.product.findMany({
+        where: { id: { in: productIds } },
+        // One image per product, not all of them: the cart shows a thumbnail,
+        // and pulling a full gallery for every line to render one of each is
+        // wasted rows on the busiest read in the funnel.
+        include: { images: { orderBy: { position: 'asc' }, take: 1 } },
+      }),
       variantIds.length
         ? db.productVariant.findMany({ where: { id: { in: variantIds } } })
         : Promise.resolve([]),
@@ -317,6 +335,7 @@ export class CartService {
         variantId: item.variantId,
         qty: item.qty,
         name: product.name,
+        imageUrl: product.images[0]?.url ?? null,
         priceCents,
         taxRate,
         lineSubtotalCents,

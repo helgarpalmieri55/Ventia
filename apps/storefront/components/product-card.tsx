@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { Card, CardContent } from '@ventia/ui';
 import { Price } from './price';
+import { ProductImage } from './product-image';
 
 /** The subset of `StorefrontProductSummary`
  * (`services/api/src/storefront/products.service.ts`) a product tile needs —
@@ -19,18 +20,18 @@ export interface ProductCardData {
 export function ProductCard({ product }: { product: ProductCardData }) {
   return (
     <Link href={`/productos/${product.slug}`} className="block">
-      <Card className="h-full overflow-hidden transition hover:shadow-md">
-        <div className="aspect-square w-full bg-muted">
-          {product.thumbnailUrl ? (
-            // Plain <img>, not next/image: storefront has no remote-image
-            // domain config yet (thumbnails come from whatever host the
-            // merchant uploaded to), and this matches the admin app's
-            // existing convention (see productos/page.tsx, images-manager.tsx).
-            <img src={product.thumbnailUrl} alt={product.name} className="h-full w-full object-cover" />
-          ) : null}
-        </div>
-        <CardContent className="flex flex-col gap-1 p-4">
-          <p className="truncate text-sm font-medium">{product.name}</p>
+      <Card className="flex h-full flex-col overflow-hidden transition hover:shadow-md">
+        {/* `shrink-0` so the photo keeps its ratio in a tile that the grid has
+            stretched to match a taller neighbour, and no rounding of its own:
+            the Card already rounds and clips these corners, and a second
+            radius would cut two notches into the middle of the tile. `alt=""`
+            because the name is printed directly underneath — the link would
+            otherwise be announced twice. */}
+        <ProductImage src={product.thumbnailUrl} alt="" className="shrink-0" />
+        <CardContent className="flex flex-col gap-1 p-3 sm:p-4">
+          {/* Two lines rather than `truncate`: at two columns on a phone a
+              single truncated line cuts most product names mid-word. */}
+          <p className="line-clamp-2 text-sm font-medium">{product.name}</p>
           <Price cents={product.priceCents} compareAtCents={product.compareAtCents} />
         </CardContent>
       </Card>

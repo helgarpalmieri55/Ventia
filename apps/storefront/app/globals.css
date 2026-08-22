@@ -27,3 +27,43 @@ h5,
 h6 {
   font-family: var(--font-heading, ui-sans-serif, system-ui, sans-serif);
 }
+
+/* El footer flotaba a media pantalla: on a short page (a policy page, an empty
+   cart, a 404) the document ended wherever the content did and the footer sat
+   in the middle of the viewport with white space under it. product.md §5 calls
+   this "una línea de CSS" and it is roughly that — a full-height column whose
+   last block is pushed down by `margin-top: auto`.
+
+   `100dvh`, with `100vh` as the fallback for browsers that predate it: on
+   mobile Safari and Chrome `100vh` is the viewport WITHOUT the browser chrome,
+   so a `100vh` page is always a little taller than the screen and every short
+   page gets a pointless scroll — on the phones where nearly all of this
+   traffic will arrive.
+
+   No margin is reset anywhere here, deliberately: the last time this codebase
+   wrote a global margin rule it was Tailwind's own preflight `margin: 0` on
+   `*`, which silently killed `dialog:modal { margin: auto }` and pinned every
+   modal to the top-left corner (see packages/ui/src/dialog.tsx). The cart
+   drawer is unaffected by the column in any case — a closed <dialog> is
+   `display: none` and an open one is `position: fixed` in the top layer, so
+   neither is a flex item of this body. */
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Flex items default to `min-width: auto`, which means they refuse to shrink
+   below their content's intrinsic width. Without this, the cart page's table
+   on a narrow phone would stretch <main> — and therefore the header, the
+   footer and the whole document — instead of overflowing inside it. */
+body > * {
+  min-width: 0;
+}
+
+/* The other half of this — `mt-auto` on the footer itself — deliberately lives
+   in components/site-footer.tsx rather than as a `footer { margin-top: auto }`
+   rule here: an element selector loses to any utility class, so that rule would
+   have been silently overridden by the `mt-12` the footer was already carrying,
+   and the footer would have gone on floating with no visible reason why. */

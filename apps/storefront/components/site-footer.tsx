@@ -71,7 +71,14 @@ export const FOOTER_LINKS: { href: string; label: string }[] = [
 
 export function SiteFooter() {
   return (
-    <footer className="mt-12 border-t border-border">
+    // `mt-auto` is what keeps this at the bottom of the window on a short page
+    // (a policy page, an empty cart, a 404) instead of floating mid-screen with
+    // blank space under it — it is the second half of the full-height flex
+    // column `app/globals.css` puts on <body>; see that file for the why.
+    // Not `mt-12` any more: every page already ends in its own `py-8`, so the
+    // separation survives, and a fixed top margin cannot also be the elastic
+    // one that pushes.
+    <footer className="mt-auto border-t border-border">
       <nav
         aria-label="Enlaces de la tienda"
         className="mx-auto flex max-w-5xl flex-wrap gap-x-6 gap-y-2 px-4 py-6 text-sm text-muted-foreground"

@@ -6,6 +6,7 @@ import { fetchStorefront, fetchStorefrontOrNull } from '../../../lib/storefront-
 import { ProductGrid } from '../../../components/product-grid';
 import { Price } from '../../../components/price';
 import { AddToCart } from '../../../components/add-to-cart';
+import { ProductImage } from '../../../components/product-image';
 import { Badge } from '@ventia/ui';
 
 /** Shape of `GET /v1/storefront/products/:slug`'s response (see
@@ -145,23 +146,34 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-8">
         <div className="grid gap-8 md:grid-cols-2">
-          <div className="flex flex-col gap-2">
+          {/* On a phone this is a swipeable strip, on md+ the vertical stack
+              it always was. The stack is what pushed the price, the size
+              picker and "Agregar al carrito" below four full-width photos on
+              mobile — the one screen where almost all of this store's traffic
+              lands, and the one place a shopper decides to buy. Scroll-snap
+              plus a slide narrower than the viewport (the next photo peeks in
+              at the edge) does that with no JavaScript at all, so it costs
+              the tenant nothing in bundle size. */}
+          <div className="-mx-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 md:mx-0 md:flex-col md:overflow-visible md:px-0">
             {product.images.length > 0 ? (
               product.images.map((image, i) => (
-                // Plain <img>, not next/image: storefront has no remote-image
-                // domain config yet, matching product-card.tsx's established
-                // convention.
-                <img
+                <ProductImage
                   key={i}
                   src={image.url}
+                  // The merchant's own alt text when they wrote one; the
+                  // product name is the honest fallback, not a decorative
+                  // empty alt — on a PDP the photo IS the content.
                   alt={image.alt ?? product.name}
-                  className="aspect-square w-full rounded-md bg-muted object-cover"
+                  // The first photo is the largest thing above the fold on
+                  // every product page: lazy-loading it would mean the
+                  // shopper waits for the layout to settle before the browser
+                  // even asks for it.
+                  loading={i === 0 ? 'eager' : 'lazy'}
+                  className="w-[88%] shrink-0 snap-center rounded-md md:w-full"
                 />
               ))
             ) : (
-              // Simple muted placeholder box — no placeholder SVG asset exists
-              // in this codebase yet, out of scope for this task.
-              <div className="aspect-square w-full rounded-md bg-muted" />
+              <ProductImage src={null} alt={product.name} className="w-full shrink-0 rounded-md" />
             )}
           </div>
 

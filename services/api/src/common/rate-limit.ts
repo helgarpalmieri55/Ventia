@@ -132,6 +132,16 @@ function envLimit(name: string, fallback: number): number {
 
 export const RATE_LIMITS = {
   auth: () => envLimit('auth', 60),
+  /** Shopper accounts (`/v1/storefront/account`). Its OWN budget rather than
+   * sharing `auth`, which covers merchant login: the two are different
+   * populations behind different addresses, and a busy storefront exhausting
+   * the bucket would lock a merchant out of their own panel.
+   *
+   * Lower than `auth` because the traffic is genuinely lower — a shopper signs
+   * in once and stays signed in for a month — while the abuse is the same
+   * shape: credential stuffing, and a flood of "email me a link" requests that
+   * this platform PAYS to deliver and that lands in a stranger's inbox. */
+  shopperAuth: () => envLimit('shopper_auth', 20),
   checkout: () => envLimit('checkout', 60),
   agent: () => envLimit('agent', 30),
   webhooks: () => envLimit('webhooks', 600),

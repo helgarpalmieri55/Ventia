@@ -23,3 +23,11 @@ export function formatCOP(cents: number): string {
   const pesos = Math.round(cents / 100);
   return formatter.format(pesos).replaceAll(NBSP, ' ');
 }
+
+/** es-CO count of products for a category tile or menu entry, e.g.
+ * `formatProductCount(1) -> "1 producto"`. Here rather than inline in the page
+ * because "1 productos" is the kind of copy nobody re-reads after writing it,
+ * and a store's home page is the first thing a merchant shows a customer. */
+export function formatProductCount(count: number): string {
+  return count === 1 ? '1 producto' : `${count} productos`;
+}

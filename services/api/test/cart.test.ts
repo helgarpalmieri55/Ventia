@@ -402,3 +402,39 @@ describe('POST /v1/storefront/cart/adopt', () => {
     expect(res.body.error).toBe('VALIDATION_FAILED');
   });
 });
+
+describe('cart lines carry a thumbnail', () => {
+  it('projects the product\'s FIRST image, and null when it has none', async () => {
+    // Without this the cart is the one surface in the store that shows a
+    // shopper only text, at the moment they are deciding whether to pay.
+    // First-by-position, so the same product is not two different photos on
+    // two screens of one purchase.
+    await prisma.productImage.createMany({
+      data: [
+        { tenantId: tenantAId, productId: activeProductId, url: 'https://cdn.example/segunda.jpg', position: 1 },
+        { tenantId: tenantAId, productId: activeProductId, url: 'https://cdn.example/primera.jpg', position: 0 },
+      ],
+    });
+
+    const withImage = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/items')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .send({ productId: activeProductId, qty: 1 });
+    expect(withImage.status).toBe(201);
+    expect(withImage.body.lines[0].imageUrl).toBe('https://cdn.example/primera.jpg');
+
+    const withoutImage = await request(app.getHttpServer())
+      .post('/v1/storefront/cart/items')
+      .set('x-tenant-domain', 'cart-a.ventia.localhost')
+      .set('Cookie', `ventia_cart=${extractCartCookie(withImage)}`)
+      .send({ productId: variantProductId, variantId: variantAId, qty: 1 });
+
+    const line = withoutImage.body.lines.find(
+      (l: { productId: string }) => l.productId === variantProductId,
+    );
+    // `null`, not an empty string or a missing key: the storefront draws its
+    // own placeholder, and it has to be able to tell "no photo" from "field
+    // not sent by an older API".
+    expect(line.imageUrl).toBeNull();
+  });
+});

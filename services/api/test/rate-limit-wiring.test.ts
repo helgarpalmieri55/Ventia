@@ -17,6 +17,10 @@ import { startTestDb } from './helpers';
 process.env.RATE_LIMIT_AUTH_PER_MINUTE = '1';
 process.env.RATE_LIMIT_CHECKOUT_PER_MINUTE = '1';
 process.env.RATE_LIMIT_AGENT_PER_MINUTE = '1';
+// Deliberately DIFFERENT from the auth limit above. If the shopper mount read
+// the merchant budget, its second request would 429 — the tests below pin that
+// it allows two and refuses the third, which only holds with its own counter.
+process.env.RATE_LIMIT_SHOPPER_AUTH_PER_MINUTE = '2';
 process.env.RATE_LIMIT_WEBHOOKS_PER_MINUTE = '1';
 
 let db: Awaited<ReturnType<typeof startTestDb>>;
@@ -66,6 +70,53 @@ describe('rate limiting is wired onto the real routes', () => {
 
     expect(second.status).toBe(429);
     expect(second.body.error).toBe('TOO_MANY_REQUESTS');
+  });
+
+  it('limits /v1/storefront/account', async () => {
+    // Shopper sign-in and the "email me a link" routes. Every attempt costs a
+    // real scrypt hash, and the link routes send mail this platform pays for
+    // to an address the requester does not have to own — unlimited, that is a
+    // way to bill us while spamming a stranger.
+    const server = app.getHttpServer();
+    // Three DIFFERENT addresses, deliberately: the budget is keyed by IP alone,
+    // so trying two hundred addresses from one machine must cost the same as
+    // retrying one. Keying by address would make enumeration free.
+    const from = (email: string) =>
+      request(server)
+        .post('/v1/storefront/account/magic-link')
+        // Its own client address, because the budget is per-IP and the sibling
+        // test below would otherwise be spending this one's.
+        .set('x-forwarded-for', '203.0.113.11')
+        .send({ email });
+
+    await from('a@demo.co');
+    await from('b@demo.co');
+    const third = await from('c@demo.co');
+
+    expect(third.status).toBe(429);
+    expect(third.body.error).toBe('TOO_MANY_REQUESTS');
+  });
+
+  it('does not let shopper traffic exhaust the MERCHANT login budget', async () => {
+    // Separate buckets. Sharing one would mean a busy storefront locking a
+    // merchant out of their own panel, which is an outage caused by success.
+    // The shopper budget is 2 and the merchant budget is 1. If this mount read
+    // `auth`, the SECOND request here would already be refused; it is not.
+    // That difference is the only way to tell one shared counter from two.
+    const server = app.getHttpServer();
+    const from = (email: string) =>
+      request(server)
+        .post('/v1/storefront/account/sign-in')
+        .set('x-forwarded-for', '203.0.113.22')
+        .send({ email, password: 'x' });
+
+    const first = await from('d@demo.co');
+    const second = await from('e@demo.co');
+    const third = await from('f@demo.co');
+
+    expect(first.status).not.toBe(429);
+    expect(second.status).not.toBe(429);
+    expect(third.status).toBe(429);
   });
 
   it('limits /v1/storefront/agent', async () => {

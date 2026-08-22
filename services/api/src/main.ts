@@ -75,6 +75,27 @@ export async function createApp(): Promise<INestApplication> {
     }),
   );
 
+  // Shopper accounts: the same credential-stuffing and email-flood surface as
+  // `/v1/auth` above, for the OTHER population. Two things make it worth its
+  // own mount rather than an afterthought: every sign-in attempt costs a real
+  // scrypt hash (deliberately expensive — see shopper-credentials.ts — which
+  // also makes it an amplification lever), and `magic-link` / `password-reset`
+  // send an email this platform pays for, to an address the requester does not
+  // have to own. Unlimited, that is a way to bill us while spamming a stranger.
+  //
+  // Keyed by IP alone, for the reason `/v1/auth` gives: trying 200 different
+  // addresses from one machine must cost the same budget as retrying one.
+  httpAdapter.use(
+    '/v1/storefront/account',
+    createRateLimiter(redis, {
+      name: 'shopper-auth',
+      limit: RATE_LIMITS.shopperAuth(),
+      windowSeconds: 60,
+      key: clientIp,
+      errorCode: 'TOO_MANY_REQUESTS',
+    }),
+  );
+
   // Checkout: order-creation spam. Each accepted request decrements stock and
   // holds a reservation for 15 minutes, so a flood here is not merely load —
   // it can empty a merchant's sellable inventory without a single payment.
