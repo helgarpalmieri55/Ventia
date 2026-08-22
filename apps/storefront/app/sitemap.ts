@@ -9,6 +9,16 @@ interface StorefrontCategory {
   slug: string;
 }
 
+/** Shape of a `GET /v1/storefront/collections` item — only `slug` is used
+ * here. That endpoint already drops collections with no buyable products, and
+ * that is exactly the set this file wants: an emptied collection still has a
+ * page (it says the promotion ended — see the controller), but submitting it
+ * to a search engine would be asking for a result that shows nothing for sale.
+ */
+interface StorefrontCollectionSummary {
+  slug: string;
+}
+
 /** Shape of a `GET /v1/storefront/products` item — only `slug` is used here,
  * unlike the fuller `ProductCardData` this app's other pages read. */
 interface StorefrontProductSummary {
@@ -78,6 +88,9 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
 
   const categories = (await fetchStorefrontOrNull<StorefrontCategory[]>(tenantHost, '/v1/storefront/categories')) ?? [];
 
+  const collections =
+    (await fetchStorefrontOrNull<StorefrontCollectionSummary[]>(tenantHost, '/v1/storefront/collections')) ?? [];
+
   const productEntries: MetadataRoute.Sitemap = productSlugs.map((slug) => ({
     url: `${origin}/productos/${slug}`,
   }));
@@ -86,5 +99,9 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     url: `${origin}/categorias/${category.slug}`,
   }));
 
-  return [...staticEntries, ...categoryEntries, ...productEntries];
+  const collectionEntries: MetadataRoute.Sitemap = collections.map((collection) => ({
+    url: `${origin}/colecciones/${collection.slug}`,
+  }));
+
+  return [...staticEntries, ...categoryEntries, ...collectionEntries, ...productEntries];
 }
