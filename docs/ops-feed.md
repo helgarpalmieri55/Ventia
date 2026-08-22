@@ -98,6 +98,24 @@ that stopped answering, and only the push distinguishes them.
 }
 ```
 
+### `error` is present only on a failure, and it is filtered
+
+When a dependency is down the object gains an `error` string:
+
+```json
+"database": { "ok": false, "latencyMs": null, "error": "Can't reach database server at db.internal:5432" }
+```
+
+Do not parse it. It is whatever the driver threw, it changes between library
+versions, and `ok` is the field to alert on.
+
+It is passed through the same scrubber the queue feed uses on BullMQ's
+`failedReason` before it leaves the API, so credentials, bearer tokens, hex and
+base64 blobs, email addresses and cédulas are replaced with `[redacted:…]`
+markers. Hostnames and ports are NOT removed — knowing *which* database is
+unreachable is the point of the field. Expect to see redaction markers in the
+text and treat them as normal, not as a bug in this feed.
+
 ### Cost is `null`, never `0`, when it is unknown
 
 Every cost field goes `null` if model prices are not configured, and
