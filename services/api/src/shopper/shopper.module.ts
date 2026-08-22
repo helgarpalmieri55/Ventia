@@ -5,6 +5,8 @@ import { ShopperAuthService } from './shopper-auth.service';
 import { ShopperController } from './shopper.controller';
 import { ShopperSessionGuard } from './shopper-session.guard';
 import { ShopperSessionCleanupWorker } from './shopper-session.worker';
+import { ShopperAddressesService } from './shopper-addresses.service';
+import { ShopperWishlistService } from './shopper-wishlist.service';
 
 /**
  * Shopper accounts (per store — see the `ShopperAccount` model).
@@ -23,7 +25,13 @@ import { ShopperSessionCleanupWorker } from './shopper-session.worker';
 @Module({
   imports: [MailerModule, CheckoutModule],
   controllers: [ShopperController],
-  providers: [ShopperAuthService, ShopperSessionGuard, ShopperSessionCleanupWorker],
-  exports: [ShopperAuthService, ShopperSessionCleanupWorker],
+  providers: [
+    ShopperAuthService,
+    ShopperSessionGuard,
+    ShopperSessionCleanupWorker,
+    ShopperAddressesService,
+    ShopperWishlistService,
+  ],
+  exports: [ShopperAuthService, ShopperSessionCleanupWorker, ShopperAddressesService],
 })
 export class ShopperModule {}

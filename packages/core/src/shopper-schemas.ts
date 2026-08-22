@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { checkoutAddressSchema } from './address-schemas.js';
 
 /**
  * What a shopper may send to the account endpoints (`/v1/storefront/account/*`).
@@ -70,3 +71,39 @@ export type ShopperEmailRequestInput = z.infer<typeof shopperEmailRequestSchema>
 export type ShopperConsumeTokenInput = z.infer<typeof shopperConsumeTokenSchema>;
 export type ShopperPasswordResetInput = z.infer<typeof shopperPasswordResetSchema>;
 export type ShopperProfileUpdateInput = z.infer<typeof shopperProfileUpdateSchema>;
+
+/**
+ * A saved address.
+ *
+ * The address itself is `checkoutAddressSchema` — the SAME shape checkout
+ * validates and `Order.shippingAddress` stores. Defining a second, slightly
+ * different Colombian address here would mean two schemas kept in step by
+ * hand, and the one that drifts is always the one checkout does not read.
+ * Reusing it also means a saved address is, by construction, one that can be
+ * checked out with.
+ */
+export const shopperAddressCreateSchema = z.object({
+  /** What the shopper calls it — "Casa", "Oficina". Optional: most people have
+   * one address, and making them name it is a chore at the wrong moment. */
+  label: z.string().trim().min(1).max(60).optional(),
+  address: checkoutAddressSchema,
+  /** Ask for it to become the default. The FIRST address a shopper saves
+   * becomes the default regardless — see `ShopperAddressesService`. */
+  isDefault: z.boolean().optional(),
+});
+
+/** Editing one. `address` is replaced wholesale rather than merged: a partial
+ * address merge can produce a municipio that no longer belongs to its
+ * departamento, which is exactly what `checkoutAddressSchema`'s cross-field
+ * refinement exists to prevent — and a merge would slip past it by validating
+ * only the half that changed. */
+export const shopperAddressUpdateSchema = z.object({
+  label: z.string().trim().min(1).max(60).nullable().optional(),
+  address: checkoutAddressSchema.optional(),
+});
+
+export const wishlistAddSchema = z.object({ productId: z.string().uuid() });
+
+export type ShopperAddressCreateInput = z.infer<typeof shopperAddressCreateSchema>;
+export type ShopperAddressUpdateInput = z.infer<typeof shopperAddressUpdateSchema>;
+export type WishlistAddInput = z.infer<typeof wishlistAddSchema>;

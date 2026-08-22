@@ -1,4 +1,18 @@
-import { Body, Controller, Get, HttpCode, HttpException, Inject, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpException,
+  Inject,
+  Param,
+  Patch,
+  Post,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { tenantDb } from '@ventia/db';
 import {
@@ -8,6 +22,9 @@ import {
   shopperProfileUpdateSchema,
   shopperRegisterSchema,
   shopperSignInSchema,
+  shopperAddressCreateSchema,
+  shopperAddressUpdateSchema,
+  wishlistAddSchema,
 } from '@ventia/core';
 import { parseOr400 } from '../catalog/parse';
 import { PublicTenantGuard } from '../storefront/public-tenant.guard';
@@ -16,6 +33,9 @@ import { tenantStorefrontBaseUrl } from '../tenants/tenant-public-url';
 import { CartService } from '../checkout/cart.service';
 import { ShopperAuthService, type IssuedSession, type ShopperIdentity } from './shopper-auth.service';
 import { SHOPPER_COOKIE_NAME, Shopper, ShopperSessionGuard, readShopperCookie } from './shopper-session.guard';
+import { ShopperAddressesService } from './shopper-addresses.service';
+import { ShopperWishlistService } from './shopper-wishlist.service';
+import { assertUuidOr404 } from '../catalog/uuid';
 
 /** The cart cookie, read here so signing in can merge the basket the browser
  * is holding. Same name the cart controller sets — one constant would be
@@ -50,6 +70,8 @@ export class ShopperController {
   constructor(
     @Inject(ShopperAuthService) private readonly auth: ShopperAuthService,
     @Inject(CartService) private readonly carts: CartService,
+    @Inject(ShopperAddressesService) private readonly addresses: ShopperAddressesService,
+    @Inject(ShopperWishlistService) private readonly wishlist: ShopperWishlistService,
   ) {}
 
   /**
@@ -219,6 +241,104 @@ export class ShopperController {
       },
     });
     return { orders };
+  }
+
+  // ---- saved addresses ---------------------------------------------------
+  //
+  // Every one of these passes the account id from the RESOLVED SESSION into
+  // the service, never an id from the request. RLS isolates by tenant, and two
+  // shoppers of the same store are the same tenant — so that argument is the
+  // only thing keeping one shopper out of another's home address.
+
+  @Get('addresses')
+  @UseGuards(ShopperSessionGuard)
+  async listAddresses(@StorefrontTenantId() tenantId: string, @Shopper() shopper: ShopperIdentity) {
+    return { addresses: await this.addresses.list(tenantId, shopper.accountId) };
+  }
+
+  @Post('addresses')
+  @UseGuards(ShopperSessionGuard)
+  @HttpCode(201)
+  async createAddress(
+    @StorefrontTenantId() tenantId: string,
+    @Shopper() shopper: ShopperIdentity,
+    @Body() body: unknown,
+  ) {
+    const input = parseOr400(shopperAddressCreateSchema, body);
+    return this.addresses.create(tenantId, shopper.accountId, input);
+  }
+
+  @Patch('addresses/:id')
+  @UseGuards(ShopperSessionGuard)
+  async updateAddress(
+    @StorefrontTenantId() tenantId: string,
+    @Shopper() shopper: ShopperIdentity,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    assertUuidOr404(id);
+    const input = parseOr400(shopperAddressUpdateSchema, body);
+    return this.addresses.update(tenantId, shopper.accountId, id, input);
+  }
+
+  /** 200, not Nest's POST default of 201: this promotes an address that
+   * already exists and creates nothing. */
+  @Post('addresses/:id/default')
+  @UseGuards(ShopperSessionGuard)
+  @HttpCode(200)
+  async setDefaultAddress(
+    @StorefrontTenantId() tenantId: string,
+    @Shopper() shopper: ShopperIdentity,
+    @Param('id') id: string,
+  ) {
+    assertUuidOr404(id);
+    return this.addresses.setDefault(tenantId, shopper.accountId, id);
+  }
+
+  @Delete('addresses/:id')
+  @UseGuards(ShopperSessionGuard)
+  @HttpCode(204)
+  async removeAddress(
+    @StorefrontTenantId() tenantId: string,
+    @Shopper() shopper: ShopperIdentity,
+    @Param('id') id: string,
+  ): Promise<void> {
+    assertUuidOr404(id);
+    await this.addresses.remove(tenantId, shopper.accountId, id);
+  }
+
+  // ---- wishlist -----------------------------------------------------------
+
+  @Get('wishlist')
+  @UseGuards(ShopperSessionGuard)
+  async listWishlist(@StorefrontTenantId() tenantId: string, @Shopper() shopper: ShopperIdentity) {
+    return { items: await this.wishlist.list(tenantId, shopper.accountId) };
+  }
+
+  /** 204 whether or not it was already saved. A shopper double-tapping a heart
+   * did nothing wrong, and a 409 would make the UI explain a non-problem. */
+  @Post('wishlist')
+  @UseGuards(ShopperSessionGuard)
+  @HttpCode(204)
+  async addToWishlist(
+    @StorefrontTenantId() tenantId: string,
+    @Shopper() shopper: ShopperIdentity,
+    @Body() body: unknown,
+  ): Promise<void> {
+    const input = parseOr400(wishlistAddSchema, body);
+    await this.wishlist.add(tenantId, shopper.accountId, input.productId);
+  }
+
+  @Delete('wishlist/:productId')
+  @UseGuards(ShopperSessionGuard)
+  @HttpCode(204)
+  async removeFromWishlist(
+    @StorefrontTenantId() tenantId: string,
+    @Shopper() shopper: ShopperIdentity,
+    @Param('productId') productId: string,
+  ): Promise<void> {
+    assertUuidOr404(productId);
+    await this.wishlist.remove(tenantId, shopper.accountId, productId);
   }
 
   /**
