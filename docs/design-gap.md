@@ -161,9 +161,12 @@ si esto entra en el plan básico o es lo que justifica un plan superior.
 
 No por tamaño, sino por lo que desbloquea a lo demás:
 
-1. **Decidir cuentas de comprador** (§4) — completas, versión por teléfono, o
-   invitado como hoy. Bloquea lista de deseos, direcciones guardadas y parte
-   del checkout.
+1. ~~**Decidir cuentas de comprador**~~ **Decidido y construido**: cuentas
+   completas, una por tienda, con contraseña y enlace mágico. Entrar no cuesta
+   el carrito, y el checkout de invitado sigue existiendo — una cuenta es una
+   oferta, no un peaje. Ver `docs/shopper-accounts.md`. Quedan pendientes las
+   dos cosas que la decisión desbloqueó y que aún no tienen modelo: direcciones
+   guardadas y lista de deseos.
 2. ~~**`CartSource` + tiempo de entrega + categorías anidadas.**~~ **Hecho**
    (`edf3b48`), en una sola migración. Con un matiz sobre lo que decía este
    documento: `CartSource` no se tocó. Ya respondía QUIÉN armó el carrito y es
@@ -171,14 +174,23 @@ No por tamaño, sino por lo que desbloquea a lo demás:
    estaba el comprador, que ahora es `SalesChannel`, una columna aparte en
    `Cart` y en `Order`. Un pedido que el agente cerró por WhatsApp es las dos
    cosas a la vez.
-3. **La capa de temas** (`product.md` §4), porque el hero, la franja y las
-   insignias del diseño no tienen dónde vivir hasta que exista.
+3. ~~**La capa de temas**~~ **Hecha a nivel de tokens**: cinco presets
+   elegidos por "¿qué vendes?", guardados como `presetId` + overrides escasos
+   para que mejorar un preset más adelante no pise lo que el comerciante
+   cambió. Lo que NO trae todavía es estructura: el hero, la franja y las
+   insignias siguen sin dónde vivir, porque eso es maquetación por preset y no
+   tokens. La forma guardada ya es la que va a cargarla cuando exista.
 4. **`GET /dashboard`** con lo derivable. Da el tablero sin tiempo real.
 5. **Reseñas y colecciones**, que son lo que hace que la tienda se vea como el
    diseño con catálogo real.
 6. **`POST /ai/command`**, decidiendo antes su presupuesto y su plan.
 7. **Tiempo real, Analítica, Finanzas, Addi, cupones** — cada uno con su propia
    discusión.
+
+También hecho, de la lista de "elija lo que elija" (`product.md` §5): las fotos
+de producto, el pie de página y la navegación por categorías en el encabezado.
+Quedan de esa lista el checkout en un solo tramo y las imágenes rotas, que
+necesitan validación en la carga.
 
 ### Fuera de esta lista, ya hecho
 
