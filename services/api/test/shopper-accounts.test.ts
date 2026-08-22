@@ -418,3 +418,105 @@ describe('sign-out', () => {
     expect((await post('/sign-out', {})).status).toBe(204);
   });
 });
+
+describe('PATCH /me', () => {
+  /** A signed-in shopper at DOMAIN, and the cookie jar for their session. */
+  async function signedInShopper(local: string) {
+    const email = `${local}-${RUN}@example.com`;
+    await post('/register', { email, password: PASSWORD, name: 'Nombre viejo' });
+    const res = await post('/sign-in', { email, password: PASSWORD });
+    return { email, cookie: res.headers['set-cookie'] as unknown as string[] };
+  }
+
+  function patchMe(cookie: string[], body: unknown, domain = DOMAIN) {
+    return request(app.getHttpServer())
+      .patch('/v1/storefront/account/me')
+      .set('x-tenant-domain', domain)
+      .set('Cookie', cookie)
+      .send(body);
+  }
+
+  it('renames the account and answers with the updated profile', async () => {
+    const { cookie } = await signedInShopper('perfil-ok');
+
+    const res = await patchMe(cookie, { name: 'Nombre nuevo' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Nombre nuevo');
+    // And it persisted, rather than only being echoed back.
+    const me = await request(app.getHttpServer())
+      .get('/v1/storefront/account/me')
+      .set('x-tenant-domain', DOMAIN)
+      .set('Cookie', cookie);
+    expect(me.body.name).toBe('Nombre nuevo');
+  });
+
+  it('clears the name when it is sent as null, and leaves it alone when absent', async () => {
+    const { cookie } = await signedInShopper('perfil-null');
+
+    expect((await patchMe(cookie, { name: null })).body.name).toBeNull();
+    // An empty body is a no-op, NOT a clear: `name === undefined` writes
+    // nothing. The distinction matters because a form that only submits
+    // changed fields sends `{}` for "I changed nothing".
+    await patchMe(cookie, { name: 'Carmen' });
+    expect((await patchMe(cookie, {})).body.name).toBe('Carmen');
+  });
+
+  it('rejects a name past the schema bound rather than truncating it', async () => {
+    const { cookie } = await signedInShopper('perfil-largo');
+    expect((await patchMe(cookie, { name: 'x'.repeat(121) })).status).toBe(400);
+    // Whitespace-only trims to empty, which the schema's `min(1)` refuses —
+    // otherwise a review would be signed by a blank author.
+    expect((await patchMe(cookie, { name: '   ' })).status).toBe(400);
+  });
+
+  it('needs a session', async () => {
+    expect((await patchMe([], { name: 'Nadie' })).status).toBe(401);
+  });
+
+  /**
+   * The reason `tenantId` is in the WHERE of the update and not a check on the
+   * row that comes back.
+   *
+   * A session issued by one store, presented at another, must not reach the
+   * account at all. `ShopperSessionGuard` is the first line and refuses it here
+   * — but this asserts the OUTCOME (the name at the first store is untouched),
+   * so the test still fails if a future refactor loosens the guard and leaves
+   * the service as the only thing scoping the write.
+   */
+  it('cannot be used to rename an account through another store', async () => {
+    const { cookie } = await signedInShopper('perfil-cruzado');
+    await patchMe(cookie, { name: 'Original' });
+
+    const cross = await patchMe(cookie, { name: 'Secuestrado' }, OTHER_DOMAIN);
+    expect(cross.status).toBe(401);
+
+    const me = await request(app.getHttpServer())
+      .get('/v1/storefront/account/me')
+      .set('x-tenant-domain', DOMAIN)
+      .set('Cookie', cookie);
+    expect(me.body.name).toBe('Original');
+  });
+
+  /**
+   * The same property, asserted one layer down.
+   *
+   * The HTTP test above passes whether or not the service filters by tenant,
+   * because the guard answers 401 first — which makes it a test of the guard,
+   * not of the write. This calls the service directly with a mismatched tenant,
+   * so the `tenantId` in the update's WHERE is the only thing that can refuse
+   * it. Delete that filter and this test fails; delete the guard and the test
+   * above passes anyway. Both layers need their own.
+   */
+  it('refuses a mismatched tenant at the service, not only at the guard', async () => {
+    const { email } = await signedInShopper('perfil-servicio');
+    const account = await prisma.shopperAccount.findFirstOrThrow({ where: { tenantId, email } });
+    const { ShopperAuthService } = await import('../src/shopper/shopper-auth.service');
+    const auth = app.get(ShopperAuthService);
+
+    await expect(auth.updateProfile(otherTenantId, account.id, 'Secuestrado')).rejects.toThrow();
+
+    const after = await prisma.shopperAccount.findUniqueOrThrow({ where: { id: account.id } });
+    expect(after.name).toBe('Nombre viejo');
+  });
+});

@@ -152,3 +152,57 @@ describe('PATCH /api/account/me', () => {
     expect(init.body).toBe('{"name":"Ana"}');
   });
 });
+
+describe('path confinement', () => {
+  /**
+   * The prefix in `proxy()` looks like it confines this route to the account
+   * module. It does not: `fetch` resolves `..` in the joined URL, so
+   * `/v1/storefront/account` + `../../../v1/admin/tenants` IS a request to
+   * `/v1/admin/tenants` — forwarded with the browser's cookies and a
+   * caller-chosen `x-tenant-domain`. `isSafeProxyPath` is what confines it.
+   *
+   * Asserting `upstream` was never called, rather than only the 404: the point
+   * is that the request does not REACH the API, not that this handler ends up
+   * answering 404 either way.
+   */
+  it('never forwards a path that escapes the account prefix', async () => {
+    const { GET } = await loadRoute();
+    const req = new Request('http://tienda.ventia.localhost/api/account/x', {
+      headers: { host: 'tienda.ventia.localhost', cookie: 'ventia_shopper=s' },
+    });
+
+    const res = await GET(req, { params: Promise.resolve({ path: ['..', '..', '..', 'v1', 'admin', 'tenants'] }) });
+
+    expect(res.status).toBe(404);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('refuses a segment carrying a separator or a query', async () => {
+    const { POST } = await loadRoute();
+    const make = (path: string[]) =>
+      POST(
+        new Request('http://tienda.ventia.localhost/api/account/x', {
+          method: 'POST',
+          headers: { host: 'tienda.ventia.localhost' },
+          body: '{}',
+        }),
+        { params: Promise.resolve({ path }) },
+      );
+
+    expect((await make(['a/b'])).status).toBe(404);
+    expect((await make(['%2e%2e'])).status).toBe(404);
+    expect((await make(['me?x=1'])).status).toBe(404);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('still forwards the real endpoints', async () => {
+    upstream.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const { GET } = await loadRoute();
+    const req = new Request('http://tienda.ventia.localhost/api/account/me', {
+      headers: { host: 'tienda.ventia.localhost' },
+    });
+
+    expect((await GET(req, { params: Promise.resolve({ path: ['me'] }) })).status).toBe(200);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+});

@@ -19,9 +19,15 @@
  * needs it to resolve which guest's cart to check out.
  */
 
+import { isSafeProxyPath } from '../../../../lib/proxy-path';
+
 const API_URL = process.env.API_INTERNAL_URL ?? 'http://localhost:4000';
 
 async function proxy(req: Request, path: string[] | undefined): Promise<Response> {
+  // A path that is not one this app builds never reaches the API. See
+  // `lib/proxy-path.ts`: `fetch` resolves `..` in the joined URL, so without
+  // this the fixed prefix above confines the proxy to nothing.
+  if (!isSafeProxyPath(path)) return new Response(null, { status: 404 });
   const host = req.headers.get('host') ?? '';
   const cookie = req.headers.get('cookie');
   const url = new URL(req.url);

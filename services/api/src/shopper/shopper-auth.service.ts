@@ -257,19 +257,28 @@ export class ShopperAuthService {
     await platformDb.shopperSession.deleteMany({ where: { tenantId, tokenHash: hashSecret(secret) } });
   }
 
-  /** The shopper's own profile edits. Narrow on purpose: email changes need a
-   * verification round-trip and are not built yet. */
+  /**
+   * The shopper's own profile edits. Narrow on purpose: email changes need a
+   * verification round-trip and are not built yet.
+   *
+   * `tenantId` is part of the WHERE rather than a check on the returned row.
+   * This runs on `platformDb`, which is not subject to RLS, so the filter is
+   * the only thing scoping the write — and the previous shape (update by id,
+   * then compare `updated.tenantId`) checked AFTER the row had already been
+   * written. A mismatch would have thrown, correctly, on a name that was by
+   * then persisted to another store's account. `accountId` always comes from a
+   * resolved session so neither version is reachable today; the difference is
+   * which one stays harmless if that ever stops being true.
+   *
+   * A miss is P2025 from Prisma, which the controller surfaces as a 500 — the
+   * honest answer, since a session resolved against this tenant naming an
+   * account that is not this tenant's is a broken invariant, not a bad request.
+   */
   async updateProfile(tenantId: string, accountId: string, name: string | null | undefined): Promise<ShopperIdentity> {
     const updated = await platformDb.shopperAccount.update({
-      where: { id: accountId },
+      where: { id: accountId, tenantId },
       data: name === undefined ? {} : { name },
     });
-    if (updated.tenantId !== tenantId) {
-      // Defence in depth. `accountId` always comes from a resolved session, so
-      // this cannot happen today; if it ever does, it is a cross-tenant write
-      // and must be loud rather than silent.
-      throw new Error('shopper account does not belong to this tenant');
-    }
     return toIdentity(updated);
   }
 
