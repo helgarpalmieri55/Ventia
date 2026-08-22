@@ -5,6 +5,7 @@ import { AdminModule } from './admin/admin.module';
 import { AgentModule } from './agent/agent.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { CheckoutModule } from './checkout/checkout.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { HealthController } from './health/health.controller';
 import { ObservabilityModule } from './observability/observability.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
@@ -36,6 +37,7 @@ export { REDIS_CLIENT };
     AgentModule,
     CatalogModule,
     CheckoutModule,
+    DashboardModule,
     ObservabilityModule,
     OnboardingModule,
     OpsModule,

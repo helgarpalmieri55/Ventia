@@ -16,3 +16,4 @@ export * from './platform-schemas.js';
 export * from './privacy-schemas.js';
 export * from './impersonation-schemas.js';
 export * from './shopper-schemas.js';
+export * from './dashboard-schemas.js';
