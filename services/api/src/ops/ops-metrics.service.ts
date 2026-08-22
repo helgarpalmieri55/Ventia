@@ -3,6 +3,7 @@ import { platformDb } from '@ventia/db';
 import { currentYearMonth } from '../agent/agent-budget.service';
 import { agentPricing, microUsdToCents } from '../agent/agent-pricing';
 import { QueueHealthService, type QueueHealthReport } from '../observability/queue-health.service';
+import { scrubString } from '../observability/scrub';
 
 /**
  * One snapshot of what the platform is costing and whether it is healthy,
@@ -315,9 +316,30 @@ function groupOrders(
   return byTenant;
 }
 
-/** Error text without leaking a stack into a payload that crosses the network. */
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/**
+ * Error text for a payload that crosses the network.
+ *
+ * The stack is dropped, and what is left goes through `scrub.ts`'s
+ * `scrubString` — the same treatment `queue-health.service.ts` gives BullMQ's
+ * `failedReason`, and for the same reason: this is an error message written by
+ * whatever threw, read by an operator over HTTP, and nobody chose what it
+ * says. A driver that interpolates a connection URL, a Redis client quoting
+ * the command it failed on, an exception carrying a shopper's address — all of
+ * them reach the OPS receiver, and the push transport sends them to a
+ * configured URL without anyone reading them first.
+ *
+ * `scrubString` does not hide a hostname, and is not meant to: an operator
+ * diagnosing "database unreachable" needs to know WHICH one. What it takes out
+ * is the class of thing that has no business leaving this process at all —
+ * credentials, tokens, hex and base64 blobs, emails, cédulas.
+ *
+ * Exported for its own test, the way `ops-token.guard.ts` exports
+ * `configuredToken` / `bearerToken` / `constantTimeEquals`: reaching this
+ * through `snapshot()` would mean making a live Postgres connection fail on
+ * demand to assert one string transform.
+ */
+export function message(error: unknown): string {
+  return scrubString(error instanceof Error ? error.message : String(error));
 }
 
 interface TenantRow {

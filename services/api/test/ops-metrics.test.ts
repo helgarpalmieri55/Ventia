@@ -233,3 +233,35 @@ describe('GET /v1/ops/metrics — platform', () => {
     expect(res.body.platform.tenants.live).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe('dependency error text leaving this process', () => {
+  it('scrubs what has no business crossing the network, and keeps what an operator needs', async () => {
+    const { message } = await import('../src/ops/ops-metrics.service');
+
+    // A driver that quotes the URL it failed to connect with. The host and
+    // port stay — "which database is down" is the whole point of the field —
+    // and the credential does not.
+    const withToken = message(new Error('connect failed: Authorization: Bearer abcdef0123456789abcdef0123456789'));
+    expect(withToken).not.toContain('abcdef0123456789abcdef0123456789');
+
+    // An exception that interpolated a shopper into its text. This payload is
+    // POSTed to a configured URL with nobody reading it first.
+    const withPii = message(new Error('row for ana@example.com (cédula 1020345678) failed'));
+    expect(withPii).not.toContain('ana@example.com');
+    expect(withPii).not.toContain('1020345678');
+
+    // Still useful: the operator can tell which dependency and why.
+    const plain = message(new Error("Can't reach database server at db.internal:5432"));
+    expect(plain).toContain('db.internal');
+    expect(plain).toContain("Can't reach database server");
+  });
+
+  it('handles a thrown non-Error without losing it', () => {
+    // Deliberately not `String(error)` of an Error — a rejected promise can
+    // carry anything.
+    return import('../src/ops/ops-metrics.service').then(({ message }) => {
+      expect(message('redis timeout')).toBe('redis timeout');
+      expect(message(undefined)).toBe('undefined');
+    });
+  });
+});

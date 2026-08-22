@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { fetchTenantForHost } from '../../../lib/tenant';
+import { jsonLdScript } from '../../../lib/json-ld';
 import { fetchStorefront, fetchStorefrontOrNull } from '../../../lib/storefront-api';
 import { ProductGrid } from '../../../components/product-grid';
 import { Price } from '../../../components/price';
@@ -165,10 +166,13 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
 
   return (
     <>
-      {/* Standard/only way to emit JSON-LD in the App Router — safe here
-          since the payload is server-generated structured data from our own
-          API, not raw user input rendered as HTML. */}
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+      {/* Standard/only way to emit JSON-LD in the App Router. `jsonLdScript`
+          and not bare `JSON.stringify`: the name and the description below are
+          text a merchant typed — or that arrived in a CSV from a supplier —
+          and `JSON.stringify` does not escape `<`, so a `</script>` in either
+          would close this tag and turn the rest into markup. See
+          lib/json-ld.ts. */}
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdScript(jsonLd) }} />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-8">
         <div className="grid gap-8 md:grid-cols-2">
           {/* On a phone this is a swipeable strip, on md+ the vertical stack
