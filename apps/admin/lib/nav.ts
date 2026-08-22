@@ -5,6 +5,7 @@ import { ASSISTANT_PATH } from './assistant-api';
 import { COLLECTIONS_PATH } from './collections-api';
 import { REVIEWS_PATH } from './reviews-api';
 import { ALERTS_PATH } from './payment-alerts-api';
+import { CONSUMO_PATH } from './agent-usage-api';
 
 export type Role = 'owner' | 'staff';
 
@@ -67,6 +68,30 @@ const CATALOG_ITEMS: NavItem[] = [
   // all — so gating the summary would hide nothing a staff member cannot
   // already read.
   { href: ASSISTANT_PATH, label: 'Asistente' },
+  // Both roles, mirroring the API: `GET /v1/admin/agent/usage` sits behind
+  // AdminSessionGuard with no @Roles(), like the dashboard — it carries no
+  // credentials and no customer data, and the staff member watching the
+  // assistant go quiet mid-shift is the one who needs to read "tus clientes
+  // siguen atendidos" without going to find the owner.
+  //
+  // Its own item rather than a Configuración tab, and rather than a section of
+  // Asistente. Two reasons, both consequences of the switch to weighted
+  // credits with billed overage:
+  //
+  //  - The state that now costs the merchant money — overage — has NO symptom.
+  //    The agent keeps answering, so nothing prompts them to go looking. The
+  //    old panel, owner-only and three clicks into Configuración, was findable
+  //    only by someone who already suspected. A number that can grow a bill
+  //    needs a permanent route with the merchant's own word on it, the same
+  //    reasoning that got "Pagos por revisar" and "Dominios" their own items.
+  //  - Asistente is where questions are ASKED, and each one costs two credits.
+  //    Putting the meter behind the action that consumes it is a trap, and the
+  //    merchant who most needs this page is the one whose assistant has just
+  //    stopped answering them.
+  //
+  // Directly after Asistente, because "¿cuánto llevo gastado?" is the question
+  // that follows using it.
+  { href: CONSUMO_PATH, label: 'Consumo de IA' },
 ];
 
 /** Owner-only items — the server mirrors this with @Roles('owner') on the

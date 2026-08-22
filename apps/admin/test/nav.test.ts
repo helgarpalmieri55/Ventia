@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { navItems } from '../lib/nav';
 
 describe('navItems', () => {
-  it('gives owners all 14 items in order, with es-CO labels', () => {
+  it('gives owners all 15 items in order, with es-CO labels', () => {
     const items = navItems('owner');
 
-    expect(items).toHaveLength(14);
+    expect(items).toHaveLength(15);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
@@ -20,6 +20,7 @@ describe('navItems', () => {
       'Conversaciones',
       'Reseñas',
       'Asistente',
+      'Consumo de IA',
       'Equipo',
       'Configuración',
       'Dominios',
@@ -27,10 +28,10 @@ describe('navItems', () => {
     ]);
   });
 
-  it('gives staff only the 10 catalog items', () => {
+  it('gives staff only the 11 catalog items', () => {
     const items = navItems('staff');
 
-    expect(items).toHaveLength(10);
+    expect(items).toHaveLength(11);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
@@ -45,6 +46,9 @@ describe('navItems', () => {
       'Reseñas',
       // Both roles, mirroring /v1/admin/ai/command, which is not owner-only.
       'Asistente',
+      // Both roles, mirroring GET /v1/admin/agent/usage, which is not
+      // owner-only either.
+      'Consumo de IA',
     ]);
   });
 
@@ -87,6 +91,26 @@ describe('navItems', () => {
     // /v1/admin/domains`), so a link would only ever lead to an error page.
     expect(navItems('owner').some((item) => item.href === '/dominios')).toBe(true);
     expect(navItems('staff').some((item) => item.href === '/dominios')).toBe(false);
+  });
+
+  it("gives both roles /consumo, mirroring the usage endpoint's owner-or-staff guard", () => {
+    // AgentAdminController is AdminSessionGuard with no @Roles(). The page is
+    // also the one that explains why the merchant's assistant went quiet while
+    // the storefront kept selling — the person on shift when that happens
+    // should not have to go find the owner to be told the store is fine.
+    expect(navItems('owner').some((item) => item.href === '/consumo')).toBe(true);
+    expect(navItems('staff').some((item) => item.href === '/consumo')).toBe(true);
+  });
+
+  it('puts /consumo immediately after /asistente, not inside Configuración', () => {
+    // Overage is billed rather than refused, so the state that costs the
+    // merchant money has no symptom at all: nothing prompts them to go
+    // looking. Buried in an owner-only settings tab it was findable only by a
+    // merchant who already suspected. And it deliberately does not live INSIDE
+    // Asistente, where every question costs two credits — putting the meter
+    // behind the action that spends it is a trap.
+    const hrefs = navItems('owner').map((item) => item.href);
+    expect(hrefs.indexOf('/consumo')).toBe(hrefs.indexOf('/asistente') + 1);
   });
 
   it('every item has a distinct href', () => {

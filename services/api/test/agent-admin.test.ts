@@ -16,6 +16,10 @@ let redisContainer: StartedTestContainer;
 let app: INestApplication;
 let signUpWithTenant: typeof SignUpWithTenant;
 let platformDb: PrismaClientType;
+// Imported inside `beforeAll` rather than at the top of the file: the module
+// pulls in `@ventia/db`, which constructs a PrismaClient at import time, and
+// DATABASE_URL is not pointed at the test container until below.
+let splitTurns: typeof import('../src/agent/agent-admin.controller').splitTurns;
 
 function thisMonth(): string {
   const now = new Date();
@@ -39,6 +43,7 @@ beforeAll(async () => {
 
   ({ signUpWithTenant } = await import('./admin-helpers'));
   ({ platformDb } = await import('@ventia/db'));
+  ({ splitTurns } = await import('../src/agent/agent-admin.controller'));
 }, 180_000);
 
 afterAll(async () => {
@@ -144,7 +149,149 @@ describe('GET /v1/admin/agent/usage', () => {
     expect(res.status).toBe(200);
     expect(res.body.month).toBe(thisMonth());
     expect(res.body.messages).toMatchObject({ used: 0, limit: 100, warning: false, allowed: true });
+    expect(res.body.credits).toMatchObject({
+      used: 0,
+      limit: 100,
+      remaining: 100,
+      overage: 0,
+      // Three times the allowance — where the agent really does stop.
+      ceiling: 300,
+      warning: false,
+      allowed: true,
+      percentUsed: 0,
+    });
     expect(res.body.assistedSales).toMatchObject({ orders: 0, revenueCents: 0 });
+  });
+
+  it('reports the overage and the ceiling a merchant is now spending against', async () => {
+    // The whole reason this endpoint grew a `credits` block: reaching the
+    // allowance bills rather than refuses, so a merchant can spend money the
+    // old `messages` shape had no word for.
+    const { cookie, tenantId } = await signUpWithTenant('agent-usage-overage@demo.co', 'owner');
+    await platformDb.tenantLimits.upsert({
+      where: { tenantId },
+      create: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2 },
+      update: { aiCreditsMonth: 100 },
+    });
+    await platformDb.agentUsage.create({
+      data: { tenantId, month: thisMonth(), messagesCount: 130, creditsUsed: 130 },
+    });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+
+    expect(res.body.credits).toMatchObject({
+      used: 130,
+      limit: 100,
+      overage: 30,
+      ceiling: 300,
+      ceilingMultiplier: 3,
+      // Still answering. This is the assertion that says the store is not
+      // silent, and it is the one the screen's copy rests on.
+      allowed: true,
+      // Over 100 on purpose — a busy store legitimately reads 130%.
+      percentUsed: 130,
+    });
+    // Clamped, not negative: "te quedan -30" is not a sentence.
+    expect(res.body.credits.remaining).toBe(0);
+  });
+
+  it('splits the month into shopper turns and merchant questions', async () => {
+    // 100 turns costing 120 credits can only be 80 shopper turns and 20
+    // merchant questions — a merchant question costs two credits and one turn.
+    const { cookie, tenantId } = await signUpWithTenant('agent-usage-split@demo.co', 'owner');
+    await platformDb.tenantLimits.upsert({
+      where: { tenantId },
+      create: { tenantId, productsMax: 100, aiCreditsMonth: 500, staffSeats: 2 },
+      update: { aiCreditsMonth: 500 },
+    });
+    await platformDb.agentUsage.create({
+      data: { tenantId, month: thisMonth(), messagesCount: 100, creditsUsed: 120 },
+    });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+
+    expect(res.body.credits.breakdown).toEqual({ shopperTurns: 80, merchantQueries: 20 });
+    expect(res.body.credits.cost).toEqual({ shopperMessage: 1, merchantQuery: 2 });
+    // The breakdown, priced, has to come back to the credits the budget
+    // charged — otherwise the screen explains a different month.
+    const { shopperTurns, merchantQueries } = res.body.credits.breakdown;
+    expect(shopperTurns * 1 + merchantQueries * 2).toBe(res.body.credits.used);
+  });
+
+  it('reports the shopper reserve the merchant assistant refuses against', async () => {
+    // The merchant's assistant stops at cupo - 20% while the storefront keeps
+    // the whole allowance. Reported here because it is otherwise invisible:
+    // the merchant watches their assistant refuse with credits plainly left
+    // and concludes the store is broken.
+    const { cookie, tenantId } = await signUpWithTenant('agent-usage-reserve@demo.co', 'owner');
+    await platformDb.tenantLimits.upsert({
+      where: { tenantId },
+      create: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2 },
+      update: { aiCreditsMonth: 100 },
+    });
+    await platformDb.agentUsage.create({
+      data: { tenantId, month: thisMonth(), messagesCount: 85, creditsUsed: 85 },
+    });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+
+    expect(res.body.credits.merchantAssistant).toEqual({
+      reserve: 20,
+      remaining: 0,
+      pausedReason: 'shopper_reserve',
+    });
+    // And the storefront is emphatically still answering.
+    expect(res.body.credits.allowed).toBe(true);
+    expect(res.body.credits.remaining).toBe(15);
+  });
+
+  it('calls the assistant exhausted, not reserved, once the whole allowance is gone', async () => {
+    // Different situations with different remedies: telling a merchant "lo
+    // estoy guardando para tus clientes" once there is nothing to guard would
+    // be a lie they could check.
+    const { cookie, tenantId } = await signUpWithTenant('agent-usage-exhausted@demo.co', 'owner');
+    await platformDb.tenantLimits.upsert({
+      where: { tenantId },
+      create: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2 },
+      update: { aiCreditsMonth: 100 },
+    });
+    await platformDb.agentUsage.create({
+      data: { tenantId, month: thisMonth(), messagesCount: 120, creditsUsed: 120 },
+    });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+
+    expect(res.body.credits.merchantAssistant.pausedReason).toBe('exhausted');
+  });
+
+  it('reports a zero allowance for an unprovisioned store, not an unlimited one', async () => {
+    // No TenantLimits row: AgentBudgetService enforces that as no agent at
+    // all, and `percentUsed` is null rather than 0 so the UI cannot render it
+    // as "0% usado, vas bien".
+    const { cookie } = await signUpWithTenant('agent-usage-noplan@demo.co', 'owner');
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+
+    expect(res.body.credits).toMatchObject({ limit: 0, ceiling: 0, percentUsed: null, allowed: false });
+  });
+
+  it('keeps the deprecated `messages` block in agreement with `credits`', async () => {
+    // Kept so no client blanks out mid-deploy. It must never disagree with
+    // the block that replaced it.
+    const { cookie, tenantId } = await signUpWithTenant('agent-usage-compat@demo.co', 'owner');
+    await platformDb.tenantLimits.upsert({
+      where: { tenantId },
+      create: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2 },
+      update: { aiCreditsMonth: 100 },
+    });
+    await platformDb.agentUsage.create({
+      data: { tenantId, month: thisMonth(), messagesCount: 90, creditsUsed: 95 },
+    });
+
+    const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+
+    const { used, limit, warning, allowed } = res.body.credits;
+    expect(res.body.messages).toEqual({ used, limit, warning, allowed });
   });
 
   it('warns at 80%, early enough for the merchant to decide before the overage starts', async () => {
@@ -244,6 +391,52 @@ describe('GET /v1/admin/agent/usage', () => {
   it('401s without a session', async () => {
     const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('splitTurns', () => {
+  /**
+   * The breakdown is DERIVED from the two counters the budget actually
+   * enforces (`messagesCount` and `creditsUsed`) rather than stored in a third
+   * column, so these are the cases where the arithmetic alone would produce a
+   * figure the merchant should not be shown.
+   */
+
+  it('reads a month of nothing but shopper turns', () => {
+    expect(splitTurns(40, 40)).toEqual({ shopperTurns: 40, merchantQueries: 0 });
+  });
+
+  it('reads a month of nothing but merchant questions', () => {
+    // 10 turns costing 20 credits is 10 questions at two credits each.
+    expect(splitTurns(10, 20)).toEqual({ shopperTurns: 0, merchantQueries: 10 });
+  });
+
+  it('splits a mixed month', () => {
+    expect(splitTurns(100, 120)).toEqual({ shopperTurns: 80, merchantQueries: 20 });
+  });
+
+  it('never reports a negative number of merchant questions', () => {
+    // Rows written before credits existed carry `creditsUsed` at its column
+    // default of 0 with `messagesCount` well above it. Zero merchant questions
+    // is also the honest reading: nothing in such a row says the merchant
+    // asked anything.
+    expect(splitTurns(77, 0)).toEqual({ shopperTurns: 77, merchantQueries: 0 });
+  });
+
+  it('never reports more merchant questions than there were turns', () => {
+    // `record()` cannot produce this; a hand-written or seeded row can, and
+    // "8 consultas de 5 turnos" is a figure the merchant would rightly not
+    // believe.
+    expect(splitTurns(5, 99)).toEqual({ shopperTurns: 0, merchantQueries: 5 });
+  });
+
+  it('always sums back to the month\'s turns', () => {
+    for (const [turns, credits] of [[0, 0], [10, 10], [10, 15], [10, 20], [10, 0], [3, 50]]) {
+      const split = splitTurns(turns, credits);
+      expect(split.shopperTurns + split.merchantQueries).toBe(turns);
+      expect(split.shopperTurns).toBeGreaterThanOrEqual(0);
+      expect(split.merchantQueries).toBeGreaterThanOrEqual(0);
+    }
   });
 });
 

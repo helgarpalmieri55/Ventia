@@ -1,11 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import Link from 'next/link';
 import { AGENT_TONES, type AgentTone } from '@ventia/core';
 import { Alert, Button, FormField, Input, Select, Spinner } from '@ventia/ui';
 import { ApiError, apiFetch } from '../lib/api';
 import { errorMessage, fieldErrors } from '../lib/errors';
 import { formatCOP } from '../lib/format';
+import { CONSUMO_PATH, fetchAgentUsage, type AgentUsageResponse } from '../lib/agent-usage-api';
+import { ConsumoPanel } from './consumo-panel';
 import type { SettingsResponse, TabProps } from '../app/(app)/configuracion/page';
 
 /**
@@ -14,8 +17,14 @@ import type { SettingsResponse, TabProps } from '../app/(app)/configuracion/page
  *
  * The two halves sit together deliberately. A merchant tuning the tone is
  * exactly the person who needs to see whether the thing is earning its
- * allowance, and putting the numbers on a separate page would mean nobody
- * looks at them until the cap is hit.
+ * allowance.
+ *
+ * This is no longer the ONLY place those numbers appear — `/consumo` is, and
+ * it is in the sidebar for both roles. That page exists because reaching the
+ * allowance stopped being an event the merchant notices: credits past it are
+ * billed rather than refused, so nothing prompts anyone to come looking here.
+ * What stays is the summary, rendered by the same shared component so the two
+ * screens cannot disagree, with a link to the detail.
  */
 
 const TONE_LABELS: Record<AgentTone, string> = {
@@ -24,16 +33,6 @@ const TONE_LABELS: Record<AgentTone, string> = {
   juvenil: 'Juvenil — relajado, sin perder el respeto',
 };
 
-interface UsageResponse {
-  month: string;
-  messages: { used: number; limit: number; warning: boolean; allowed: boolean };
-  assistedSales: {
-    orders: number;
-    revenueCents: number;
-    totalOrders: number;
-    totalRevenueCents: number;
-  };
-}
 
 export function AgenteTab({ settings, onSaved }: TabProps) {
   const agent = settings.agent ?? {};
@@ -140,20 +139,33 @@ export function AgenteTab({ settings, onSaved }: TabProps) {
 }
 
 /**
- * This month's message usage and AI-assisted sales.
+ * This month's credit usage and AI-assisted sales.
  *
  * Fetched here rather than threaded down from the page: it is not part of
  * `GET /v1/admin/settings` (it is a different question with a different
  * cache lifetime), and nothing else on the page needs it.
+ *
+ * The bar, the thresholds and every sentence come from `ConsumoPanel`, shared
+ * with `/consumo`. This panel used to own its own copy of all three, and after
+ * the switch to credits with billed overage that copy was actively wrong: it
+ * told a merchant at 100% that "tu asistente dejó de responder por chat hasta
+ * el próximo mes" while the agent was in fact still answering every shopper
+ * and quietly billing the difference. Two renderings of one month's usage is
+ * one rendering too many.
+ *
+ * The merchant-assistant reserve notice is suppressed here (`mostrarAsistente`
+ * false): on a settings tab about the SHOPPER agent's tone, a paragraph about
+ * why the owner's own questions are paused is a digression. `/consumo` carries
+ * it, and the link below leads there.
  */
 function UsagePanel() {
-  const [usage, setUsage] = useState<UsageResponse | null>(null);
+  const [usage, setUsage] = useState<AgentUsageResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoadError(null);
     try {
-      setUsage(await apiFetch<UsageResponse>('/v1/admin/agent/usage'));
+      setUsage(await fetchAgentUsage());
     } catch (e) {
       setLoadError(e instanceof ApiError ? errorMessage(e) : 'No pudimos cargar el consumo.');
     }
@@ -172,48 +184,13 @@ function UsagePanel() {
     );
   }
 
-  const { used, limit, warning, allowed } = usage.messages;
-  // A zero limit means the plan carries no AI at all — showing "0%" of
-  // nothing would read as "you have plenty left".
-  const percent = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
   const { orders, revenueCents, totalOrders } = usage.assistedSales;
 
   return (
     <div className="flex flex-col gap-4 rounded-md border border-border p-4">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-baseline justify-between">
-          <h3 className="text-sm font-medium">Mensajes de IA este mes</h3>
-          <span className="text-sm text-muted-foreground">
-            {used} de {limit}
-          </span>
-        </div>
-        <div
-          role="progressbar"
-          aria-valuenow={percent}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-label="Consumo de mensajes de IA"
-          className="h-2 w-full overflow-hidden rounded-full bg-muted"
-        >
-          <div
-            className={`h-full ${allowed ? (warning ? 'bg-amber-500' : 'bg-primary') : 'bg-destructive'}`}
-            style={{ width: `${percent}%` }}
-          />
-        </div>
+      <h3 className="text-sm font-medium">Créditos de IA este mes</h3>
 
-        {/* The two states SPEC §7 names. Ordered so the hard cap wins: a
-            store at 100% is also past 90%, and telling it "te estás
-            acercando" would be wrong. */}
-        {!allowed ? (
-          <Alert variant="error">
-            Alcanzaste el límite de tu plan. Tu asistente dejó de responder por chat hasta el próximo mes.
-          </Alert>
-        ) : warning ? (
-          <Alert variant="warning">
-            Vas por el {percent}% de tus mensajes del mes. Al llegar al 100% el asistente deja de responder.
-          </Alert>
-        ) : null}
-      </div>
+      <ConsumoPanel credits={usage.credits} mostrarAsistente={false} />
 
       <div className="flex flex-col gap-1 border-t border-border pt-3">
         <h3 className="text-sm font-medium">Ventas asistidas por IA</h3>
@@ -222,6 +199,12 @@ function UsagePanel() {
           {orders} de {totalOrders} {totalOrders === 1 ? 'pedido' : 'pedidos'} este mes
         </p>
       </div>
+
+      <p className="text-xs text-muted-foreground">
+        <Link href={CONSUMO_PATH} className="underline">
+          Ver el detalle de tu consumo
+        </Link>
+      </p>
     </div>
   );
 }
