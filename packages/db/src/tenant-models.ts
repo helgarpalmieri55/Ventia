@@ -40,6 +40,26 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   // real caller today reads through `platformDb` anyway, because the
   // connection flow has to decrypt with the platform key.
   'WhatsAppNumber',
+  // READ-ONLY for tenants, and narrower than the rest: `ventia_app` holds a
+  // COLUMN-LEVEL SELECT grant that omits `passwordHash` (see
+  // 20260822120000_shopper_accounts), with no INSERT/UPDATE/DELETE at all.
+  // Listing it here injects `AND tenantId = t` on reads so the application
+  // layer agrees with the `FOR SELECT` RLS policy.
+  //
+  // Same consequence as `WhatsAppNumber`: a `tenantDb(t).shopperAccount
+  // .findMany()` with NO explicit `select` asks for every column, hits
+  // `passwordHash`, and fails with `permission denied for table
+  // ShopperAccount` (SQLSTATE 42501). That is the design — a shopper's
+  // credential never enters application memory through a tenant-scoped read.
+  // Authentication runs on `platformDb` through one narrow function.
+  'ShopperAccount',
+  // NOT LISTED, deliberately: `ShopperSession` and `ShopperToken`. They carry
+  // a `tenantId` and so look like they belong here, but `ventia_app` has ALL
+  // PRIVILEGES REVOKED on both — they hold only credential material, they are
+  // never merchant-facing, and every path that touches them is authentication,
+  // which runs on `platformDb` anyway. A table a tenant connection cannot open
+  // is one that no injected `where` can be tricked into dumping.
+  //
   // NOT LISTED, deliberately: `Subscription`. It carries a `tenantId` and so
   // looks like it belongs here, but it is platform-owned — what Ventia charges
   // this merchant and until when they have paid, authored only by a Ventia

@@ -128,6 +128,7 @@ model Tenant {
 
   domains       TenantDomain[]
   limits        TenantLimits?
+  shopperAccounts ShopperAccount[]
   memberships   Membership[]
   categories    Category[]
   products      Product[]
@@ -395,8 +396,112 @@ model Customer {
   totalSpentCents Int     @default(0)
   tenant          Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   orders          Order[]
+  /// The self-service login attached to this CRM row, once the shopper made
+  /// one. Optional in both directions: a guest order creates a `Customer` with
+  /// no account, and someone can register before ever ordering.
+  shopperAccount  ShopperAccount?
 
   @@index([tenantId, email])
+}
+
+/// A shopper's login at ONE store.
+///
+/// ## Why not better-auth, which this repo already runs
+///
+/// better-auth owns `User`/`Session`/`Account`/`Verification`, and migration
+/// 20260723205801 revokes ALL privileges on those from `ventia_app` — merchant
+/// identity is deliberately unreachable from tenant-scoped code. Shopper
+/// identity is the opposite kind of thing: it IS tenant data, the storefront
+/// reads it under RLS, and it must be scoped per store. Putting shoppers into
+/// the merchant tables would either force those grants back open or leave the
+/// storefront unable to read its own users.
+///
+/// ## Per store, not per platform
+///
+/// `@@unique([tenantId, email])`, so the same person shopping at two Ventia
+/// stores has two accounts. That is the decision, not an accident of
+/// modelling: each merchant is the *Responsable del Tratamiento* for their own
+/// customers (see settings/privacy-policy.template.ts), and one identity
+/// spanning stores would make the platform a controller and would let merchant
+/// A infer that their customer also shops with merchant B.
+model ShopperAccount {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @db.Uuid
+  /// Lowercased before write. Unique WITHIN a tenant only.
+  email           String
+  /// scrypt, in the format `shopper-auth.ts` writes. NULL is a real state, not
+  /// a broken row: an account created by magic link has never chosen a
+  /// password and can keep signing in without one.
+  ///
+  /// `ventia_app` cannot read this column — see the migration. Password
+  /// verification runs on `platformDb` through one narrow function, so no
+  /// merchant-facing query can reach a credential even by accident.
+  passwordHash    String?
+  emailVerifiedAt DateTime?
+  name            String?
+  /// The merchant's CRM row for this person, linked on first order (or on
+  /// registration when the email already matches one). Nullable because the
+  /// two are created by different events and neither implies the other.
+  customerId      String?   @db.Uuid
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer        Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  sessions        ShopperSession[]
+  tokens          ShopperToken[]
+
+  @@unique([tenantId, email])
+  @@unique([customerId])
+  @@index([tenantId])
+}
+
+/// One signed-in browser.
+///
+/// Stores the SHA-256 of the session secret, never the secret. A database dump
+/// — a backup on a laptop, a replica someone can read — then contains nothing
+/// that can be presented as a login.
+model ShopperSession {
+  id        String         @id @default(uuid()) @db.Uuid
+  tenantId  String         @db.Uuid
+  accountId String         @db.Uuid
+  tokenHash String         @unique
+  expiresAt DateTime
+  createdAt DateTime       @default(now())
+  account   ShopperAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, accountId])
+  @@index([expiresAt])
+}
+
+/// What a single-use link proves.
+enum ShopperTokenPurpose {
+  /// Confirms the address on a new account.
+  verify_email
+  /// Signs the shopper in without a password.
+  magic_link
+  /// Lets them set a new one.
+  password_reset
+}
+
+/// A single-use, expiring link token.
+///
+/// Same hash-not-secret rule as {@link ShopperSession}. `consumedAt` rather
+/// than deleting the row on use: a link that has already been clicked must be
+/// distinguishable from one that never existed, or a shopper who double-clicks
+/// their email gets told their link was invalid.
+model ShopperToken {
+  id         String              @id @default(uuid()) @db.Uuid
+  tenantId   String              @db.Uuid
+  accountId  String              @db.Uuid
+  purpose    ShopperTokenPurpose
+  tokenHash  String              @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime            @default(now())
+  account    ShopperAccount      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, accountId, purpose])
+  @@index([expiresAt])
 }
 
 model Order {

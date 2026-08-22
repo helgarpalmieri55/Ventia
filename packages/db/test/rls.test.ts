@@ -524,3 +524,131 @@ describe('AgentUsage: readable by its tenant, except what it costs us', () => {
     ).rejects.toThrow(/permission denied/i);
   });
 });
+
+describe('Shopper accounts: tenant data, but the credential is not', () => {
+  let accountId: string;
+
+  beforeAll(async () => {
+    const customer = await prisma.customer.create({ data: { tenantId: T1, email: 'ana@example.com' } });
+    const account = await prisma.shopperAccount.create({
+      data: {
+        tenantId: T1,
+        email: 'ana@example.com',
+        passwordHash: 'scrypt$c2FsdA==$a2V5',
+        customerId: customer.id,
+      },
+    });
+    accountId = account.id;
+    await prisma.shopperAccount.create({ data: { tenantId: T2, email: 'otra@example.com' } });
+    await prisma.shopperSession.create({
+      data: { tenantId: T1, accountId, tokenHash: 'a'.repeat(64), expiresAt: new Date(Date.now() + 3_600_000) },
+    });
+    await prisma.shopperToken.create({
+      data: {
+        tenantId: T1,
+        accountId,
+        purpose: 'magic_link',
+        tokenHash: 'b'.repeat(64),
+        expiresAt: new Date(Date.now() + 900_000),
+      },
+    });
+  });
+
+  it('a store sees its own shoppers and not another store\'s', async () => {
+    const rows = await asTenant(T1, (tx) =>
+      tx.$queryRaw<{ email: string }[]>`SELECT "email" FROM "ShopperAccount"`,
+    );
+    expect(rows.map((r) => r.email)).toEqual(['ana@example.com']);
+  });
+
+  it('the same address at two stores is two separate accounts', async () => {
+    // The "per store, not per platform" decision, enforced by the database
+    // rather than by a convention some future write path can forget.
+    await expect(
+      prisma.shopperAccount.create({ data: { tenantId: T1, email: 'ana@example.com' } }),
+    ).rejects.toThrow(/[Uu]nique constraint/);
+
+    // ...but the same address at a DIFFERENT store is fine, and is a different
+    // person as far as either merchant is concerned.
+    const elsewhere = await prisma.shopperAccount.create({
+      data: { tenantId: T2, email: 'ana@example.com' },
+    });
+    expect(elsewhere.tenantId).toBe(T2);
+  });
+
+  it('no tenant-scoped query can read a password hash', async () => {
+    // Column-level grant, same tool as `WhatsAppNumber.credentialsEnc`. The
+    // storefront legitimately reads a shopper's profile under RLS; nothing
+    // legitimately reads their credential that way.
+    await expect(
+      asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT "passwordHash" FROM "ShopperAccount"`),
+    ).rejects.toThrow(/permission denied/i);
+
+    // And a star select is refused rather than quietly dropping the column —
+    // which is what makes a careless `findMany()` fail loudly instead of
+    // loading credentials into application memory.
+    await expect(
+      asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT * FROM "ShopperAccount"`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('a tenant cannot create or modify a shopper account', async () => {
+    // Registration, verification and password changes all run on `platformDb`.
+    // A merchant-scoped INSERT here would let a store mint logins for
+    // addresses it does not control.
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`
+        INSERT INTO "ShopperAccount" ("id", "tenantId", "email", "updatedAt")
+        VALUES (gen_random_uuid(), ${T1}::uuid, 'intruso@example.com', now())
+      `),
+    ).rejects.toThrow(/permission denied/i);
+
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`UPDATE "ShopperAccount" SET "emailVerifiedAt" = now()`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('sessions and tokens are invisible to tenant code entirely', async () => {
+    // Not narrowed — closed. These hold nothing but credential material, so
+    // the tenant role gets no grant at all and the tables cannot be opened.
+    await expect(
+      asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT "id" FROM "ShopperSession"`),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      asTenant(T1, (tx) => tx.$queryRaw<unknown[]>`SELECT "id" FROM "ShopperToken"`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('RLS is enabled on all three, as the backstop behind the grants', async () => {
+    // If a future `GRANT ... ON ALL TABLES IN SCHEMA public` ever re-grants
+    // these by accident — precisely how `Subscription` was mis-classified —
+    // the policy still bounds the damage to one store's own rows.
+    const rows = await prisma.$queryRaw<{ relname: string; relrowsecurity: boolean; policies: bigint }[]>`
+      SELECT c.relname, c.relrowsecurity,
+             (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies
+        FROM pg_class c
+       WHERE c.relname IN ('ShopperAccount', 'ShopperSession', 'ShopperToken')
+    `;
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.relrowsecurity, row.relname).toBe(true);
+      expect(Number(row.policies), row.relname).toBeGreaterThan(0);
+    }
+  });
+
+  it('deleting the CRM row keeps the login alive', async () => {
+    // Anonymisation under Ley 1581 (privacy/ implements it) removes the
+    // customer record. It must not delete the person's ability to sign in —
+    // ON DELETE SET NULL, not CASCADE.
+    const customer = await prisma.customer.create({ data: { tenantId: T2, email: 'borrable@example.com' } });
+    const account = await prisma.shopperAccount.create({
+      data: { tenantId: T2, email: 'borrable@example.com', customerId: customer.id },
+    });
+
+    await prisma.customer.delete({ where: { id: customer.id } });
+
+    const after = await prisma.shopperAccount.findUnique({ where: { id: account.id } });
+    expect(after).not.toBeNull();
+    expect(after!.customerId).toBeNull();
+  });
+});
