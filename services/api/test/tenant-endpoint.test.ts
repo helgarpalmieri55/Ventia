@@ -38,7 +38,7 @@ beforeAll(async () => {
       name: 'ChatCo',
       status: 'live',
       agentConfig: { agentName: 'Valentina', storeSummary: 'interno', policiesSummary: 'interno' },
-      limits: { create: { productsMax: 100, aiMessagesMonth: 500, staffSeats: 2 } },
+      limits: { create: { productsMax: 100, aiCreditsMonth: 500, staffSeats: 2 } },
     },
   });
   await prisma.tenantDomain.create({ data: { tenantId: agentTenant.id, domain: 'chatco.ventia.localhost', isPrimary: true } });

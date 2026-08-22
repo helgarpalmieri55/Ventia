@@ -19,7 +19,7 @@ import { AgentCommandToolsService } from './agent-command-tools.service';
  * ## What is imported and why
  *
  * - `AgentModule` for {@link AgentBudgetService}, which it exports. The shared
- *   `TenantLimits.aiMessagesMonth` counter is the whole point — see
+ *   `TenantLimits.aiCreditsMonth` counter is the whole point — see
  *   `agent-command.service.ts` for the decision and for the shopper reserve
  *   that keeps this surface from spending the storefront into silence.
  * - `DashboardModule` for `DashboardService`, so the assistant's numbers are

@@ -96,7 +96,7 @@ export class PlatformService {
         plan: t.plan,
         createdAt: t.createdAt,
         gmv: gmv.get(t.id) ?? EMPTY_GMV,
-        ai: this.aiView(usage.get(t.id), t.limits?.aiMessagesMonth ?? 0),
+        ai: this.aiView(usage.get(t.id), t.limits?.aiCreditsMonth ?? 0),
       })),
     };
   }
@@ -147,7 +147,7 @@ export class PlatformService {
       limits: tenant.limits
         ? {
             productsMax: tenant.limits.productsMax,
-            aiMessagesMonth: tenant.limits.aiMessagesMonth,
+            aiCreditsMonth: tenant.limits.aiCreditsMonth,
             staffSeats: tenant.limits.staffSeats,
             customDomain: tenant.limits.customDomain,
             humanHandoff: tenant.limits.humanHandoff,
@@ -162,7 +162,7 @@ export class PlatformService {
       subscription: subscription ? subscriptionView(subscription) : null,
       counts: { staff: staffCount, products: productCount },
       gmv: gmv.get(tenantId) ?? EMPTY_GMV,
-      ai: this.aiView(usage.get(tenantId), tenant.limits?.aiMessagesMonth ?? 0),
+      ai: this.aiView(usage.get(tenantId), tenant.limits?.aiCreditsMonth ?? 0),
     };
   }
 
@@ -180,8 +180,8 @@ export class PlatformService {
     // One transaction for both writes. A plan without its matching
     // `TenantLimits` row is not a half-finished change, it is a WRONG state
     // that enforcement reads: `AgentBudgetService` treats a missing row as a
-    // zero AI budget, so a tenant upgraded to `premium` whose limits write
-    // failed would show "premium" in the UI while its agent refused every
+    // zero AI budget, so a tenant upgraded to `escala` whose limits write
+    // failed would show "escala" in the UI while its agent refused every
     // shopper. Both rows land or neither does.
     //
     // `upsert` rather than `update` because a tenant can legitimately have no
@@ -397,12 +397,18 @@ export class PlatformService {
 
   private aiView(usage: AgentUsageRow | undefined, limit: number) {
     const messages = usage?.messagesCount ?? 0;
+    const credits = usage?.creditsUsed ?? 0;
     return {
+      /** Model turns answered. NOT what the allowance measures — a merchant
+       * question costs two credits and one turn — and kept because "how much
+       * did the agent actually work" is a different, useful question. */
       messages,
+      /** Allowance consumed. This is the number the plan is sold in. */
+      credits,
       /** From `TenantLimits`, not from the plan — see `limitsMatchPlan`. 0
        * means "no plan provisioned", which `AgentBudgetService` enforces as a
        * zero budget. */
-      messagesLimit: limit,
+      creditsLimit: limit,
       inputTokens: usage?.inputTokens ?? 0,
       outputTokens: usage?.outputTokens ?? 0,
       /** Prompt-cache traffic. Reads rising while `inputTokens` stays flat is
@@ -427,7 +433,10 @@ export class PlatformService {
       /** Null rather than 0 when there is no limit to be a percentage of —
        * "0% used" would read as healthy for a tenant that is actually hard-
        * capped at zero. */
-      percentUsed: limit > 0 ? Math.round((messages / limit) * 100) : null,
+      /** Over 100 is not a bug: credits past the allowance are billed as
+       * overage rather than refused (see `AgentBudgetService`), so a busy
+       * store legitimately reads 130%. */
+      percentUsed: limit > 0 ? Math.round((credits / limit) * 100) : null,
     };
   }
 
@@ -436,11 +445,12 @@ export class PlatformService {
     const expected = planLimitsFor(plan);
     return (
       limits.productsMax === expected.productsMax &&
-      limits.aiMessagesMonth === expected.aiMessagesMonth &&
+      limits.aiCreditsMonth === expected.aiCreditsMonth &&
       limits.staffSeats === expected.staffSeats &&
       limits.customDomain === expected.customDomain &&
       limits.humanHandoff === expected.humanHandoff &&
-      limits.whatsappChannel === expected.whatsappChannel
+      limits.whatsappChannel === expected.whatsappChannel &&
+      limits.instagramChannel === expected.instagramChannel
     );
   }
 }
@@ -502,6 +512,7 @@ const EMPTY_GMV: Gmv = { totalCents: 0, orders: 0 };
 
 interface AgentUsageRow {
   messagesCount: number;
+  creditsUsed: number;
   inputTokens: number;
   outputTokens: number;
   cacheWriteTokens: number;
@@ -523,11 +534,12 @@ function costCentsOf(usage: AgentUsageRow | undefined): number | null {
 
 interface TenantLimitsRow {
   productsMax: number;
-  aiMessagesMonth: number;
+  aiCreditsMonth: number;
   staffSeats: number;
   customDomain: boolean;
   humanHandoff: boolean;
   whatsappChannel: boolean;
+  instagramChannel: boolean;
 }
 
 /**

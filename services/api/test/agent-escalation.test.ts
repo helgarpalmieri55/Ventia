@@ -42,7 +42,7 @@ beforeAll(async () => {
       name: 'Tienda Escalada',
       status: 'live',
       settings: { storeInfo: { contactEmail: MERCHANT_EMAIL, contactPhone: '3015550000' } },
-      limits: { create: { productsMax: 100, aiMessagesMonth: 500, staffSeats: 2, humanHandoff: true } },
+      limits: { create: { productsMax: 100, aiCreditsMonth: 500, staffSeats: 2, humanHandoff: true } },
     },
   });
   tenantId = tenant.id;
@@ -53,7 +53,7 @@ beforeAll(async () => {
       name: 'Tienda Sin Handoff',
       status: 'live',
       settings: { storeInfo: { contactEmail: 'otra@tienda.co' } },
-      limits: { create: { productsMax: 100, aiMessagesMonth: 500, staffSeats: 2, humanHandoff: false } },
+      limits: { create: { productsMax: 100, aiCreditsMonth: 500, staffSeats: 2, humanHandoff: false } },
     },
   });
   noHandoffTenantId = noHandoff.id;
@@ -221,7 +221,7 @@ describe('escalate_to_human — what a successful handoff does', () => {
         slug: `esc-silent-${Date.now()}`,
         name: 'Sin Correo',
         status: 'live',
-        limits: { create: { productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, humanHandoff: true } },
+        limits: { create: { productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, humanHandoff: true } },
       },
     });
     const conversation = await newConversation(silent.id);

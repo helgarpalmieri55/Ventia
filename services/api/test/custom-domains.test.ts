@@ -42,7 +42,7 @@ beforeAll(async () => {
   ({ cookie, tenantId } = await signUpWithTenant('domains-owner@demo.co', 'owner'));
   await prisma.tenantLimits.upsert({
     where: { tenantId },
-    create: { tenantId, productsMax: 100, aiMessagesMonth: 100, staffSeats: 2, customDomain: true },
+    create: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2, customDomain: true },
     update: { customDomain: true },
   });
 }, 240_000);
@@ -112,7 +112,7 @@ describe('GET /internal/tls-ask — the issuance gate', () => {
     const { tenantId: suspendedId } = await signUpWithTenant('domains-suspended@demo.co', 'owner');
     await prisma.tenantLimits.upsert({
       where: { tenantId: suspendedId },
-      create: { tenantId: suspendedId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: true },
+      create: { tenantId: suspendedId, productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, customDomain: true },
       update: { customDomain: true },
     });
     await prisma.tenantDomain.create({
@@ -132,7 +132,7 @@ describe('GET /internal/tls-ask — the issuance gate', () => {
     const { tenantId: basicId } = await signUpWithTenant('domains-basic@demo.co', 'owner');
     await prisma.tenantLimits.upsert({
       where: { tenantId: basicId },
-      create: { tenantId: basicId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: false },
+      create: { tenantId: basicId, productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, customDomain: false },
       update: { customDomain: false },
     });
     await prisma.tenantDomain.create({
@@ -149,7 +149,7 @@ describe('GET /internal/tls-ask — the issuance gate', () => {
     // certificate.
     //
     // onboarding.service.ts gives every tenant `${slug}.${PLATFORM_ROOT_DOMAIN}`,
-    // verified and primary. `basico.customDomain` is false. With the plan gate
+    // verified and primary. `emprende.customDomain` is false. With the plan gate
     // applied to that row, Caddy is refused a certificate for the store's own
     // address — so every basic-plan storefront has no HTTPS and is simply
     // unreachable. The plan sells CUSTOM domains; the free subdomain is the
@@ -158,7 +158,7 @@ describe('GET /internal/tls-ask — the issuance gate', () => {
     const { tenantId: basicId } = await signUpWithTenant('domains-own-subdomain@demo.co', 'owner');
     await prisma.tenantLimits.upsert({
       where: { tenantId: basicId },
-      create: { tenantId: basicId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: false },
+      create: { tenantId: basicId, productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, customDomain: false },
       update: { customDomain: false },
     });
     await prisma.tenantDomain.create({
@@ -177,7 +177,7 @@ describe('GET /internal/tls-ask — the issuance gate', () => {
     const { tenantId: lookalikeId } = await signUpWithTenant('domains-lookalike@demo.co', 'owner');
     await prisma.tenantLimits.upsert({
       where: { tenantId: lookalikeId },
-      create: { tenantId: lookalikeId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: false },
+      create: { tenantId: lookalikeId, productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, customDomain: false },
       update: { customDomain: false },
     });
     await prisma.tenantDomain.create({
@@ -495,7 +495,7 @@ describe('POST /v1/admin/domains', () => {
     const { cookie: basicCookie, tenantId: basicId } = await signUpWithTenant('domains-noplan@demo.co', 'owner');
     await prisma.tenantLimits.upsert({
       where: { tenantId: basicId },
-      create: { tenantId: basicId, productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, customDomain: false },
+      create: { tenantId: basicId, productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, customDomain: false },
       update: { customDomain: false },
     });
 

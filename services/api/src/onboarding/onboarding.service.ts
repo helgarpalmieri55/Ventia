@@ -94,15 +94,15 @@ export class OnboardingService {
       const slug = await this.uniqueTenantSlug(tx, base, input.slug === undefined);
 
       const created = await tx.tenant.create({
-        data: { slug, name: input.storeName, status: 'draft', plan: 'basico' },
+        data: { slug, name: input.storeName, status: 'draft', plan: 'emprende' },
       });
 
-      const limits = PLANS.basico;
+      const limits = PLANS.emprende;
       await tx.tenantLimits.create({
         data: {
           tenantId: created.id,
           productsMax: limits.productsMax,
-          aiMessagesMonth: limits.aiMessagesMonth,
+          aiCreditsMonth: limits.aiCreditsMonth,
           staffSeats: limits.staffSeats,
           customDomain: limits.customDomain,
           humanHandoff: limits.humanHandoff,

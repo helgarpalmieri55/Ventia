@@ -25,7 +25,7 @@ async function main() {
     const tenant = await platformDb.tenant.upsert({
       where: { slug: t.slug },
       update: { status: 'live' },
-      create: { slug: t.slug, name: t.name, status: 'live', plan: 'basico' },
+      create: { slug: t.slug, name: t.name, status: 'live', plan: 'emprende' },
     });
     await platformDb.tenantDomain.upsert({
       where: { domain: `${t.slug}.ventia.localhost` },
@@ -35,7 +35,7 @@ async function main() {
     await platformDb.tenantLimits.upsert({
       where: { tenantId: tenant.id },
       update: {},
-      create: { tenantId: tenant.id, ...PLANS.basico },
+      create: { tenantId: tenant.id, ...PLANS.emprende },
     });
     for (const p of t.products) {
       await platformDb.product.upsert({

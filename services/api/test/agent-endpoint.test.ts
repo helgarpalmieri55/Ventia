@@ -99,7 +99,7 @@ beforeAll(async () => {
   await prisma.tenantDomain.create({ data: { tenantId, domain: AGENT_DOMAINS[0], isPrimary: true } });
   // Generous, so the budget cap is never what a throttle test is measuring.
   await prisma.tenantLimits.create({
-    data: { tenantId, productsMax: 100, aiMessagesMonth: 500, staffSeats: 2 },
+    data: { tenantId, productsMax: 100, aiCreditsMonth: 500, staffSeats: 2 },
   });
 
   const other = await prisma.tenant.create({
@@ -108,7 +108,7 @@ beforeAll(async () => {
   otherTenantId = other.id;
   await prisma.tenantDomain.create({ data: { tenantId: otherTenantId, domain: AGENT_DOMAINS[1], isPrimary: true } });
   await prisma.tenantLimits.create({
-    data: { tenantId: otherTenantId, productsMax: 100, aiMessagesMonth: 500, staffSeats: 2 },
+    data: { tenantId: otherTenantId, productsMax: 100, aiCreditsMonth: 500, staffSeats: 2 },
   });
 
   const draft = await prisma.tenant.create({

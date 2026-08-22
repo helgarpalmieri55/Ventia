@@ -62,7 +62,7 @@ beforeAll(async () => {
           methods: [{ id: 'flat-1', type: 'flat', label: 'Envío estándar', priceCents: 12_000, enabled: true }],
         },
       },
-      limits: { create: { productsMax: 100, aiMessagesMonth: 500, staffSeats: 2 } },
+      limits: { create: { productsMax: 100, aiCreditsMonth: 500, staffSeats: 2 } },
     },
   });
   tenantId = tenant.id;

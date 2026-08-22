@@ -38,7 +38,7 @@ import { buildMerchantSystemPrompt } from './merchant-system-prompt';
  *
  * ## The shared budget, and the floor under it
  *
- * This assistant spends the SAME `TenantLimits.aiMessagesMonth` as the shopper
+ * This assistant spends the SAME `TenantLimits.aiCreditsMonth` as the shopper
  * agent, through the same {@link AgentBudgetService}, and one merchant question
  * is one message however many model round-trips and tool calls it takes. That
  * was decided deliberately: the plan sells "mensajes de IA", two questions a
@@ -257,7 +257,14 @@ export class AgentCommandService {
     }
 
     // Recorded only now, so a question that failed mid-flight costs nothing.
-    await this.budget.record(tenantId, { inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens }, now);
+    // Two credits, not one: this assistant reads the catalog and the order
+    // book to answer, so it costs about twice what a shopper turn costs.
+    await this.budget.record(
+      tenantId,
+      { inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens },
+      'merchantQuery',
+      now,
+    );
 
     return {
       answer,
@@ -296,7 +303,7 @@ export class AgentCommandService {
         // `feature` names the quota exactly as `common/plan-limits.ts` spells
         // it, so the admin UI's existing upgrade prompt needs no special case
         // for this endpoint.
-        details: { feature: 'aiMessagesMonth' satisfies PlanQuota, limit: usage.limit, reason: refusal },
+        details: { feature: 'aiCreditsMonth' satisfies PlanQuota, limit: usage.limit, reason: refusal },
       },
       402,
     );

@@ -195,7 +195,7 @@ export default function PlataformaTenantPage() {
               <dt className="text-muted-foreground">Productos</dt>
               <dd className="text-foreground">{tenant.limits.productsMax}</dd>
               <dt className="text-muted-foreground">Mensajes de IA / mes</dt>
-              <dd className="text-foreground">{tenant.limits.aiMessagesMonth}</dd>
+              <dd className="text-foreground">{tenant.limits.aiCreditsMonth}</dd>
               <dt className="text-muted-foreground">Usuarios</dt>
               <dd className="text-foreground">{tenant.limits.staffSeats}</dd>
               <dt className="text-muted-foreground">Dominio propio</dt>

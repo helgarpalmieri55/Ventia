@@ -92,7 +92,7 @@ beforeAll(async () => {
   });
   tenantId = tenant.id;
   await prisma.tenantLimits.create({
-    data: { tenantId, productsMax: 100, aiMessagesMonth: 10, staffSeats: 2 },
+    data: { tenantId, productsMax: 100, aiCreditsMonth: 10, staffSeats: 2 },
   });
 
   const product = await prisma.product.create({
@@ -354,35 +354,51 @@ describe('agent loop — tool dispatch', () => {
   });
 });
 
-describe('agent loop — the budget hard cap', () => {
-  it('refuses to call the model at all once the plan limit is reached', async () => {
-    // SPEC.md §7: "at 100% → agent replies with a fixed fallback and stops
-    // calling the model. Hard cap, no exceptions." The assertion that matters
-    // is not the text — it is that zero API calls happened.
-    await prisma.agentUsage.create({
-      data: {
-        tenantId,
-        month: `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`,
-        messagesCount: 10,
-      },
-    });
+describe('agent loop — the allowance, the overage, and where it really stops', () => {
+  /** The fixture tenant's allowance is 10 credits, so its ceiling is 30. */
+  function usageRow(creditsUsed: number) {
+    return {
+      tenantId,
+      month: `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`,
+      messagesCount: creditsUsed,
+      creditsUsed,
+    };
+  }
+
+  it('keeps answering past the plan allowance, because going quiet mid-sale is the worse failure', async () => {
+    // This used to be a hard cap, and the reversal is the point of the test.
+    // A store reaches its allowance on the day it is selling most; a shopper
+    // who gets "no puedo responderte" at that moment is a lost sale, and the
+    // merchant reads it as the shop being broken rather than as a quota.
+    // Credits past the allowance are billed as overage instead.
+    await prisma.agentUsage.create({ data: usageRow(10) });
+    scripted = [textResponse('claro, sí tenemos envío a Cali')];
+
+    const reply = await agent.respond({ tenantId, message: 'hola' });
+
+    expect(reply.budgetExhausted).toBe(false);
+    expect(createCalls).toHaveLength(1);
+    expect(reply.text).toMatch(/envío a Cali/i);
+  });
+
+  it('stops at the overage ceiling, which is what bounds an abuser', async () => {
+    // Three times the allowance. Far past any honest month, and the reason the
+    // line above is safe: overage is uncapped for a busy store's day, not for
+    // a script running all month.
+    await prisma.agentUsage.create({ data: usageRow(30) });
     scripted = [textResponse('esto no debería enviarse')];
 
     const reply = await agent.respond({ tenantId, message: 'hola' });
 
     expect(reply.budgetExhausted).toBe(true);
+    // The assertion that matters is not the text — it is that zero API calls
+    // happened. A ceiling that still pays for the model call is not a ceiling.
     expect(createCalls).toHaveLength(0);
     expect(reply.text).toMatch(/no puedo responderte por chat/i);
   });
 
   it('still records the shopper\'s message when refused, so the merchant sees the demand', async () => {
-    await prisma.agentUsage.create({
-      data: {
-        tenantId,
-        month: `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`,
-        messagesCount: 10,
-      },
-    });
+    await prisma.agentUsage.create({ data: usageRow(30) });
 
     const reply = await agent.respond({ tenantId, message: '¿tienen envío a Cali?' });
 
@@ -392,7 +408,8 @@ describe('agent loop — the budget hard cap', () => {
 
   it('treats a tenant with no plan row as zero budget, not unlimited', async () => {
     // An unprovisioned store getting free unmetered AI is the failure that
-    // costs money and hides itself.
+    // costs money and hides itself. Overage does not rescue it: a limit of 0
+    // gives a ceiling of 0, so the very first turn is refused.
     const unprovisioned = await prisma.tenant.create({
       data: { slug: `agent-noplan-${Date.now()}`, name: 'Sin Plan', status: 'live' },
     });
@@ -426,7 +443,7 @@ describe('agent loop — the plan decides which tools exist', () => {
         slug: `agent-handoff-${Date.now()}`,
         name: 'Con Handoff',
         status: 'live',
-        limits: { create: { productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, humanHandoff: true } },
+        limits: { create: { productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, humanHandoff: true } },
       },
     });
     scripted = [textResponse('hola')];
@@ -445,7 +462,7 @@ describe('agent loop — the plan decides which tools exist', () => {
         slug: `agent-handoff2-${Date.now()}`,
         name: 'Con Handoff 2',
         status: 'live',
-        limits: { create: { productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, humanHandoff: true } },
+        limits: { create: { productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, humanHandoff: true } },
       },
     });
     scripted = [textResponse('a'), textResponse('b')];

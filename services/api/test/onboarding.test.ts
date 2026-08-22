@@ -65,16 +65,23 @@ describe('POST /v1/admin/onboarding/tenant', () => {
     const tenantId = res.body.tenant.tenantId as string;
 
     const tenant = await platformDb.tenant.findUniqueOrThrow({ where: { id: tenantId } });
-    expect(tenant).toMatchObject({ slug: 'tienda-feliz', name: 'Tienda Feliz', status: 'draft', plan: 'basico' });
+    expect(tenant).toMatchObject({ slug: 'tienda-feliz', name: 'Tienda Feliz', status: 'draft', plan: 'emprende' });
 
     const limits = await platformDb.tenantLimits.findUniqueOrThrow({ where: { tenantId } });
+    // The Emprende limits, spelled out rather than compared against
+    // `PLANS.emprende`: this asserts that signup writes the numbers the plan
+    // page promises, and reading them from the same constant the code writes
+    // would assert only that a variable equals itself.
     expect(limits).toMatchObject({
-      productsMax: 100,
-      aiMessagesMonth: 500,
+      productsMax: 300,
+      aiCreditsMonth: 500,
       staffSeats: 1,
       customDomain: false,
       humanHandoff: false,
-      whatsappChannel: false,
+      // WhatsApp is in the entry plan: the product is sold as a salesperson on
+      // WhatsApp, so gating it behind an upgrade sold something else.
+      whatsappChannel: true,
+      instagramChannel: false,
     });
 
     const domain = await platformDb.tenantDomain.findFirstOrThrow({ where: { tenantId } });

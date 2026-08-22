@@ -411,7 +411,7 @@ describe('Subscription is platform-owned, not tenant-owned', () => {
       [T2, 299_900_00],
     ] as const) {
       await prisma.subscription.create({
-        data: { tenantId, plan: 'pro', priceCents: cents, paidUntil: new Date('2026-09-30T04:59:59.999Z') },
+        data: { tenantId, plan: 'crece', priceCents: cents, paidUntil: new Date('2026-09-30T04:59:59.999Z') },
       });
     }
   });
@@ -442,7 +442,7 @@ describe('Subscription is platform-owned, not tenant-owned', () => {
     await expect(
       asTenant(T1, (tx) => tx.$executeRaw`
         INSERT INTO "Subscription" ("id", "tenantId", "plan", "priceCents", "updatedAt")
-        VALUES (gen_random_uuid(), ${T1}::uuid, 'premium', 0, now())
+        VALUES (gen_random_uuid(), ${T1}::uuid, 'escala', 0, now())
       `),
     ).rejects.toThrow(/permission denied/i);
 
@@ -470,7 +470,7 @@ describe('Subscription is platform-owned, not tenant-owned', () => {
     // The sweep reads this table to decide whether to take a store offline.
     // "Whichever row sorts last" is not an acceptable answer to that question.
     await expect(
-      prisma.subscription.create({ data: { tenantId: T1, plan: 'basico', priceCents: 1 } }),
+      prisma.subscription.create({ data: { tenantId: T1, plan: 'emprende', priceCents: 1 } }),
     ).rejects.toThrow(/[Uu]nique constraint/);
   });
 });

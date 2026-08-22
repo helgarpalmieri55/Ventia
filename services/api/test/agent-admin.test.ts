@@ -135,8 +135,8 @@ describe('GET /v1/admin/agent/usage', () => {
     const { cookie, tenantId } = await signUpWithTenant('agent-usage-zero@demo.co', 'owner');
     await platformDb.tenantLimits.upsert({
       where: { tenantId },
-      create: { tenantId, productsMax: 100, aiMessagesMonth: 100, staffSeats: 2 },
-      update: { aiMessagesMonth: 100 },
+      create: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2 },
+      update: { aiCreditsMonth: 100 },
     });
 
     const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
@@ -147,34 +147,50 @@ describe('GET /v1/admin/agent/usage', () => {
     expect(res.body.assistedSales).toMatchObject({ orders: 0, revenueCents: 0 });
   });
 
-  it('raises the 90% warning SPEC §7 asks for, while still allowing messages', async () => {
+  it('warns at 80%, early enough for the merchant to decide before the overage starts', async () => {
     const { cookie, tenantId } = await signUpWithTenant('agent-usage-warn@demo.co', 'owner');
     await platformDb.tenantLimits.upsert({
       where: { tenantId },
-      create: { tenantId, productsMax: 100, aiMessagesMonth: 100, staffSeats: 2 },
-      update: { aiMessagesMonth: 100 },
+      create: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2 },
+      update: { aiCreditsMonth: 100 },
     });
-    await platformDb.agentUsage.create({ data: { tenantId, month: thisMonth(), messagesCount: 92 } });
+    await platformDb.agentUsage.create({
+      data: { tenantId, month: thisMonth(), messagesCount: 82, creditsUsed: 82 },
+    });
 
     const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
 
     expect(res.body.messages.warning).toBe(true);
-    // A warning is a nudge to upgrade, not a block — the block is at 100%.
+    // A warning is a nudge, not a block. It moved from 90% to 80% because it
+    // now warns about money about to be spent rather than about a wall about
+    // to be hit — and 10% of a small allowance is an afternoon of notice.
     expect(res.body.messages.allowed).toBe(true);
   });
 
-  it('reports allowed=false once the hard cap is reached', async () => {
+  it('stays allowed past the allowance, and refuses only past the overage ceiling', async () => {
     const { cookie, tenantId } = await signUpWithTenant('agent-usage-capped@demo.co', 'owner');
     await platformDb.tenantLimits.upsert({
       where: { tenantId },
-      create: { tenantId, productsMax: 100, aiMessagesMonth: 10, staffSeats: 2 },
-      update: { aiMessagesMonth: 10 },
+      create: { tenantId, productsMax: 100, aiCreditsMonth: 10, staffSeats: 2 },
+      update: { aiCreditsMonth: 10 },
     });
-    await platformDb.agentUsage.create({ data: { tenantId, month: thisMonth(), messagesCount: 10 } });
+    // Exactly at the allowance: billed as overage from here, not refused.
+    await platformDb.agentUsage.create({
+      data: { tenantId, month: thisMonth(), messagesCount: 10, creditsUsed: 10 },
+    });
 
-    const res = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+    const atLimit = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+    expect(atLimit.body.messages.allowed).toBe(true);
 
-    expect(res.body.messages.allowed).toBe(false);
+    // At three times the allowance the agent really does stop — the backstop
+    // against a script, not against a busy store.
+    await platformDb.agentUsage.update({
+      where: { tenantId_month: { tenantId, month: thisMonth() } },
+      data: { creditsUsed: 30 },
+    });
+
+    const atCeiling = await request(app.getHttpServer()).get('/v1/admin/agent/usage').set('cookie', cookie);
+    expect(atCeiling.body.messages.allowed).toBe(false);
   });
 
   it('counts only agent-sourced orders as AI-assisted sales', async () => {

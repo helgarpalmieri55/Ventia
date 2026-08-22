@@ -102,7 +102,7 @@ describe('seat limits', () => {
   it('402 PLAN_LIMIT_EXCEEDED once the seat count (accepted + pending) reaches staffSeats', async () => {
     const { cookie: ownerCookie, tenantId } = await signUpWithTenant('staff-seats-owner@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 100, aiMessagesMonth: 500, staffSeats: 1 },
+      data: { tenantId, productsMax: 100, aiCreditsMonth: 500, staffSeats: 1 },
     });
 
     // First invite succeeds and is accepted, consuming the only seat.
@@ -124,7 +124,7 @@ describe('seat limits', () => {
   it('a pending (unaccepted) invite counts toward the seat limit too', async () => {
     const { cookie: ownerCookie, tenantId } = await signUpWithTenant('staff-seats-pending-owner@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 100, aiMessagesMonth: 500, staffSeats: 1 },
+      data: { tenantId, productsMax: 100, aiCreditsMonth: 500, staffSeats: 1 },
     });
 
     const firstRes = await invite(ownerCookie, 'staff-seats-pending-first@demo.co');

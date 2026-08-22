@@ -85,7 +85,7 @@ async function tenantWithLimits(overrides: Record<string, unknown> = {}): Promis
       slug: `pl-${n}-${Date.now()}`,
       name: `Con plan ${n}`,
       status: 'live',
-      limits: { create: { productsMax: 10, aiMessagesMonth: 100, staffSeats: 2, ...overrides } },
+      limits: { create: { productsMax: 10, aiCreditsMonth: 100, staffSeats: 2, ...overrides } },
     },
   });
   return tenant.id;
@@ -260,7 +260,7 @@ describe('every limit fails as the same HTTP error', () => {
   it('productsMax: 402 naming the feature and the limit', async () => {
     const { cookie, tenantId } = await signUpWithTenant('plan-limits-products@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 1, aiMessagesMonth: 100, staffSeats: 2 },
+      data: { tenantId, productsMax: 1, aiCreditsMonth: 100, staffSeats: 2 },
     });
 
     const first = await request(app.getHttpServer())
@@ -284,7 +284,7 @@ describe('every limit fails as the same HTTP error', () => {
   it('staffSeats: 402 naming the feature and the limit', async () => {
     const { cookie, tenantId } = await signUpWithTenant('plan-limits-staff@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 100, aiMessagesMonth: 100, staffSeats: 1 },
+      data: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 1 },
     });
 
     const first = await request(app.getHttpServer())
@@ -308,7 +308,7 @@ describe('every limit fails as the same HTTP error', () => {
   it('whatsappChannel: 402 naming the feature, with no limit number to report', async () => {
     const { cookie, tenantId } = await signUpWithTenant('plan-limits-wa-connect@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 100, aiMessagesMonth: 100, staffSeats: 2, whatsappChannel: false },
+      data: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2, whatsappChannel: false },
     });
 
     const res = await request(app.getHttpServer())
@@ -335,7 +335,7 @@ describe('re-enabling a WhatsApp number is plan-gated too', () => {
   it('PATCH status=connected on a downgraded store is refused with the same 402', async () => {
     const { cookie, tenantId } = await signUpWithTenant('plan-limits-wa-reenable@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 100, aiMessagesMonth: 100, staffSeats: 2, whatsappChannel: true },
+      data: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2, whatsappChannel: true },
     });
     const number = await numbers.connect({
       tenantId,
@@ -368,7 +368,7 @@ describe('re-enabling a WhatsApp number is plan-gated too', () => {
   it('PATCH status=disabled stays allowed without the plan — the off switch is never gated', async () => {
     const { cookie, tenantId } = await signUpWithTenant('plan-limits-wa-disable@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 100, aiMessagesMonth: 100, staffSeats: 2, whatsappChannel: true },
+      data: { tenantId, productsMax: 100, aiCreditsMonth: 100, staffSeats: 2, whatsappChannel: true },
     });
     const number = await numbers.connect({
       tenantId,

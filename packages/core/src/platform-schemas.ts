@@ -13,7 +13,7 @@ import { PLANS, type PlanId, type PlanLimits } from './tenant.js';
 /** The three tiers of SPEC §5 point 5, in ascending order. Exported as a
  * tuple so it can seed both the Zod enum below and any UI that renders the
  * tiers in order. */
-export const PLAN_IDS = ['basico', 'pro', 'premium'] as const satisfies readonly PlanId[];
+export const PLAN_IDS = ['emprende', 'crece', 'escala'] as const satisfies readonly PlanId[];
 
 export const planIdSchema = z.enum(PLAN_IDS);
 
@@ -26,10 +26,10 @@ export const tenantStatusSchema = z.enum(['draft', 'live', 'suspended']);
  * numbers here, and that indirection is the point. `PLANS` was already the
  * table two live call sites provision from — `packages/db/src/seed.ts` and
  * `services/api/src/onboarding/onboarding.service.ts` (which writes
- * `PLANS.basico` into `TenantLimits` at signup). A second literal copy in
+ * `PLANS.emprende` into `TenantLimits` at signup). A second literal copy in
  * this file would be a second source of truth by definition: the platform
- * admin would grant `pro` one set of numbers while onboarding granted
- * `basico` a set that had drifted, and nothing would fail loudly when they
+ * admin would grant `crece` one set of numbers while onboarding granted
+ * `emprende` a set that had drifted, and nothing would fail loudly when they
  * disagreed. "Single source of truth" is a property of there being exactly
  * one copy, not of which file it sits in.
  *
@@ -41,11 +41,11 @@ export const tenantStatusSchema = z.enum(['draft', 'live', 'suspended']);
  * Current values (from `./tenant.ts`, restated here only as documentation —
  * edit them THERE):
  *
- * | plan    | productsMax | aiMessagesMonth | staffSeats | customDomain | humanHandoff | whatsappChannel |
- * |---------|-------------|-----------------|------------|--------------|--------------|-----------------|
- * | basico  |         100 |             500 |          1 | no           | no           | no              |
- * | pro     |       1 000 |           3 000 |          3 | yes          | no           | yes             |
- * | premium |      10 000 |          10 000 |         10 | yes          | yes          | yes             |
+ * | plan     | productsMax | aiCreditsMonth | staffSeats | dominio | handoff | WhatsApp | Instagram |
+ * |----------|-------------|----------------|------------|---------|---------|----------|-----------|
+ * | emprende |         300 |            500 |          1 | no      | no      | sí       | no        |
+ * | crece    |       3 000 |          1 200 |          5 | sí      | sí      | sí       | sí        |
+ * | escala   |  ilimitados |          2 800 |         15 | sí      | sí      | sí       | sí        |
  */
 export function planLimitsFor(plan: PlanId): PlanLimits {
   return PLANS[plan];

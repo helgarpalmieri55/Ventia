@@ -1,3 +1,4 @@
+import { creditsFor } from '@ventia/core';
 import type { AgentCommandBudget, AgentCommandRefusalReason } from '@ventia/core';
 
 /**
@@ -14,7 +15,7 @@ import type { AgentCommandBudget, AgentCommandRefusalReason } from '@ventia/core
  * ## The decision
  *
  * The merchant assistant and the shopper agent spend ONE counter,
- * `TenantLimits.aiMessagesMonth`. That was chosen deliberately (the plan sells
+ * `TenantLimits.aiCreditsMonth`. That was chosen deliberately (the plan sells
  * "mensajes de IA"; a second quota would be a number nobody was sold), and it
  * creates a consequence worth stating plainly:
  *
@@ -28,7 +29,7 @@ import type { AgentCommandBudget, AgentCommandRefusalReason } from '@ventia/core
  *
  * So the merchant assistant yields first: it stops at
  * `limit - shopperReserve`, while the shopper agent keeps its full
- * `aiMessagesMonth`. Nothing here changes what the storefront may spend —
+ * `aiCreditsMonth`. Nothing here changes what the storefront may spend —
  * `AgentBudgetService.check()` is untouched — this is a ceiling this surface
  * puts on ITSELF. The one whose silence costs the merchant nothing is the one
  * that goes quiet.
@@ -97,7 +98,12 @@ export function decideCommandBudget(usage: MonthlyUsage): CommandBudgetDecision 
 
 /** The budget as it stands AFTER this question is recorded, which is what the
  * merchant should be shown: "te quedan N" has to mean N more questions, not N
- * including the one they just asked. */
+ * including the one they just asked.
+ *
+ * Advances by what a merchant question COSTS — two credits, not one — because
+ * the number beside it is credits. Adding one here would have the merchant's
+ * own screen disagree with the counter it is reporting, and drift by one
+ * credit per question until it was plainly wrong. */
 export function budgetAfterAnswering(usage: MonthlyUsage): AgentCommandBudget {
-  return decideCommandBudget({ ...usage, used: usage.used + 1 }).budget;
+  return decideCommandBudget({ ...usage, used: usage.used + creditsFor('merchantQuery') }).budget;
 }

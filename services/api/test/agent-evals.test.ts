@@ -66,7 +66,7 @@ beforeAll(async () => {
   tenantId = tenant.id;
   await prisma.tenantLimits.create({
     // `humanHandoff` on, so eval 5 has a tool to reach for.
-    data: { tenantId, productsMax: 100, aiMessagesMonth: 500, staffSeats: 2, humanHandoff: true },
+    data: { tenantId, productsMax: 100, aiCreditsMonth: 500, staffSeats: 2, humanHandoff: true },
   });
   await prisma.tenant.update({
     where: { id: tenantId },
@@ -275,7 +275,7 @@ describe('eval 5 — asking for a person reaches one', () => {
         slug: `evals-basic-${Date.now()}`,
         name: 'Plan Básico',
         status: 'live',
-        limits: { create: { productsMax: 10, aiMessagesMonth: 10, staffSeats: 1, humanHandoff: false } },
+        limits: { create: { productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, humanHandoff: false } },
       },
     });
     const conversation = await prisma.conversation.create({

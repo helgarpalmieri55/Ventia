@@ -117,7 +117,15 @@ async function usageRow(tenantId: string) {
 
 /** Pins the month's usage to an exact figure, so a budget boundary is a fixture
  * rather than something a test has to spend 400 questions reaching. */
-async function setUsage(tenantId: string, messagesCount: number) {
+/**
+ * Puts a tenant's month at `credits` consumed.
+ *
+ * Writes `creditsUsed` AND `messagesCount`: the budget is measured in credits,
+ * and a fixture that set only the message count would leave every one of these
+ * tests reading a used-total of zero — which is exactly how they all passed
+ * while asserting the opposite.
+ */
+async function setUsage(tenantId: string, credits: number) {
   const now = new Date();
   const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
   await prisma.agentUsage.upsert({
@@ -125,8 +133,15 @@ async function setUsage(tenantId: string, messagesCount: number) {
     // Token columns reset alongside the count: they accumulate across the
     // whole month, so a later test asserting an exact token total would
     // otherwise be reading whatever earlier tests in this file happened to add.
-    create: { tenantId, month, messagesCount },
-    update: { messagesCount, inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 },
+    create: { tenantId, month, messagesCount: credits, creditsUsed: credits },
+    update: {
+      messagesCount: credits,
+      creditsUsed: credits,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+    },
   });
 }
 
@@ -190,10 +205,10 @@ beforeAll(async () => {
   neighbour = await signUpWithTenant('tiendavecina@example.com', 'owner');
 
   await prisma.tenantLimits.create({
-    data: { tenantId: shop.tenantId, productsMax: 100, aiMessagesMonth: LIMIT, staffSeats: 2 },
+    data: { tenantId: shop.tenantId, productsMax: 100, aiCreditsMonth: LIMIT, staffSeats: 2 },
   });
   await prisma.tenantLimits.create({
-    data: { tenantId: neighbour.tenantId, productsMax: 100, aiMessagesMonth: LIMIT, staffSeats: 2 },
+    data: { tenantId: neighbour.tenantId, productsMax: 100, aiCreditsMonth: LIMIT, staffSeats: 2 },
   });
 
   await seedFixtures();
@@ -348,12 +363,18 @@ describe('POST /v1/admin/ai/command — answering the merchant', () => {
     // The grounding is reported, so a merchant handed a surprising number can
     // tell "it looked it up" from "it guessed".
     expect(res.body.usedTools).toEqual([{ name: 'get_business_summary', ok: true }]);
+    // TWO credits for one merchant question, not one. This assistant reads the
+    // catalog and the order book to answer, so it costs about twice what a
+    // shopper turn costs, and the counter the merchant is shown has to reflect
+    // what was actually spent — otherwise their remaining-credits number drifts
+    // by one per question until it is plainly wrong.
+    const COST = 2;
     expect(res.body.budget).toMatchObject({
-      used: 1,
+      used: COST,
       limit: LIMIT,
       shopperReserve: RESERVE,
-      remainingForCommands: LIMIT - RESERVE - 1,
-      remainingTotal: LIMIT - 1,
+      remainingForCommands: LIMIT - RESERVE - COST,
+      remainingTotal: LIMIT - COST,
     });
   });
 
@@ -533,7 +554,7 @@ describe('the shared budget, and who goes quiet first', () => {
     expect(res.status).toBe(402);
     expect(res.body).toMatchObject({
       error: 'PLAN_LIMIT_EXCEEDED',
-      details: { feature: 'aiMessagesMonth', limit: LIMIT, reason: 'shopper_reserve' },
+      details: { feature: 'aiCreditsMonth', limit: LIMIT, reason: 'shopper_reserve' },
     });
     expect(createCalls).toHaveLength(0);
 
@@ -677,7 +698,7 @@ describe('grounding — the tools tell the truth, including when they do not kno
     // genuinely exceeds the scan cap.
     const big = await signUpWithTenant('tiendagrande@example.com', 'owner');
     await prisma.tenantLimits.create({
-      data: { tenantId: big.tenantId, productsMax: 5000, aiMessagesMonth: LIMIT, staffSeats: 2 },
+      data: { tenantId: big.tenantId, productsMax: 5000, aiCreditsMonth: LIMIT, staffSeats: 2 },
     });
     await prisma.product.createMany({
       data: Array.from({ length: 1001 }, (_, i) => ({

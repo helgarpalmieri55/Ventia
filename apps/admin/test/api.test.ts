@@ -26,7 +26,7 @@ describe('apiFetch', () => {
   it('throws an ApiError with the parsed code and details on a non-2xx body', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
-        JSON.stringify({ error: 'PLAN_LIMIT_EXCEEDED', details: { limit: 10, plan: 'basico' } }),
+        JSON.stringify({ error: 'PLAN_LIMIT_EXCEEDED', details: { limit: 10, plan: 'emprende' } }),
         { status: 402, headers: { 'content-type': 'application/json' } },
       ),
     );
@@ -35,7 +35,7 @@ describe('apiFetch', () => {
     await expect(apiFetch('/products')).rejects.toMatchObject({
       status: 402,
       code: 'PLAN_LIMIT_EXCEEDED',
-      details: { limit: 10, plan: 'basico' },
+      details: { limit: 10, plan: 'emprende' },
     });
   });
 

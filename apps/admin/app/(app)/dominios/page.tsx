@@ -45,7 +45,7 @@ import {
  *     they have nothing to do. That is the FIRST thing on the page, stated as a
  *     working address with a link to open it — not hidden behind an empty
  *     state that reads like something is missing.
- *  2. **The one on `basico`.** `TenantLimits.customDomain` is false for that
+ *  2. **The one on `emprende`.** `TenantLimits.customDomain` is false for that
  *     plan, so the connect form is replaced by an upgrade prompt BEFORE any DNS
  *     work is described. Showing the form and letting `POST` answer 402 would
  *     cost them an afternoon in their registrar's control panel to learn
@@ -223,7 +223,7 @@ export default function DominiosPage() {
 
 /**
  * Shown INSTEAD of the connect form when `TenantLimits.customDomain` is false
- * (`basico` — see `PLANS` in `@ventia/core`). Same shape as the WhatsApp tab's
+ * (`emprende` — see `PLANS` in `@ventia/core`). Same shape as the WhatsApp tab's
  * upgrade prompt, including the deliberate absence of an "upgrade" link: plans
  * are changed by the platform operator, and a button that goes nowhere is
  * worse than a sentence that says who to ask.
@@ -392,7 +392,7 @@ function DomainCard({
             </Button>
           ) : null}
           {/* Never for the address we gave them: `DELETE` accepts it, and a
-              store on `basico` that removed it could not add it back (POST is
+              store on `emprende` that removed it could not add it back (POST is
               plan-gated), so it would be left with no address at all. */}
           {state === 'platform' ? null : (
             <Button variant="destructive" size="sm" onClick={() => setRemoveOpen(true)}>

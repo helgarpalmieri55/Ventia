@@ -54,8 +54,14 @@ export interface StoreMetrics {
   status: string;
   plan: string | null;
   ai: {
+    /** Model turns answered. NOT the allowance unit — see `credits`. */
     messages: number;
-    messagesLimit: number;
+    /** Allowance consumed, weighted per action. This is what the plan sells
+     * and what `percentUsed` is a percentage of. */
+    credits: number;
+    creditsLimit: number;
+    /** Can exceed 100: credits past the allowance are billed as overage
+     * rather than refused. */
     percentUsed: number | null;
     inputTokens: number;
     outputTokens: number;
@@ -133,7 +139,7 @@ export class OpsMetricsService {
           name: true,
           status: true,
           plan: true,
-          limits: { select: { aiMessagesMonth: true } },
+          limits: { select: { aiCreditsMonth: true } },
           domains: { select: { isPrimary: true, verifiedAt: true, domain: true } },
         },
         orderBy: { slug: 'asc' },
@@ -228,15 +234,16 @@ export class OpsMetricsService {
     stuckPending: number,
     pricingConfigured: boolean,
   ): StoreMetrics {
-    const limit = tenant.limits?.aiMessagesMonth ?? 0;
+    const limit = tenant.limits?.aiCreditsMonth ?? 0;
     const messages = usage?.messagesCount ?? 0;
+    const credits = usage?.creditsUsed ?? 0;
     const microUsd = Number(usage?.costMicroUsd ?? 0n);
     const primary = tenant.domains.find((d) => d.isPrimary) ?? null;
     const issues: string[] = [];
 
     // Percent is null, not 0, when there is no limit to be a percentage of —
     // "0% used" reads as healthy for a tenant that is actually capped at zero.
-    const percentUsed = limit > 0 ? Math.round((messages / limit) * 100) : null;
+    const percentUsed = limit > 0 ? Math.round((credits / limit) * 100) : null;
 
     if (limit === 0) issues.push('ai_budget_unprovisioned');
     else if (messages >= limit) issues.push('ai_budget_exhausted');
@@ -258,7 +265,8 @@ export class OpsMetricsService {
       plan: tenant.plan ?? null,
       ai: {
         messages,
-        messagesLimit: limit,
+        credits,
+        creditsLimit: limit,
         percentUsed,
         inputTokens: usage?.inputTokens ?? 0,
         outputTokens: usage?.outputTokens ?? 0,
@@ -348,12 +356,13 @@ interface TenantRow {
   name: string;
   status: string;
   plan: string | null;
-  limits: { aiMessagesMonth: number } | null;
+  limits: { aiCreditsMonth: number } | null;
   domains: Array<{ isPrimary: boolean; verifiedAt: Date | null; domain: string }>;
 }
 
 interface UsageRow {
   messagesCount: number;
+  creditsUsed: number;
   inputTokens: number;
   outputTokens: number;
   cacheWriteTokens: number;

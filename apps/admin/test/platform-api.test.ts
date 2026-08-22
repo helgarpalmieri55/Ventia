@@ -68,8 +68,8 @@ describe('buildTenantListQuery', () => {
   });
 
   it('sends the filters that are set, plus paging', () => {
-    expect(buildTenantListQuery({ q: 'ana', status: 'suspended', plan: 'pro', page: 3, perPage: 10 })).toBe(
-      'q=ana&status=suspended&plan=pro&page=3&perPage=10',
+    expect(buildTenantListQuery({ q: 'ana', status: 'suspended', plan: 'crece', page: 3, perPage: 10 })).toBe(
+      'q=ana&status=suspended&plan=crece&page=3&perPage=10',
     );
   });
 });
@@ -154,12 +154,12 @@ describe('storefrontEffectMessage', () => {
 describe('planChangeSummary', () => {
   it('names both plans on a real change', () => {
     expect(
-      planChangeSummary({ id: 't1', plan: 'premium', previousPlan: 'basico', limits: {} as never }),
-    ).toBe('Plan cambiado de Básico a Premium. Sus límites se reescribieron para coincidir.');
+      planChangeSummary({ id: 't1', plan: 'escala', previousPlan: 'emprende', limits: {} as never }),
+    ).toBe('Plan cambiado de Emprende a Escala. Sus límites se reescribieron para coincidir.');
   });
 
   it('reads as a repair when the plan did not change (the limits still got rewritten)', () => {
-    expect(planChangeSummary({ id: 't1', plan: 'pro', previousPlan: 'pro', limits: {} as never })).toContain(
+    expect(planChangeSummary({ id: 't1', plan: 'crece', previousPlan: 'crece', limits: {} as never })).toContain(
       'Se reescribieron sus límites',
     );
   });
@@ -217,7 +217,7 @@ describe('formatMonthCO', () => {
 
 describe('vocabulary', () => {
   it('labels every plan and status in es-CO', () => {
-    expect(PLAN_LABELS).toEqual({ basico: 'Básico', pro: 'Pro', premium: 'Premium' });
+    expect(PLAN_LABELS).toEqual({ emprende: 'Emprende', crece: 'Crece', escala: 'Escala' });
     expect(TENANT_STATUS_LABELS).toEqual({
       draft: 'En configuración',
       live: 'Activa',
@@ -254,7 +254,7 @@ describe('vocabulary', () => {
  */
 function subscription(overrides: Partial<PlatformSubscription> = {}): PlatformSubscription {
   return {
-    plan: 'pro',
+    plan: 'crece',
     priceCents: 8900000,
     paidUntil: '2026-09-02T04:59:59.999Z',
     notes: null,
@@ -367,8 +367,8 @@ describe('subscriptionSaveNotice', () => {
 
 describe('subscriptionFormValues', () => {
   it('seeds from the row on file, in pesos and in the Bogotá calendar day', () => {
-    expect(subscriptionFormValues(subscription({ notes: '  factura 0142 ' }), 'basico')).toEqual({
-      plan: 'pro',
+    expect(subscriptionFormValues(subscription({ notes: '  factura 0142 ' }), 'emprende')).toEqual({
+      plan: 'crece',
       price: '89000',
       paidUntil: '2026-09-01',
       notes: '  factura 0142 ',
@@ -376,8 +376,8 @@ describe('subscriptionFormValues', () => {
   });
 
   it('falls back to the tenant’s assigned plan when there is no subscription', () => {
-    expect(subscriptionFormValues(null, 'premium')).toEqual({
-      plan: 'premium',
+    expect(subscriptionFormValues(null, 'escala')).toEqual({
+      plan: 'escala',
       price: '',
       paidUntil: '',
       notes: '',
@@ -387,25 +387,25 @@ describe('subscriptionFormValues', () => {
   it('leaves price blank rather than defaulting to 0, which is a real value here', () => {
     // A comped or pilot account is legitimately priced at 0 and the API
     // accepts it — so 0 has to be typed on purpose, not pre-filled.
-    expect(subscriptionFormValues(null, 'basico').price).toBe('');
-    expect(subscriptionFormValues(subscription({ priceCents: 0 }), 'basico').price).toBe('0');
+    expect(subscriptionFormValues(null, 'emprende').price).toBe('');
+    expect(subscriptionFormValues(subscription({ priceCents: 0 }), 'emprende').price).toBe('0');
   });
 
   it('shows an empty date field for a subscription with no paid-until', () => {
-    expect(subscriptionFormValues(subscription({ paidUntil: null }), 'basico').paidUntil).toBe('');
+    expect(subscriptionFormValues(subscription({ paidUntil: null }), 'emprende').paidUntil).toBe('');
   });
 });
 
 describe('parseSubscriptionForm', () => {
   function values(overrides: Partial<SubscriptionFormValues> = {}): SubscriptionFormValues {
-    return { plan: 'pro', price: '89000', paidUntil: '2026-09-01', notes: '', ...overrides };
+    return { plan: 'crece', price: '89000', paidUntil: '2026-09-01', notes: '', ...overrides };
   }
 
   it('sends pesos as cents and the date as the plain Bogotá calendar day', () => {
     const parsed = parseSubscriptionForm(values());
     expect(parsed).toEqual({
       ok: true,
-      body: { plan: 'pro', priceCents: 8900000, paidUntil: '2026-09-01', notes: null },
+      body: { plan: 'crece', priceCents: 8900000, paidUntil: '2026-09-01', notes: null },
     });
   });
 
@@ -459,7 +459,7 @@ describe('parseSubscriptionForm', () => {
   it('trims notes and sends an empty note as null', () => {
     expect(parseSubscriptionForm(values({ notes: '  factura 0142  ' }))).toEqual({
       ok: true,
-      body: { plan: 'pro', priceCents: 8900000, paidUntil: '2026-09-01', notes: 'factura 0142' },
+      body: { plan: 'crece', priceCents: 8900000, paidUntil: '2026-09-01', notes: 'factura 0142' },
     });
     const blank = parseSubscriptionForm(values({ notes: '   ' }));
     expect(blank.ok && blank.body.notes).toBeNull();

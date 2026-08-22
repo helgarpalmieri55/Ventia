@@ -42,7 +42,7 @@ export const PLAN_LIMIT_ERROR = 'PLAN_LIMIT_EXCEEDED';
 export type PlanBooleanFeature = 'customDomain' | 'humanHandoff' | 'whatsappChannel';
 
 /** Plan entitlements that are a countable ceiling. */
-export type PlanQuota = 'productsMax' | 'aiMessagesMonth' | 'staffSeats';
+export type PlanQuota = 'productsMax' | 'aiCreditsMonth' | 'staffSeats';
 
 /** Every limit named in SPEC.md §5 point 5. */
 export type PlanFeature = PlanBooleanFeature | PlanQuota;
@@ -52,7 +52,7 @@ export type PlanFeature = PlanBooleanFeature | PlanQuota;
  * they already loaded (see {@link isPlanFeatureEnabledOn}). */
 export interface PlanLimits {
   productsMax: number;
-  aiMessagesMonth: number;
+  aiCreditsMonth: number;
   staffSeats: number;
   customDomain: boolean;
   humanHandoff: boolean;
@@ -98,7 +98,7 @@ export async function loadPlanLimits(tenantId: string): Promise<PlanLimits | nul
  * a paid feature for free is the failure that costs money and hides itself,
  * whereas a store that cannot use a feature it pays for notices within the
  * hour and gets fixed. This is the posture `agent-budget.service.ts`
- * established for `aiMessagesMonth`/`humanHandoff`, and it is not negotiable
+ * established for `aiCreditsMonth`/`humanHandoff`, and it is not negotiable
  * per call site — that is why there is no `whenUnprovisioned` parameter here.
  */
 export function isPlanFeatureEnabledOn(limits: PlanLimits | null, feature: PlanBooleanFeature): boolean {

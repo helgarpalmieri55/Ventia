@@ -14,9 +14,9 @@ enum TenantStatus {
 }
 
 enum Plan {
-  basico
-  pro
-  premium
+  emprende
+  crece
+  escala
 }
 
 enum MembershipRole {
@@ -119,7 +119,7 @@ model Tenant {
   slug        String       @unique
   name        String
   status      TenantStatus @default(draft)
-  plan        Plan         @default(basico)
+  plan        Plan         @default(emprende)
   theme       Json?
   agentConfig Json?
   settings    Json?
@@ -157,11 +157,16 @@ model TenantDomain {
 model TenantLimits {
   tenantId        String  @id @db.Uuid
   productsMax     Int
-  aiMessagesMonth Int
+  /// Créditos de IA per calendar month. Renamed from `aiMessagesMonth`: two
+  /// different actions consume the agent at two different costs, so the unit
+  /// the plan sells is a weighted credit, not a message. See
+  /// `@ventia/core`'s CREDIT_COST.
+  aiCreditsMonth  Int
   staffSeats      Int
   customDomain    Boolean @default(false)
   humanHandoff    Boolean @default(false)
   whatsappChannel Boolean @default(false)
+  instagramChannel Boolean @default(false)
   tenant          Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
 
@@ -1274,7 +1279,14 @@ model AgentUsage {
   /// configured — in that case this stays 0 and every reader is told the
   /// pricing is unconfigured rather than being handed a fabricated zero.
   costMicroUsd  BigInt @default(0)
+  /// Model calls answered this month. The RAW count, kept alongside
+  /// `creditsUsed` rather than replaced by it: once a merchant question costs
+  /// two credits the two numbers diverge, and "how many turns did the agent
+  /// actually take" stays a question worth being able to answer.
   messagesCount Int    @default(0)
+  /// Credits consumed this month — the number the plan allowance is measured
+  /// against. Weighted per action; see `@ventia/core`'s CREDIT_COST.
+  creditsUsed   Int    @default(0)
 
   @@unique([tenantId, month])
 }

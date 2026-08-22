@@ -90,7 +90,7 @@ export class PrivacyPolicyService {
       // Same definition of "this store has an AI agent" the storefront widget
       // uses (`agentEnabled` in tenants/domain-resolver.ts): a plan with a
       // non-zero monthly message allowance.
-      agentEnabled: (limits?.aiMessagesMonth ?? 0) > 0,
+      agentEnabled: (limits?.aiCreditsMonth ?? 0) > 0,
       agentName: asString(agentConfig.agentName),
       whatsappConnected,
       humanHandoffEnabled: isPlanFeatureEnabledOn(limits, 'humanHandoff'),

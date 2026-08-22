@@ -214,7 +214,7 @@ export function isPlatformDomain(domain: string, root: string | null): boolean {
  * - `platform`        — the address we gave them. Always served; the plan gate
  *                       explicitly does not apply inside our own zone
  *                       (`isDomainAllowed` condition 4), which is why a
- *                       `basico` store still has HTTPS on its own subdomain.
+ *                       `emprende` store still has HTTPS on its own subdomain.
  * - `blocked_by_plan` — a domain of theirs, on a plan without `customDomain`.
  *                       The TLS gate refuses the certificate, so the store
  *                       does NOT answer there no matter how the DNS looks.
@@ -230,7 +230,7 @@ export interface DomainStateInput {
 
 /**
  * The plan check runs BEFORE the verification check, and that order is the
- * whole point of requirement 3: a `basico` merchant who is told "pending —
+ * whole point of requirement 3: a `emprende` merchant who is told "pending —
  * publish this TXT record" spends an afternoon in their registrar's control
  * panel to arrive at a certificate we were never going to issue. They need to
  * know the plan is the blocker first, while the DNS work is still ahead of

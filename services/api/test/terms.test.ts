@@ -94,7 +94,7 @@ async function buildFullTenant(email: string) {
     data: {
       tenantId,
       productsMax: 500,
-      aiMessagesMonth: 2000,
+      aiCreditsMonth: 2000,
       staffSeats: 5,
       customDomain: true,
       humanHandoff: true,

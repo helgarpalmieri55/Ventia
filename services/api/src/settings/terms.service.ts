@@ -94,7 +94,7 @@ export class TermsService {
       // Same definition of "this store has a chat widget" the storefront uses
       // (`agentEnabled` in tenants/domain-resolver.ts): a plan with a non-zero
       // monthly message allowance.
-      agentEnabled: (limits?.aiMessagesMonth ?? 0) > 0,
+      agentEnabled: (limits?.aiCreditsMonth ?? 0) > 0,
       whatsappConnected,
       effectiveDate: now,
     };

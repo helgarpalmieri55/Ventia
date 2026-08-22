@@ -111,7 +111,7 @@ export class DomainResolver {
           // No `TenantLimits` row means the tenant is not provisioned onto a
           // plan, which `AgentBudgetService` treats as zero budget — so the
           // widget stays hidden, matching what the server would actually do.
-          agentEnabled: (row.tenant.limits?.aiMessagesMonth ?? 0) > 0,
+          agentEnabled: (row.tenant.limits?.aiCreditsMonth ?? 0) > 0,
           agentName: readAgentName(row.tenant.agentConfig),
           // The DB's own value, not the request-supplied `host` — see the
           // field's doc comment on why that distinction is load-bearing.

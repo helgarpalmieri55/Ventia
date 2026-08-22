@@ -32,16 +32,18 @@ export function platformTenantPath(tenantId: string): string {
 // ---- vocabulary -----------------------------------------------------
 
 /** Mirrors `PLAN_IDS` in `@ventia/core/platform-schemas` — ascending tiers. */
-export const PLAN_IDS = ['basico', 'pro', 'premium'] as const;
+export const PLAN_IDS = ['emprende', 'crece', 'escala'] as const;
 export type PlanId = (typeof PLAN_IDS)[number];
 
 export const TENANT_STATUSES = ['draft', 'live', 'suspended'] as const;
 export type TenantStatus = (typeof TENANT_STATUSES)[number];
 
+/** The plan id IS the display name, capitalised. Kept as a map anyway so a
+ * future plan whose id and label differ has somewhere to say so. */
 export const PLAN_LABELS: Record<PlanId, string> = {
-  basico: 'Básico',
-  pro: 'Pro',
-  premium: 'Premium',
+  emprende: 'Emprende',
+  crece: 'Crece',
+  escala: 'Escala',
 };
 
 export const TENANT_STATUS_LABELS: Record<TenantStatus, string> = {
@@ -111,7 +113,7 @@ export interface PlatformTenantList {
 
 export interface PlatformTenantLimits {
   productsMax: number;
-  aiMessagesMonth: number;
+  aiCreditsMonth: number;
   staffSeats: number;
   customDomain: boolean;
   humanHandoff: boolean;

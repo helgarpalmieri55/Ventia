@@ -73,7 +73,7 @@ beforeAll(async () => {
       slug: `wa-${Date.now()}`,
       name: 'Tienda WhatsApp',
       status: 'live',
-      limits: { create: { productsMax: 100, aiMessagesMonth: 500, staffSeats: 2, whatsappChannel: true } },
+      limits: { create: { productsMax: 100, aiCreditsMonth: 500, staffSeats: 2, whatsappChannel: true } },
     },
   });
   tenantId = tenant.id;
@@ -84,7 +84,7 @@ beforeAll(async () => {
       slug: `wa-other-${Date.now()}`,
       name: 'Otra Tienda',
       status: 'live',
-      limits: { create: { productsMax: 100, aiMessagesMonth: 500, staffSeats: 2, whatsappChannel: true } },
+      limits: { create: { productsMax: 100, aiCreditsMonth: 500, staffSeats: 2, whatsappChannel: true } },
     },
   });
   otherTenantId = other.id;

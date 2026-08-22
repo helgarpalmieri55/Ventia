@@ -88,7 +88,7 @@ async function operatorCookie(email = OPERATOR_EMAIL): Promise<string> {
 
 let tenantSeq = 0;
 async function makeTenant(
-  overrides: { status?: 'draft' | 'live' | 'suspended'; plan?: 'basico' | 'pro' | 'premium'; settings?: object } = {},
+  overrides: { status?: 'draft' | 'live' | 'suspended'; plan?: 'emprende' | 'crece' | 'escala'; settings?: object } = {},
 ) {
   tenantSeq += 1;
   const slug = `sub-${tenantSeq}-${Math.random().toString(36).slice(2, 8)}`;
@@ -97,7 +97,7 @@ async function makeTenant(
       slug,
       name: `Tienda ${slug}`,
       status: overrides.status ?? 'live',
-      plan: overrides.plan ?? 'pro',
+      plan: overrides.plan ?? 'crece',
       ...(overrides.settings ? { settings: overrides.settings } : {}),
     },
   });
@@ -115,12 +115,12 @@ async function makeTenantWithOwner(overrides: Parameters<typeof makeTenant>[0] =
 async function recordSubscription(
   tenantId: string,
   paidUntil: Date | null,
-  overrides: { priceCents?: number; plan?: 'basico' | 'pro' | 'premium' } = {},
+  overrides: { priceCents?: number; plan?: 'emprende' | 'crece' | 'escala' } = {},
 ) {
   return platformDb.subscription.create({
     data: {
       tenantId,
-      plan: overrides.plan ?? 'pro',
+      plan: overrides.plan ?? 'crece',
       priceCents: overrides.priceCents ?? 99_900_00,
       paidUntil,
     },
@@ -232,14 +232,14 @@ describe('PUT /v1/platform/tenants/:id/subscription', () => {
 
     const anon = await request(app.getHttpServer())
       .put(`/v1/platform/tenants/${tenant.id}/subscription`)
-      .send({ plan: 'pro', priceCents: 1, paidUntil: '2027-01-01' });
+      .send({ plan: 'crece', priceCents: 1, paidUntil: '2027-01-01' });
     expect(anon.status).toBe(401);
 
     for (const path of [`tenants/${tenant.id}/subscription`, `tenants/${owner.tenantId}/subscription`]) {
       const merchantWrite = await request(app.getHttpServer())
         .put(`/v1/platform/${path}`)
         .set('cookie', owner.cookie)
-        .send({ plan: 'premium', priceCents: 0, paidUntil: '2099-01-01' });
+        .send({ plan: 'escala', priceCents: 0, paidUntil: '2099-01-01' });
       expect(merchantWrite.status, path).toBe(403);
 
       const merchantRead = await request(app.getHttpServer())
@@ -260,11 +260,11 @@ describe('PUT /v1/platform/tenants/:id/subscription', () => {
     const res = await request(app.getHttpServer())
       .put(`/v1/platform/tenants/${tenant.id}/subscription`)
       .set('cookie', cookie)
-      .send({ plan: 'premium', priceCents: 299_900_00, paidUntil: '2026-08-31', notes: 'transferencia Bancolombia' });
+      .send({ plan: 'escala', priceCents: 299_900_00, paidUntil: '2026-08-31', notes: 'transferencia Bancolombia' });
 
     expect(res.status).toBe(200);
     expect(res.body.subscription).toMatchObject({
-      plan: 'premium',
+      plan: 'escala',
       priceCents: 299_900_00,
       notes: 'transferencia Bancolombia',
       graceDays: 7,
@@ -289,13 +289,13 @@ describe('PUT /v1/platform/tenants/:id/subscription', () => {
     await request(app.getHttpServer())
       .put(`/v1/platform/tenants/${tenant.id}/subscription`)
       .set('cookie', cookie)
-      .send({ plan: 'pro', priceCents: 99_900_00, paidUntil: '2026-08-31', notes: 'agosto' })
+      .send({ plan: 'crece', priceCents: 99_900_00, paidUntil: '2026-08-31', notes: 'agosto' })
       .expect(200);
 
     await request(app.getHttpServer())
       .put(`/v1/platform/tenants/${tenant.id}/subscription`)
       .set('cookie', cookie)
-      .send({ plan: 'pro', priceCents: 99_900_00, paidUntil: '2026-09-30', notes: 'septiembre pagado' })
+      .send({ plan: 'crece', priceCents: 99_900_00, paidUntil: '2026-09-30', notes: 'septiembre pagado' })
       .expect(200);
 
     expect(await platformDb.subscription.count({ where: { tenantId: tenant.id } })).toBe(1);
@@ -323,7 +323,7 @@ describe('PUT /v1/platform/tenants/:id/subscription', () => {
     const res = await request(app.getHttpServer())
       .put(`/v1/platform/tenants/${tenant.id}/subscription`)
       .set('cookie', cookie)
-      .send({ plan: 'basico', priceCents: 0, paidUntil: null, notes: 'piloto sin cobro' });
+      .send({ plan: 'emprende', priceCents: 0, paidUntil: null, notes: 'piloto sin cobro' });
 
     expect(res.status).toBe(200);
     expect(res.body.subscription).toMatchObject({ paidUntil: null, dueState: 'sin_fecha', suspendsOn: null });
@@ -334,11 +334,11 @@ describe('PUT /v1/platform/tenants/:id/subscription', () => {
     const tenant = await makeTenant();
 
     const bad: Array<[string, Record<string, unknown>]> = [
-      ['epoch-as-number', { plan: 'pro', priceCents: 1, paidUntil: 0 }],
-      ['31 de febrero', { plan: 'pro', priceCents: 1, paidUntil: '2026-02-31' }],
-      ['free text', { plan: 'pro', priceCents: 1, paidUntil: 'ayer' }],
-      ['year typo', { plan: 'pro', priceCents: 1, paidUntil: '2016-01-01' }],
-      ['negative price', { plan: 'pro', priceCents: -1, paidUntil: '2026-09-30' }],
+      ['epoch-as-number', { plan: 'crece', priceCents: 1, paidUntil: 0 }],
+      ['31 de febrero', { plan: 'crece', priceCents: 1, paidUntil: '2026-02-31' }],
+      ['free text', { plan: 'crece', priceCents: 1, paidUntil: 'ayer' }],
+      ['year typo', { plan: 'crece', priceCents: 1, paidUntil: '2016-01-01' }],
+      ['negative price', { plan: 'crece', priceCents: -1, paidUntil: '2026-09-30' }],
       ['unknown plan', { plan: 'enterprise', priceCents: 1, paidUntil: '2026-09-30' }],
       ['missing plan', { priceCents: 1, paidUntil: '2026-09-30' }],
     ];
@@ -359,7 +359,7 @@ describe('PUT /v1/platform/tenants/:id/subscription', () => {
     const res = await request(app.getHttpServer())
       .put(`/v1/platform/tenants/${id}/subscription`)
       .set('cookie', cookie)
-      .send({ plan: 'pro', priceCents: 1, paidUntil: '2026-09-30' });
+      .send({ plan: 'crece', priceCents: 1, paidUntil: '2026-09-30' });
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('TENANT_NOT_FOUND');
     expect(await platformDb.auditLog.count({ where: { entityId: id } })).toBe(0);
@@ -375,7 +375,7 @@ describe('PUT /v1/platform/tenants/:id/subscription', () => {
     const res = await request(app.getHttpServer())
       .put(`/v1/platform/tenants/${tenant.id}/subscription`)
       .set('cookie', cookie)
-      .send({ plan: 'pro', priceCents: 99_900_00, paidUntil: '2027-01-31' });
+      .send({ plan: 'crece', priceCents: 99_900_00, paidUntil: '2027-01-31' });
 
     expect(res.status).toBe(200);
     expect(res.body.tenantStatus).toBe('suspended');
@@ -397,7 +397,7 @@ describe('PUT /v1/platform/tenants/:id/subscription', () => {
     const filled = await request(app.getHttpServer())
       .get(`/v1/platform/tenants/${tenant.id}/subscription`)
       .set('cookie', cookie);
-    expect(filled.body.subscription).toMatchObject({ plan: 'pro', priceCents: 99_900_00 });
+    expect(filled.body.subscription).toMatchObject({ plan: 'crece', priceCents: 99_900_00 });
 
     // ...and the tenant detail carries the same view, from the same mapper.
     const detail = await request(app.getHttpServer())

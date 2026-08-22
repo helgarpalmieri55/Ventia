@@ -82,7 +82,7 @@ function thisMonth(): string {
 
 let tenantSeq = 0;
 async function makeTenant(
-  overrides: { name?: string; status?: 'draft' | 'live' | 'suspended'; plan?: 'basico' | 'pro' | 'premium' } = {},
+  overrides: { name?: string; status?: 'draft' | 'live' | 'suspended'; plan?: 'emprende' | 'crece' | 'escala' } = {},
 ) {
   tenantSeq += 1;
   const slug = `pt-${tenantSeq}-${Math.random().toString(36).slice(2, 8)}`;
@@ -91,7 +91,7 @@ async function makeTenant(
       slug,
       name: overrides.name ?? `Tienda ${slug}`,
       status: overrides.status ?? 'live',
-      plan: overrides.plan ?? 'basico',
+      plan: overrides.plan ?? 'emprende',
     },
   });
 }
@@ -177,7 +177,7 @@ describe('PlatformAdminGuard', () => {
   const ROUTES: Array<[string, string, Record<string, unknown> | undefined]> = [
     ['get', '/v1/platform/tenants', undefined],
     ['get', '/v1/platform/tenants/00000000-0000-4000-8000-000000000000', undefined],
-    ['patch', '/v1/platform/tenants/00000000-0000-4000-8000-000000000000/plan', { plan: 'pro' }],
+    ['patch', '/v1/platform/tenants/00000000-0000-4000-8000-000000000000/plan', { plan: 'crece' }],
     ['post', '/v1/platform/tenants/00000000-0000-4000-8000-000000000000/suspend', { reason: 'x' }],
     ['post', '/v1/platform/tenants/00000000-0000-4000-8000-000000000000/reactivate', {}],
   ];
@@ -225,11 +225,11 @@ describe('PlatformAdminGuard', () => {
     const res = await request(app.getHttpServer())
       .patch(`/v1/platform/tenants/${owner.tenantId}/plan`)
       .set('cookie', owner.cookie)
-      .send({ plan: 'premium' });
+      .send({ plan: 'escala' });
 
     expect(res.status).toBe(403);
     const after = await platformDb.tenant.findUnique({ where: { id: owner.tenantId } });
-    expect(after?.plan).toBe('basico');
+    expect(after?.plan).toBe('emprende');
   });
 
   it('FAILS CLOSED: an unset allowlist denies even a verified operator', async () => {
@@ -356,9 +356,9 @@ describe('PlatformAdminGuard', () => {
 describe('GET /v1/platform/tenants', () => {
   it('lists tenants with plan, status, GMV and month-to-date AI usage', async () => {
     const cookie = await operatorCookie(OPERATOR_EMAIL);
-    const tenant = await makeTenant({ name: 'Café del Valle', plan: 'pro' });
+    const tenant = await makeTenant({ name: 'Café del Valle', plan: 'crece' });
     await platformDb.tenantLimits.create({
-      data: { tenantId: tenant.id, productsMax: 1000, aiMessagesMonth: 3000, staffSeats: 3 },
+      data: { tenantId: tenant.id, productsMax: 3000, aiCreditsMonth: 1200, staffSeats: 5 },
     });
 
     // Three orders: two that count, one CANCELLED that must not.
@@ -374,6 +374,9 @@ describe('GET /v1/platform/tenants', () => {
         tenantId: tenant.id,
         month: thisMonth(),
         messagesCount: 300,
+        // Iguales aquí porque todo este consumo es chat de comprador, que pesa
+        // un crédito. Se separan en cuanto hay consultas del comerciante.
+        creditsUsed: 300,
         inputTokens: 12_000,
         outputTokens: 4_000,
         // Micro-USD, the column the agent actually writes. This used to seed
@@ -392,16 +395,17 @@ describe('GET /v1/platform/tenants', () => {
     expect(res.status).toBe(200);
     const row = res.body.tenants.find((t: { id: string }) => t.id === tenant.id);
     expect(row).toBeDefined();
-    expect(row.plan).toBe('pro');
+    expect(row.plan).toBe('crece');
     expect(row.status).toBe('live');
     // 500_000 + 250_000 — the cancelled 999_999 is excluded.
     expect(row.gmv).toEqual({ totalCents: 750_000, orders: 2 });
     expect(row.ai).toMatchObject({
       messages: 300,
-      messagesLimit: 3000,
+      credits: 300,
+      creditsLimit: 1200,
       inputTokens: 12_000,
       outputTokens: 4_000,
-      percentUsed: 10,
+      percentUsed: 25,
     });
     // Cost is derived from `costMicroUsd`, and is `null` rather than 0 while
     // model prices are unconfigured — which they are in this suite. A zero
@@ -423,7 +427,7 @@ describe('GET /v1/platform/tenants', () => {
         .query({ q: 'café del' })
         .set('cookie', cookie);
 
-      const row = res.body.tenants.find((t: { plan: string }) => t.plan === 'pro');
+      const row = res.body.tenants.find((t: { plan: string }) => t.plan === 'crece');
       // 870,000 micro-USD = $0.87 = 87 cents.
       expect(row.ai.costCents).toBe(87);
       expect(row.ai.costMicroUsd).toBe(870_000);
@@ -436,8 +440,8 @@ describe('GET /v1/platform/tenants', () => {
 
   it('searches case-insensitively on name and slug, and filters by status and plan', async () => {
     const cookie = await operatorCookie(OPERATOR_EMAIL);
-    const hit = await makeTenant({ name: 'Zapatos Insensitive', plan: 'premium', status: 'suspended' });
-    await makeTenant({ name: 'Zapatos Insensitive Otro', plan: 'basico', status: 'live' });
+    const hit = await makeTenant({ name: 'Zapatos Insensitive', plan: 'escala', status: 'suspended' });
+    await makeTenant({ name: 'Zapatos Insensitive Otro', plan: 'emprende', status: 'live' });
 
     const byName = await request(app.getHttpServer())
       .get('/v1/platform/tenants')
@@ -454,7 +458,7 @@ describe('GET /v1/platform/tenants', () => {
 
     const filtered = await request(app.getHttpServer())
       .get('/v1/platform/tenants')
-      .query({ q: 'zapatos insensitive', status: 'suspended', plan: 'premium' })
+      .query({ q: 'zapatos insensitive', status: 'suspended', plan: 'escala' })
       .set('cookie', cookie);
     expect(filtered.body.tenants.map((t: { id: string }) => t.id)).toEqual([hit.id]);
   });
@@ -491,23 +495,24 @@ describe('GET /v1/platform/tenants', () => {
 describe('GET /v1/platform/tenants/:id', () => {
   it('returns the detail an operator opens the page for', async () => {
     const cookie = await operatorCookie(OPERATOR_EMAIL);
-    const tenant = await makeTenant({ name: 'Detalle SAS', plan: 'premium' });
+    const tenant = await makeTenant({ name: 'Detalle SAS', plan: 'escala' });
     await platformDb.tenantLimits.create({
       data: {
         tenantId: tenant.id,
-        productsMax: 10_000,
-        aiMessagesMonth: 10_000,
-        staffSeats: 10,
+        productsMax: 1_000_000,
+        aiCreditsMonth: 2_800,
+        staffSeats: 15,
         customDomain: true,
         humanHandoff: true,
         whatsappChannel: true,
+        instagramChannel: true,
       },
     });
     await platformDb.tenantDomain.create({
       data: { tenantId: tenant.id, domain: `${tenant.slug}.ventia.localhost`, isPrimary: true },
     });
     await platformDb.subscription.create({
-      data: { tenantId: tenant.id, plan: 'premium', priceCents: 29_900_00, notes: 'pago manual' },
+      data: { tenantId: tenant.id, plan: 'escala', priceCents: 29_900_00, notes: 'pago manual' },
     });
     await platformDb.order.create({ data: orderRow(tenant.id, 1, 120_000, 'DELIVERED') });
 
@@ -519,7 +524,7 @@ describe('GET /v1/platform/tenants/:id', () => {
     expect(res.body).toMatchObject({
       id: tenant.id,
       name: 'Detalle SAS',
-      plan: 'premium',
+      plan: 'escala',
       status: 'live',
       limitsMatchPlan: true,
       gmv: { totalCents: 120_000, orders: 1 },
@@ -527,8 +532,8 @@ describe('GET /v1/platform/tenants/:id', () => {
     expect(res.body.domains).toEqual([
       { domain: `${tenant.slug}.ventia.localhost`, isPrimary: true, verifiedAt: null },
     ]);
-    expect(res.body.subscription).toMatchObject({ plan: 'premium', priceCents: 29_900_00 });
-    expect(res.body.ai).toMatchObject({ messages: 0, messagesLimit: 10_000, percentUsed: 0 });
+    expect(res.body.subscription).toMatchObject({ plan: 'escala', priceCents: 29_900_00 });
+    expect(res.body.ai).toMatchObject({ messages: 0, credits: 0, creditsLimit: 2_800, percentUsed: 0 });
   });
 
   it('flags a tenant whose TenantLimits have drifted from its plan', async () => {
@@ -536,25 +541,25 @@ describe('GET /v1/platform/tenants/:id', () => {
     // from the plan: this state is invisible otherwise, and it is exactly what
     // an operator is trying to diagnose.
     const cookie = await operatorCookie(OPERATOR_EMAIL);
-    const drifted = await makeTenant({ plan: 'premium' });
+    const drifted = await makeTenant({ plan: 'escala' });
     await platformDb.tenantLimits.create({
-      data: { tenantId: drifted.id, productsMax: 100, aiMessagesMonth: 500, staffSeats: 1 },
+      data: { tenantId: drifted.id, productsMax: 300, aiCreditsMonth: 500, staffSeats: 1 },
     });
 
     const res = await request(app.getHttpServer())
       .get(`/v1/platform/tenants/${drifted.id}`)
       .set('cookie', cookie);
     expect(res.body.limitsMatchPlan).toBe(false);
-    expect(res.body.limits.aiMessagesMonth).toBe(500);
+    expect(res.body.limits.aiCreditsMonth).toBe(500);
 
-    const unprovisioned = await makeTenant({ plan: 'pro' });
+    const unprovisioned = await makeTenant({ plan: 'crece' });
     const res2 = await request(app.getHttpServer())
       .get(`/v1/platform/tenants/${unprovisioned.id}`)
       .set('cookie', cookie);
     expect(res2.body.limits).toBeNull();
     expect(res2.body.limitsMatchPlan).toBe(false);
     // No limits row means a zero AI budget, which is what the agent enforces.
-    expect(res2.body.ai).toMatchObject({ messagesLimit: 0, percentUsed: null });
+    expect(res2.body.ai).toMatchObject({ creditsLimit: 0, percentUsed: null });
   });
 
   it('404s an unknown tenant and 400s a malformed id', async () => {
@@ -581,8 +586,8 @@ describe('PATCH /v1/platform/tenants/:id/plan', () => {
     const cookie = await operatorCookie(OPERATOR_EMAIL);
     const { PLANS } = await import('@ventia/core');
 
-    for (const plan of ['basico', 'pro', 'premium'] as const) {
-      const tenant = await makeTenant({ plan: 'basico' });
+    for (const plan of ['emprende', 'crece', 'escala'] as const) {
+      const tenant = await makeTenant({ plan: 'emprende' });
       const res = await request(app.getHttpServer())
         .patch(`/v1/platform/tenants/${tenant.id}/plan`)
         .set('cookie', cookie)
@@ -605,51 +610,55 @@ describe('PATCH /v1/platform/tenants/:id/plan', () => {
 
   it('upserts limits for a tenant that never had a TenantLimits row', async () => {
     const cookie = await operatorCookie(OPERATOR_EMAIL);
-    const tenant = await makeTenant({ plan: 'basico' });
+    const tenant = await makeTenant({ plan: 'emprende' });
     expect(await platformDb.tenantLimits.findUnique({ where: { tenantId: tenant.id } })).toBeNull();
 
     const res = await request(app.getHttpServer())
       .patch(`/v1/platform/tenants/${tenant.id}/plan`)
       .set('cookie', cookie)
-      .send({ plan: 'pro' });
+      .send({ plan: 'crece' });
 
     expect(res.status).toBe(200);
     const limits = await platformDb.tenantLimits.findUniqueOrThrow({ where: { tenantId: tenant.id } });
-    expect(limits.aiMessagesMonth).toBe(3000);
+    expect(limits.aiCreditsMonth).toBe(1200);
     expect(limits.customDomain).toBe(true);
   });
 
   it('downgrades tighten the limits row too', async () => {
-    // A downgrade that left `premium` limits behind would keep giving away the
-    // expensive part of the product — the AI allowance — for a `basico` price.
+    // A downgrade that left `escala` limits behind would keep giving away the
+    // expensive part of the product — the AI allowance — for an `emprende` price.
     const cookie = await operatorCookie(OPERATOR_EMAIL);
-    const tenant = await makeTenant({ plan: 'premium' });
+    const tenant = await makeTenant({ plan: 'escala' });
     await platformDb.tenantLimits.create({
       data: {
         tenantId: tenant.id,
-        productsMax: 10_000,
-        aiMessagesMonth: 10_000,
-        staffSeats: 10,
+        productsMax: 1_000_000,
+        aiCreditsMonth: 2_800,
+        staffSeats: 15,
         customDomain: true,
         humanHandoff: true,
         whatsappChannel: true,
+        instagramChannel: true,
       },
     });
 
     await request(app.getHttpServer())
       .patch(`/v1/platform/tenants/${tenant.id}/plan`)
       .set('cookie', cookie)
-      .send({ plan: 'basico' })
+      .send({ plan: 'emprende' })
       .expect(200);
 
     const limits = await platformDb.tenantLimits.findUniqueOrThrow({ where: { tenantId: tenant.id } });
     expect(limits).toMatchObject({
-      productsMax: 100,
-      aiMessagesMonth: 500,
+      productsMax: 300,
+      aiCreditsMonth: 500,
       staffSeats: 1,
       customDomain: false,
       humanHandoff: false,
-      whatsappChannel: false,
+      // WhatsApp sobrevive a la bajada porque está en los tres planes; lo que
+      // se pierde es Instagram, el dominio propio y el traspaso a humano.
+      whatsappChannel: true,
+      instagramChannel: false,
     });
   });
 
@@ -667,18 +676,18 @@ describe('PATCH /v1/platform/tenants/:id/plan', () => {
     const missing = await request(app.getHttpServer())
       .patch('/v1/platform/tenants/00000000-0000-4000-8000-000000000000/plan')
       .set('cookie', cookie)
-      .send({ plan: 'pro' });
+      .send({ plan: 'crece' });
     expect(missing.status).toBe(404);
   });
 
   it('audit-logs the change with before and after', async () => {
     const cookie = await operatorCookie(OPERATOR_EMAIL);
-    const tenant = await makeTenant({ plan: 'basico' });
+    const tenant = await makeTenant({ plan: 'emprende' });
 
     await request(app.getHttpServer())
       .patch(`/v1/platform/tenants/${tenant.id}/plan`)
       .set('cookie', cookie)
-      .send({ plan: 'premium', note: 'pagó anual' })
+      .send({ plan: 'escala', note: 'pagó anual' })
       .expect(200);
 
     const audit = await platformDb.auditLog.findFirstOrThrow({
@@ -689,8 +698,8 @@ describe('PATCH /v1/platform/tenants/:id/plan', () => {
     expect(audit.actorUserId).not.toBeNull();
     expect(audit.data).toMatchObject({
       actorEmail: OPERATOR_EMAIL,
-      previousPlan: 'basico',
-      plan: 'premium',
+      previousPlan: 'emprende',
+      plan: 'escala',
       note: 'pagó anual',
     });
   });
@@ -704,7 +713,7 @@ describe('suspend / reactivate', () => {
   /** Creates a tenant with a resolvable domain and one active product, so a
    * storefront request against it is a genuine 200 before suspension. */
   async function liveStorefront() {
-    const tenant = await makeTenant({ plan: 'pro' });
+    const tenant = await makeTenant({ plan: 'crece' });
     const domain = `${tenant.slug}.ventia.localhost`;
     await platformDb.tenantDomain.create({ data: { tenantId: tenant.id, domain, isPrimary: true } });
     return { tenant, domain };

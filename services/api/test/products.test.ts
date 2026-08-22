@@ -168,7 +168,7 @@ describe('/v1/admin/products', () => {
   it('enforces the plan product limit: 402 PLAN_LIMIT_EXCEEDED on the third create', async () => {
     const { cookie, tenantId } = await signUpWithTenant('prod-limit@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 2, aiMessagesMonth: 1000, staffSeats: 3 },
+      data: { tenantId, productsMax: 2, aiCreditsMonth: 1000, staffSeats: 3 },
     });
 
     const first = await createProduct(cookie, { name: 'Producto Uno' });
@@ -184,7 +184,7 @@ describe('/v1/admin/products', () => {
   it('archives instead of hard-deleting; archived products are excluded from status=active and do not count toward the plan limit', async () => {
     const { cookie, tenantId } = await signUpWithTenant('prod-archive@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 2, aiMessagesMonth: 1000, staffSeats: 3 },
+      data: { tenantId, productsMax: 2, aiCreditsMonth: 1000, staffSeats: 3 },
     });
 
     const a = await createProduct(cookie, { name: 'Producto A', status: 'active' });
@@ -224,7 +224,7 @@ describe('/v1/admin/products', () => {
   it('re-archiving to non-archived via PATCH respects the plan limit: 402 when at capacity', async () => {
     const { cookie, tenantId } = await signUpWithTenant('prod-unarchive-limit@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 1, aiMessagesMonth: 1000, staffSeats: 3 },
+      data: { tenantId, productsMax: 1, aiCreditsMonth: 1000, staffSeats: 3 },
     });
 
     const a = await createProduct(cookie, { name: 'Producto A Unarchive' });

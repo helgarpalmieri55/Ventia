@@ -399,7 +399,15 @@ export class AgentService {
         outputTokens,
       },
     });
-    await this.budget.record(tenantId, { inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens });
+    // 'shopperMessage' spelled out rather than left to the default: the other
+    // caller (agent-command.service.ts) charges a different weight, and a
+    // reader comparing the two should see which is which without chasing a
+    // default.
+    await this.budget.record(
+      tenantId,
+      { inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens },
+      'shopperMessage',
+    );
 
     emit({ type: 'message', text: finalText });
     return {

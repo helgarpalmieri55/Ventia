@@ -121,7 +121,7 @@ export class CustomDomainsService {
     //    Every tenant is given `${slug}.${PLATFORM_ROOT_DOMAIN}` at
     //    onboarding (onboarding.service.ts), verified, `isPrimary: true`. That
     //    subdomain is not an entitlement, it is the product: it is the only
-    //    address a `basico` store has, and `basico.customDomain` is `false`.
+    //    address a `emprende` store has, and `emprende.customDomain` is `false`.
     //
     //    Applying the plan gate to it refuses a certificate for the store's
     //    own address, so every basic-plan storefront has no HTTPS and is
@@ -271,7 +271,7 @@ export class CustomDomainsService {
    * address at all: `DomainResolver` cannot resolve it, so the storefront is
    * unreachable, and `whatsapp-inbound.service.ts#storefrontBaseUrl` builds
    * links from `''`. It is also not self-recoverable — `add()` is gated on the
-   * `customDomain` plan feature, so a `basico` merchant who deleted their own
+   * `customDomain` plan feature, so a `emprende` merchant who deleted their own
    * subdomain could not put it back.
    *
    * **Deleting the primary while others remain.** `find(d => d.isPrimary)`

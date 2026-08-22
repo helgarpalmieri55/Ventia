@@ -106,15 +106,20 @@ describe('the shopper reserve — who runs out first', () => {
     expect(decideCommandBudget({ used: 10, limit: BASICO, warning: false }).budget.warning).toBe(false);
   });
 
-  it('reports the budget as it will stand AFTER the answer', () => {
+  it('reports the budget as it will stand AFTER the answer, advanced by what the answer cost', () => {
     // "Te quedan N" has to mean N MORE questions. Showing the pre-answer
     // figure would tell a merchant on their last question that they still have
     // one.
+    //
+    // It advances by TWO, the cost of a merchant question — not by one. The
+    // number beside it is credits, and advancing by one would have this screen
+    // disagree with the counter it is reporting, drifting a credit per question
+    // until it was visibly wrong.
     const after = budgetAfterAnswering({ used: 10, limit: BASICO, warning: false });
 
-    expect(after.used).toBe(11);
-    expect(after.remainingForCommands).toBe(389);
-    expect(after.remainingTotal).toBe(489);
+    expect(after.used).toBe(12);
+    expect(after.remainingForCommands).toBe(388);
+    expect(after.remainingTotal).toBe(488);
   });
 
   it('reserves a fifth', () => {

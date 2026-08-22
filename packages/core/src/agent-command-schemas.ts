@@ -239,7 +239,7 @@ export type AgentCommandInput = z.infer<typeof agentCommandInput>;
  *
  * This exists because of a consequence the shared counter creates: the
  * merchant assistant and the shopper agent spend the SAME
- * `TenantLimits.aiMessagesMonth`, so an owner who spends an afternoon asking
+ * `TenantLimits.aiCreditsMonth`, so an owner who spends an afternoon asking
  * questions is spending the budget that answers their customers. The admin UI
  * cannot warn about that unless the server says so on every answer, so it does
  * — see `SHOPPER_RESERVE_FRACTION` in the API service for the floor that keeps
@@ -248,7 +248,7 @@ export type AgentCommandInput = z.infer<typeof agentCommandInput>;
 export interface AgentCommandBudget {
   /** Messages spent this month, across BOTH assistants, after this answer. */
   used: number;
-  /** `TenantLimits.aiMessagesMonth`. Zero for a tenant with no plan row. */
+  /** `TenantLimits.aiCreditsMonth`. Zero for a tenant with no plan row. */
   limit: number;
   /** Messages held back for shoppers, which this assistant will not spend. */
   shopperReserve: number;

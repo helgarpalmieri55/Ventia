@@ -76,23 +76,23 @@ describe('isPlatformDomain', () => {
 
 describe('domainState', () => {
   const enabled = { customDomainEnabled: true, platformRoot: 'ventia.co' };
-  const basico = { customDomainEnabled: false, platformRoot: 'ventia.co' };
+  const emprende = { customDomainEnabled: false, platformRoot: 'ventia.co' };
 
   it('keeps the platform subdomain working on a plan without custom domains', () => {
-    // `basico.customDomain` is false, and the store's own subdomain is the
+    // `emprende.customDomain` is false, and the store's own subdomain is the
     // ONLY address it has. The TLS gate exempts our own zone for exactly this
-    // reason (isDomainAllowed condition 4); telling a basico merchant their
+    // reason (isDomainAllowed condition 4); telling a emprende merchant their
     // store address needs a better plan would be false and alarming.
-    expect(domainState(platformSub, basico)).toBe('platform');
+    expect(domainState(platformSub, emprende)).toBe('platform');
     expect(domainState(platformSub, enabled)).toBe('platform');
   });
 
   it('answers with the PLAN before the DNS work, not after', () => {
-    // The whole point of showing plan state on this page: a `basico` merchant
+    // The whole point of showing plan state on this page: a `emprende` merchant
     // told "pending, publish this TXT record" spends an afternoon in their
     // registrar's panel for a certificate we were never going to issue.
-    expect(domainState(row({ verified: false }), basico)).toBe('blocked_by_plan');
-    expect(domainState(row({ verified: true }), basico)).toBe('blocked_by_plan');
+    expect(domainState(row({ verified: false }), emprende)).toBe('blocked_by_plan');
+    expect(domainState(row({ verified: true }), emprende)).toBe('blocked_by_plan');
   });
 
   it('separates "waiting on DNS" from "serving"', () => {
@@ -106,7 +106,7 @@ describe('domainState', () => {
     // freshly promoted domain needs no setup.
     const promoted = row({ domain: 'mitienda.com', isPrimary: true, verified: true });
     expect(domainState(promoted, enabled)).toBe('active');
-    expect(domainState(promoted, basico)).toBe('blocked_by_plan');
+    expect(domainState(promoted, emprende)).toBe('blocked_by_plan');
   });
 
   it('never calls an UNVERIFIED domain ours, whatever its name looks like', () => {

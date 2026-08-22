@@ -1,22 +1,40 @@
 import { Injectable } from '@nestjs/common';
 import { platformDb } from '@ventia/db';
+import { creditsFor, overageCeiling, type CreditedAction } from '@ventia/core';
 import { isPlanFeatureEnabledOn, loadPlanLimits } from '../common/plan-limits';
 import { priceMicroUsd, type TokenCounts } from './agent-pricing';
 
 /**
- * The per-tenant monthly AI budget (docs/SPEC.md §7): "at 90% → merchant
- * warning; at 100% → agent replies with a fixed fallback and stops calling the
- * model. Hard cap, no exceptions."
+ * The per-tenant monthly AI budget.
+ *
+ * ## Reaching the allowance no longer silences the agent
+ *
+ * This used to be a hard cap: at 100% the agent stopped calling the model and
+ * answered a fixed sentence. That was the wrong failure. A store hits its
+ * allowance on the day it is selling most — a 20th of December, a Black Friday
+ * — and a merchant does not read the silence as a quota notice. They read it
+ * as the shop being broken, at the hour it costs them most, and the support
+ * ticket says "se cayó la tienda", not "me quedé sin créditos".
+ *
+ * So credits past the allowance are billed as overage instead of refused, and
+ * `warning` fires earlier (80%) so the merchant sees it coming. The merchant
+ * who overspends is a merchant whose store is working.
+ *
+ * There is still a stop, at {@link overageCeiling} — three times the
+ * allowance. That backstop is not for the honest busy store; it is for a
+ * scripted abuser or a loop of ours burning credits nobody authorised, where
+ * the difference between bounded and unbounded is the difference between a
+ * refund and a disaster.
  *
  * ## What is counted
  *
- * SHOPPER TURNS ANSWERED, not model API calls. One question that makes the
- * agent call three tools and the model four times is one message, because
- * "AI messages/month" is what a merchant was sold on their plan
- * (`TenantLimits.aiMessagesMonth`) and it is the only unit they can reason
- * about. Tokens are recorded alongside for cost visibility and are explicitly
- * NOT what the cap enforces — a merchant cannot predict token counts, so
- * capping on them would make the plan limit feel arbitrary.
+ * CREDITS, weighted per action (see `@ventia/core`'s `CREDIT_COST`): a shopper
+ * turn costs 1, a merchant question 2, because the merchant's assistant reads
+ * far more context to answer and costs about twice as much. One shopper
+ * question that makes the agent call three tools and the model four times is
+ * still ONE credit — the merchant was sold credits, and they cannot predict
+ * tool loops. Tokens are recorded alongside for cost visibility and are
+ * explicitly NOT what the allowance enforces.
  *
  * ## Why the check and the increment are separate calls
  *
@@ -41,13 +59,20 @@ import { priceMicroUsd, type TokenCounts } from './agent-pricing';
  */
 
 export interface BudgetStatus {
-  /** Whether the agent may call the model at all for this turn. */
+  /** Whether the agent may call the model at all for this turn. False only
+   * past the overage ceiling — reaching the plan allowance does not set it. */
   allowed: boolean;
   used: number;
   limit: number;
-  /** True from 90% of the limit onward — the merchant-warning threshold. Still
-   * `allowed`; this is a signal to surface, not a block. */
+  /** True from 80% of the allowance onward. A signal to surface, not a block;
+   * earlier than the old 90% because it now warns about money about to be
+   * spent rather than about a wall about to be hit. */
   warning: boolean;
+  /** Credits consumed BEYOND the plan allowance this month, billed as
+   * overage. Zero for the great majority of stores. */
+  overage: number;
+  /** Where the agent really does stop. */
+  ceiling: number;
   /**
    * Whether this tenant's plan includes human handoff
    * (`TenantLimits.humanHandoff`), which decides whether `escalate_to_human` is
@@ -61,12 +86,15 @@ export interface BudgetStatus {
   handoffEnabled: boolean;
 }
 
-/** The one thing the agent says when a store is out of budget. Fixed text, not
- * a model call — the whole point of the cap is that no model call happens. */
+/** The one thing the agent says past the overage ceiling. Fixed text, not a
+ * model call — the whole point of the ceiling is that no model call happens. */
 export const BUDGET_EXHAUSTED_REPLY =
   'En este momento no puedo responderte por chat. Escríbele directamente a la tienda y con gusto te ayudan.';
 
-const WARNING_THRESHOLD = 0.9;
+/** Warn at 80%, not 90%. The merchant now needs time to decide whether to move
+ * up a plan BEFORE the overage starts, and 90% of a 500-credit allowance is
+ * fifty credits of notice — an afternoon on a busy store. */
+const WARNING_THRESHOLD = 0.8;
 
 /** `YYYY-MM` in UTC. UTC rather than the store's local time so the bucket a
  * turn lands in never depends on which server answered it — two API instances
@@ -94,13 +122,19 @@ export class AgentBudgetService {
     // store getting free unmetered AI is the failure that costs money and
     // hides itself, whereas a store that cannot use the agent notices
     // immediately and gets fixed.
-    const limit = limits?.aiMessagesMonth ?? 0;
-    const used = usage?.messagesCount ?? 0;
+    const limit = limits?.aiCreditsMonth ?? 0;
+    const used = usage?.creditsUsed ?? 0;
+    // A tenant with no plan row has a limit of 0, and therefore a ceiling of
+    // 0: unprovisioned still means no agent, which is the posture the comment
+    // above is about. Overage never rescues a store that was never on a plan.
+    const ceiling = overageCeiling({ aiCreditsMonth: limit });
 
     return {
-      allowed: used < limit,
+      allowed: used < ceiling,
       used,
       limit,
+      overage: Math.max(0, used - limit),
+      ceiling,
       warning: limit > 0 && used >= Math.floor(limit * WARNING_THRESHOLD),
       // Same posture as the budget itself: no plan row means not provisioned,
       // which is `false` rather than a permissive default.
@@ -113,9 +147,17 @@ export class AgentBudgetService {
   async record(
     tenantId: string,
     tokens: TokenCounts,
+    /**
+     * Which action this was, which decides what it costs against the
+     * allowance. Defaults to the shopper turn: it is the overwhelming majority
+     * of traffic, and a caller that forgets to say should under-charge the
+     * merchant rather than over-charge them.
+     */
+    action: CreditedAction = 'shopperMessage',
     now: Date = new Date(),
   ): Promise<void> {
     const month = currentYearMonth(now);
+    const credits = creditsFor(action);
     // Priced HERE, at write time, rather than derived on read from the token
     // totals. These rows are monthly aggregates, so a later read would have to
     // price January's tokens at whatever the price happens to be when someone
@@ -136,6 +178,7 @@ export class AgentBudgetService {
         tenantId,
         month,
         messagesCount: 1,
+        creditsUsed: credits,
         inputTokens: tokens.inputTokens,
         outputTokens: tokens.outputTokens,
         cacheWriteTokens: tokens.cacheWriteTokens ?? 0,
@@ -144,6 +187,10 @@ export class AgentBudgetService {
       },
       update: {
         messagesCount: { increment: 1 },
+        // Weighted, unlike `messagesCount` beside it. The two diverge as soon
+        // as a merchant question is answered, and that divergence is the point
+        // — one is "turns taken", the other is "allowance consumed".
+        creditsUsed: { increment: credits },
         inputTokens: { increment: tokens.inputTokens },
         outputTokens: { increment: tokens.outputTokens },
         cacheWriteTokens: { increment: tokens.cacheWriteTokens ?? 0 },

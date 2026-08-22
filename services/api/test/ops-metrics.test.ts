@@ -39,11 +39,11 @@ beforeAll(async () => {
 
   // A live store, verified domain, real usage this month.
   const live = await prisma.tenant.create({
-    data: { slug: `ops-live-${Date.now()}`, name: 'Ops Live', status: 'live', plan: 'pro' },
+    data: { slug: `ops-live-${Date.now()}`, name: 'Ops Live', status: 'live', plan: 'crece' },
   });
   liveTenantId = live.id;
   await prisma.tenantLimits.create({
-    data: { tenantId: liveTenantId, productsMax: 1000, aiMessagesMonth: 100, staffSeats: 3, customDomain: true },
+    data: { tenantId: liveTenantId, productsMax: 1000, aiCreditsMonth: 100, staffSeats: 3, customDomain: true },
   });
   await prisma.tenantDomain.create({
     data: { tenantId: liveTenantId, domain: `${live.slug}.ventia.localhost`, isPrimary: true, verifiedAt: new Date() },
@@ -53,6 +53,7 @@ beforeAll(async () => {
       tenantId: liveTenantId,
       month: MONTH,
       messagesCount: 95,
+      creditsUsed: 95,
       inputTokens: 1_000_000,
       outputTokens: 200_000,
       costMicroUsd: 6_000_000n,
@@ -61,11 +62,11 @@ beforeAll(async () => {
 
   // A live store with NO domain at all — unreachable, which is critical.
   const quiet = await prisma.tenant.create({
-    data: { slug: `ops-quiet-${Date.now()}`, name: 'Ops Quiet', status: 'live', plan: 'basico' },
+    data: { slug: `ops-quiet-${Date.now()}`, name: 'Ops Quiet', status: 'live', plan: 'emprende' },
   });
   quietTenantId = quiet.id;
   await prisma.tenantLimits.create({
-    data: { tenantId: quietTenantId, productsMax: 100, aiMessagesMonth: 500, staffSeats: 1, customDomain: false },
+    data: { tenantId: quietTenantId, productsMax: 100, aiCreditsMonth: 500, staffSeats: 1, customDomain: false },
   });
 });
 
@@ -195,7 +196,7 @@ describe('GET /v1/ops/metrics — per-store health', () => {
     const res = await get(TOKEN);
     const store = res.body.stores.find((s: { tenantId: string }) => s.tenantId === orphan.id);
 
-    expect(store.ai.messagesLimit).toBe(0);
+    expect(store.ai.creditsLimit).toBe(0);
     expect(store.ai.percentUsed).toBeNull();
     expect(store.issues).toContain('ai_budget_unprovisioned');
   });
@@ -205,7 +206,7 @@ describe('GET /v1/ops/metrics — per-store health', () => {
       data: { slug: `ops-draft-${Date.now()}`, name: 'Ops Draft', status: 'draft' },
     });
     await prisma.tenantLimits.create({
-      data: { tenantId: draft.id, productsMax: 100, aiMessagesMonth: 500, staffSeats: 1, customDomain: false },
+      data: { tenantId: draft.id, productsMax: 100, aiCreditsMonth: 500, staffSeats: 1, customDomain: false },
     });
 
     const res = await get(TOKEN);

@@ -278,7 +278,7 @@ describe('POST /v1/admin/import/dry-run', () => {
   it('flags limitExceeded when creates would push past productsMax', async () => {
     const { cookie, tenantId } = await signUpWithTenant('csv-dryrun-limit@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 1, aiMessagesMonth: 1000, staffSeats: 3 },
+      data: { tenantId, productsMax: 1, aiCreditsMonth: 1000, staffSeats: 3 },
     });
 
     const csv = csvOf(
@@ -640,7 +640,7 @@ describe('POST /v1/admin/import/commit', () => {
     // Now cap the tenant at exactly its current non-archived count (1: just
     // "Producto Activo") -- un-archiving the second product would push it to 2.
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 1, aiMessagesMonth: 1000, staffSeats: 3 },
+      data: { tenantId, productsMax: 1, aiCreditsMonth: 1000, staffSeats: 3 },
     });
 
     // Un-archiving via CSV (status column explicitly set) would push the
@@ -664,7 +664,7 @@ describe('POST /v1/admin/import/commit', () => {
   it('returns 402 PLAN_LIMIT_EXCEEDED when creates would exceed productsMax, nothing persisted', async () => {
     const { cookie, tenantId } = await signUpWithTenant('csv-commit-limit@demo.co', 'owner');
     await platformDb.tenantLimits.create({
-      data: { tenantId, productsMax: 1, aiMessagesMonth: 1000, staffSeats: 3 },
+      data: { tenantId, productsMax: 1, aiCreditsMonth: 1000, staffSeats: 3 },
     });
 
     const csv = csvOf(
