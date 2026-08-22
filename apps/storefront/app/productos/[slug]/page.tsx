@@ -9,6 +9,7 @@ import { Price } from '../../../components/price';
 import { AddToCart } from '../../../components/add-to-cart';
 import { ProductImage } from '../../../components/product-image';
 import { ProductReviews } from '../../../components/product-reviews';
+import { WishlistHeart } from '../../../components/wishlist-heart';
 import { StarRating } from '../../../components/star-rating';
 import { fetchProductReviews, formatAverage, reviewCountLabel } from '../../../lib/reviews-api';
 import { Badge } from '@ventia/ui';
@@ -243,6 +244,15 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
               variants={product.variants}
               inStock={product.inStock}
             />
+
+            {/* Below "Agregar al carrito", not beside it: saving for later is
+                the secondary action on this page and must not compete with
+                the one that makes the sale. Its own client island rather than
+                a prop on AddToCart — it needs the SESSION, which that
+                component has no reason to know about, and it stays useful for
+                a product that is out of stock (which is precisely when a
+                shopper wants to be reminded of it later). */}
+            <WishlistHeart productId={product.id} productName={product.name} />
 
             {/* No markdown renderer exists in this codebase yet — rendering
                 descriptionMd as plain text (whitespace-pre-wrap so at least

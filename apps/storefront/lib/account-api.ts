@@ -239,3 +239,171 @@ export async function fetchMyOrders(fetchImpl: typeof fetch = fetch): Promise<Sh
   const body = await request<{ orders: ShopperOrder[] }>('/orders', { method: 'GET' }, fetchImpl);
   return body.orders;
 }
+
+// ---- saved addresses ------------------------------------------------------
+
+/**
+ * A Colombian shipping address — structurally `checkoutAddressSchema` in
+ * `@ventia/core`, hand-rolled here for the same reason every other DTO in
+ * this app is (`checkout-api.ts`'s `CheckoutSubmitInput`, the PDP's
+ * `StorefrontProductDetail`): the storefront shares no DTO package with the
+ * API. The field NAMES are load-bearing and must not be "improved" into
+ * English — they are what the server validates and what `Order
+ * .shippingAddress` stores, and `telefono` is a separate field from the
+ * order's contact `phone`.
+ *
+ * No postal code, deliberately: see `address-schemas.ts`.
+ */
+export interface CheckoutAddress {
+  nombreCompleto: string;
+  telefono: string;
+  departamentoCode: string;
+  municipioName: string;
+  direccion: string;
+  complemento?: string;
+  barrio?: string;
+  notas?: string;
+}
+
+/** One row of `GET /addresses`. `createdAt` is a string here and a `Date` on
+ * the API — it crossed JSON to get here, and nothing in the UI does date
+ * arithmetic with it, so it is deliberately not revived into a `Date` that
+ * would only be re-serialized. */
+export interface SavedAddress {
+  id: string;
+  label: string | null;
+  address: CheckoutAddress;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+/** JSON request against the account proxy. Exported (unlike the module-local
+ * `request` it wraps) so `wishlist-api.ts` gets the same
+ * `credentials: 'include'` and the same `AccountApiError` mapping without a
+ * second copy of either — a wishlist call that failed with a
+ * differently-shaped error than an address call would make every caller
+ * handle two error types for one API. */
+export async function accountJson<T>(
+  path: string,
+  init: RequestInit,
+  fetchImpl: typeof fetch = fetch,
+): Promise<T> {
+  return request<T>(path, init, fetchImpl);
+}
+
+/**
+ * A request whose success is a 204 with no body — every `DELETE` here, and
+ * `POST /wishlist`.
+ *
+ * Never calls `res.json()`: a 204 carries no body, and parsing one throws a
+ * `SyntaxError` that would surface to the shopper as "something went wrong"
+ * on an operation that in fact SUCCEEDED. Failures still go through
+ * `parseErrorAndThrow`, so a 404/409 keeps its `error` code.
+ */
+export async function accountNoContent(
+  path: string,
+  init: RequestInit,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const res = await fetchImpl(`/api/account${path}`, { ...init, credentials: 'include' });
+  if (!res.ok) await parseErrorAndThrow(res);
+}
+
+/** Every address the shopper has saved, default first then newest — the
+ * API's own ordering, preserved rather than re-sorted here so the list a
+ * shopper reads matches the one checkout pre-fills from. */
+export async function fetchMyAddresses(fetchImpl: typeof fetch = fetch): Promise<SavedAddress[]> {
+  const body = await request<{ addresses: SavedAddress[] }>('/addresses', { method: 'GET' }, fetchImpl);
+  return body.addresses;
+}
+
+/**
+ * The address checkout should pre-fill, or `null`.
+ *
+ * Derived from the list rather than from a dedicated endpoint, because the
+ * API exposes none — `ShopperAddressesService.defaultFor` exists but no route
+ * reaches it. Reading `isDefault` off the list is therefore the only honest
+ * implementation, and it is exact: a partial unique index on the table
+ * permits at most one default row per account, so `find` cannot be ambiguous.
+ *
+ * A 401 becomes `null`, not a throw. Checkout calls this only for a shopper
+ * it believes is signed in, but that belief comes from a `/me` that may have
+ * been answered minutes earlier — a session that expired in between must
+ * leave the guest checkout completely untouched, not break it with an error
+ * banner about a convenience feature.
+ */
+export async function fetchDefaultAddress(fetchImpl: typeof fetch = fetch): Promise<SavedAddress | null> {
+  let addresses: SavedAddress[];
+  try {
+    addresses = await fetchMyAddresses(fetchImpl);
+  } catch (err) {
+    // Narrowed on the STATUS, not on the code string, for the same reason
+    // `fetchMe` maps 401 to `null`: no session is an answer here, not a
+    // fault, and a rename of `SHOPPER_UNAUTHORIZED` must not turn it into one.
+    if (err instanceof AccountApiError && err.status === 401) return null;
+    throw err;
+  }
+  return addresses.find((a) => a.isDefault) ?? null;
+}
+
+/** Saves one. `label` is omitted when blank rather than sent as `''` — the
+ * API's schema is `min(1).optional()`, exactly like `register`'s `name`, so
+ * an empty string is a 400 while an absent key is "didn't say". */
+export async function createAddress(
+  input: { label?: string; address: CheckoutAddress; isDefault?: boolean },
+  fetchImpl: typeof fetch = fetch,
+): Promise<SavedAddress> {
+  const body: Record<string, unknown> = { address: input.address };
+  if (input.label !== undefined && input.label !== '') body.label = input.label;
+  if (input.isDefault !== undefined) body.isDefault = input.isDefault;
+  return request<SavedAddress>('/addresses', jsonPost(body), fetchImpl);
+}
+
+/**
+ * Edits one.
+ *
+ * `label: null` clears it — distinct from omitting the key, which leaves the
+ * existing label alone, and the reason this takes `string | null | undefined`
+ * rather than collapsing blank to "leave it". A shopper who deletes the text
+ * in the label field is asking for the label to go away.
+ *
+ * `address` is always sent whole. The API replaces it wholesale on purpose:
+ * a merged partial could produce a municipio that no longer belongs to its
+ * departamento, which is the one cross-field rule the address schema exists
+ * to enforce.
+ */
+export async function updateAddress(
+  id: string,
+  input: { label?: string | null; address?: CheckoutAddress },
+  fetchImpl: typeof fetch = fetch,
+): Promise<SavedAddress> {
+  const body: Record<string, unknown> = {};
+  if (input.label !== undefined) body.label = input.label;
+  if (input.address !== undefined) body.address = input.address;
+  return request<SavedAddress>(
+    `/addresses/${encodeURIComponent(id)}`,
+    { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+    fetchImpl,
+  );
+}
+
+/** Promotes one to default. A POST that creates nothing — the API answers
+ * 200 with the promoted row, and the caller should adopt that row rather
+ * than assume, because promoting one address DEMOTES another. */
+export async function setDefaultAddress(
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<SavedAddress> {
+  return request<SavedAddress>(
+    `/addresses/${encodeURIComponent(id)}/default`,
+    { method: 'POST' },
+    fetchImpl,
+  );
+}
+
+/** Removes one. Deleting the default does NOT promote another — the API is
+ * explicit about that, and the UI must not paper over it by picking one:
+ * checkout would then pre-fill an address the shopper never chose. */
+export async function deleteAddress(id: string, fetchImpl: typeof fetch = fetch): Promise<void> {
+  await accountNoContent(`/addresses/${encodeURIComponent(id)}`, { method: 'DELETE' }, fetchImpl);
+}

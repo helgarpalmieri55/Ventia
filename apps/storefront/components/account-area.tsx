@@ -94,8 +94,46 @@ export function AccountArea() {
 
       {shopper.emailVerified ? null : <UnverifiedCard email={shopper.email} />}
 
+      <AccountLinksCard />
+
       <OrdersCard />
     </main>
+  );
+}
+
+/**
+ * The other two things an account holds, which live on their own screens.
+ *
+ * Links rather than sections inlined here: both are lists that mutate, each
+ * loads its own data, and a shopper who came to check an order should not
+ * wait on two more requests to see it. The order (addresses, then favourites)
+ * follows what each is worth — the saved address is what makes the next
+ * checkout shorter.
+ */
+function AccountLinksCard() {
+  return (
+    <Card>
+      <CardContent className="flex flex-col divide-y divide-border py-0">
+        <Link
+          href="/cuenta/direcciones"
+          className="flex flex-col gap-0.5 py-4 underline-offset-4 hover:underline"
+        >
+          <span className="font-medium">Mis direcciones</span>
+          <span className="text-sm text-muted-foreground">
+            Guarda dónde recibes tus pedidos y llena el pago más rápido.
+          </span>
+        </Link>
+        <Link
+          href="/cuenta/favoritos"
+          className="flex flex-col gap-0.5 py-4 underline-offset-4 hover:underline"
+        >
+          <span className="font-medium">Mis favoritos</span>
+          <span className="text-sm text-muted-foreground">
+            Los productos que guardaste para después.
+          </span>
+        </Link>
+      </CardContent>
+    </Card>
   );
 }
 

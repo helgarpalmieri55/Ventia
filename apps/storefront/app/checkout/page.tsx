@@ -9,6 +9,8 @@ import { useShopper } from '../../lib/shopper-context';
 import { CheckoutSignIn } from '../../components/checkout-sign-in';
 import { formatCOP } from '../../lib/format';
 import { municipioOptionsFor, validateCheckoutStep, type CheckoutFormState } from '../../lib/checkout-form';
+import { fetchDefaultAddress } from '../../lib/account-api';
+import { applyAddressPrefill } from '../../lib/account-addresses';
 import {
   CheckoutApiError,
   fetchShippingQuote,
@@ -193,6 +195,45 @@ export default function CheckoutPage() {
       email: prev.email === '' ? shopper.email : prev.email,
       nombreCompleto: prev.nombreCompleto === '' ? (shopper.name ?? '') : prev.nombreCompleto,
     }));
+  }, [shopper]);
+
+  /**
+   * Fills the shipping address from the account's DEFAULT saved address.
+   *
+   * ## Guest checkout does not change at all
+   *
+   * Guarded on `shopper` before anything is requested, so a guest issues no
+   * extra call and reaches an identical form. And `fetchDefaultAddress` maps
+   * a 401 to `null` rather than throwing — a session that expired between the
+   * `/me` this page trusted and this request leaves checkout exactly as it
+   * was, with no banner about a convenience the shopper never asked for.
+   *
+   * ## A failure here is silent on purpose
+   *
+   * Logged, never shown. The address fields are usable, typed into and
+   * submitted with no pre-fill whatsoever; an error banner would tell a
+   * shopper at the payment step that something is wrong with an order that is
+   * in fact completely fine, which is a reason to abandon.
+   *
+   * The fields themselves are only ever filled when EMPTY — see
+   * `applyAddressPrefill`, which also keeps departamento and municipio
+   * together so this can never produce the mismatched pairing the address
+   * schema rejects.
+   */
+  React.useEffect(() => {
+    if (!shopper) return;
+    let cancelled = false;
+    fetchDefaultAddress()
+      .then((saved) => {
+        if (cancelled || !saved) return;
+        setForm((prev) => applyAddressPrefill(prev, saved));
+      })
+      .catch((err) => {
+        console.error('[checkout] failed to load default address', err);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [shopper]);
 
   function setField<K extends keyof CheckoutFormState>(key: K, value: CheckoutFormState[K]) {

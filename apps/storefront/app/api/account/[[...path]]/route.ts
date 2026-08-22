@@ -81,3 +81,18 @@ export async function POST(req: Request, { params }: RouteParams): Promise<Respo
 export async function PATCH(req: Request, { params }: RouteParams): Promise<Response> {
   return proxy(req, (await params).path);
 }
+
+/** Needed by `DELETE /addresses/:id` and `DELETE /wishlist/:productId`. A
+ * Route Handler only accepts the methods it exports, so without this the
+ * browser gets a 405 from Next itself and the request never reaches the API
+ * — which is exactly what happened before the account area had screens: the
+ * endpoints existed and were tested, and nothing in this app had yet tried
+ * to delete anything through the proxy.
+ *
+ * `hasBody` above is false for DELETE, matching the API: both delete routes
+ * take their id from the path and answer 204 with no body, which `proxy()`
+ * already handles.
+ */
+export async function DELETE(req: Request, { params }: RouteParams): Promise<Response> {
+  return proxy(req, (await params).path);
+}
