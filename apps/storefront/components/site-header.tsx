@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { Input } from '@ventia/ui';
 import type { CategoryTreeNode } from '../lib/category-tree';
+import { AccountButton } from './account-button';
 import { CartButton } from './cart-button';
 
 /**
@@ -91,6 +92,11 @@ export function SiteHeader({ storeName, logoUrl, categories }: SiteHeaderProps) 
             <SearchIcon />
           </Link>
 
+          {/* Before the cart, not after: the cart is the action a shopper
+              reaches for mid-purchase and stays in the corner it has always
+              been in. An account is an offer beside it — never a step in
+              front of it, since guest checkout is the default path. */}
+          <AccountButton />
           <CartButton />
         </div>
 

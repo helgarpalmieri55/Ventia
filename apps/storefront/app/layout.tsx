@@ -6,6 +6,7 @@ import { buildCategoryNav, type StorefrontCategory } from '../lib/category-tree'
 import { buildThemeVars, type TenantTheme } from '../lib/theme';
 import { fontVariables } from '../lib/fonts';
 import { CartProvider } from '../lib/cart-context';
+import { ShopperProvider } from '../lib/shopper-context';
 import { CartDrawer } from '../components/cart-drawer';
 import { ChatWidget } from '../components/chat-widget';
 import { SiteHeader } from '../components/site-header';
@@ -67,28 +68,36 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             sibling is ordinary Next.js composition, no serialization concern
             since nothing unserializable crosses that boundary. */}
         <CartProvider>
-          <CartDrawer />
-          {/* Inside `CartProvider` because the header owns the cart trigger
-              (components/cart-button.tsx) — it used to float over the page as
-              a fixed circle, which would now collide with the sticky header.
-              Skipped entirely for an unresolved host: there is no store to
-              name, and app/page.tsx renders the platform landing copy. */}
-          {tenant ? (
-            <SiteHeader storeName={tenant.name} logoUrl={logoUrl} categories={categories} />
-          ) : null}
-          {children}
-          {/* Rendered for every store, unconditionally. The four pages it
-              links are the ones Ley 1581 art. 12 / Decreto 1074 require to be
-              *made known* rather than merely to exist at a URL, and before
-              this the storefront linked to none of them from anywhere. Inside
-              CartProvider only because it is `children`'s sibling; it is a
-              plain Server Component and uses no cart state. */}
-          <SiteFooter />
-          {/* Only for a store whose plan actually includes AI messages — see
-              `agentEnabled` on the tenant resolve. Offering a chat that can
-              only answer "no puedo responderte por chat" is worse than
-              offering none. */}
-          {tenant?.agentEnabled ? <ChatWidget agentName={tenant.agentName} /> : null}
+          {/* INSIDE `CartProvider`, and the nesting is load-bearing:
+              `ShopperProvider.adoptSession` hands the cart that comes back
+              with a sign-in straight to `useCart().adoptCart`, so the cart
+              context has to exist above it. Signing in merges the guest
+              basket into the account's server-side; this is what stops the
+              shopper's basket from appearing to vanish at that moment. */}
+          <ShopperProvider>
+            <CartDrawer />
+            {/* Inside `CartProvider` because the header owns the cart trigger
+                (components/cart-button.tsx) — it used to float over the page as
+                a fixed circle, which would now collide with the sticky header.
+                Skipped entirely for an unresolved host: there is no store to
+                name, and app/page.tsx renders the platform landing copy. */}
+            {tenant ? (
+              <SiteHeader storeName={tenant.name} logoUrl={logoUrl} categories={categories} />
+            ) : null}
+            {children}
+            {/* Rendered for every store, unconditionally. The four pages it
+                links are the ones Ley 1581 art. 12 / Decreto 1074 require to be
+                *made known* rather than merely to exist at a URL, and before
+                this the storefront linked to none of them from anywhere. Inside
+                CartProvider only because it is `children`'s sibling; it is a
+                plain Server Component and uses no cart state. */}
+            <SiteFooter />
+            {/* Only for a store whose plan actually includes AI messages — see
+                `agentEnabled` on the tenant resolve. Offering a chat that can
+                only answer "no puedo responderte por chat" is worse than
+                offering none. */}
+            {tenant?.agentEnabled ? <ChatWidget agentName={tenant.agentName} /> : null}
+          </ShopperProvider>
         </CartProvider>
       </body>
     </html>

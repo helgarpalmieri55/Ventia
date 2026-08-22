@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Input, Select, Spinner } from '@ventia/ui';
 import { DEPARTAMENTOS } from '@ventia/core';
 import { useCart } from '../../lib/cart-context';
+import { useShopper } from '../../lib/shopper-context';
+import { CheckoutSignIn } from '../../components/checkout-sign-in';
 import { formatCOP } from '../../lib/format';
 import { municipioOptionsFor, validateCheckoutStep, type CheckoutFormState } from '../../lib/checkout-form';
 import {
@@ -163,6 +165,7 @@ function bannerMessageFor(
 export default function CheckoutPage() {
   const router = useRouter();
   const { cart, loading: cartLoading, clearCart } = useCart();
+  const { shopper } = useShopper();
 
   const [form, setForm] = React.useState<CheckoutFormState>(EMPTY_FORM);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
@@ -171,6 +174,26 @@ export default function CheckoutPage() {
   const [quoteError, setQuoteError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [bannerError, setBannerError] = React.useState<string | null>(null);
+
+  /**
+   * Fills contact details from the account, both for a shopper who arrived
+   * already signed in and for one who signs in from the panel above without
+   * leaving this page (`shopper` changes identity in the same render pass
+   * that applies the merged cart).
+   *
+   * Only ever fills a field that is still EMPTY. Overwriting what someone
+   * already typed would be the checkout quietly changing the address an order
+   * ships to — a guest may legitimately be buying under a different email
+   * from the one their account uses, and this must not silently correct them.
+   */
+  React.useEffect(() => {
+    if (!shopper) return;
+    setForm((prev) => ({
+      ...prev,
+      email: prev.email === '' ? shopper.email : prev.email,
+      nombreCompleto: prev.nombreCompleto === '' ? (shopper.name ?? '') : prev.nombreCompleto,
+    }));
+  }, [shopper]);
 
   function setField<K extends keyof CheckoutFormState>(key: K, value: CheckoutFormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -350,6 +373,10 @@ export default function CheckoutPage() {
   return (
     <main className="mx-auto max-w-2xl px-4 py-8">
       <h1 className="mb-6 text-2xl font-semibold">Pagar</h1>
+
+      {/* Above the form and collapsed: an account is an offer here, not a
+          step. Nothing below it changes for a shopper who ignores it. */}
+      <CheckoutSignIn />
 
       {bannerError ? (
         <Alert variant="error" className="mb-6">

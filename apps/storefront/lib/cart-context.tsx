@@ -20,6 +20,25 @@ export interface CartContextValue {
    * just makes the client's own state (drawer badge count, `/carrito` page)
    * match that reality immediately, without waiting on/triggering a refetch. */
   clearCart: () => void;
+  /**
+   * Replaces the local cart with one the SERVER just handed back outside the
+   * mutations above — specifically the `cart` in a sign-in response
+   * (`lib/account-api.ts`'s `ShopperSession`).
+   *
+   * Deliberately not a `refreshCart()` call at those call sites. Signing in
+   * merges the guest basket into the account's and re-points `ventia_cart` at
+   * the result, and the sign-in response already IS that merged cart; a blind
+   * refetch would spend a round trip to learn what it was just told, and race
+   * the cookie it depends on while doing it. A shopper who signs in on the
+   * checkout page and watches their basket flicker or empty has been handed a
+   * reason to abandon at the last screen — which is the entire thing the
+   * merge exists to prevent.
+   *
+   * Goes through the same queue as the mutations so a qty change that was
+   * already in flight when the shopper signed in cannot land afterwards and
+   * overwrite the merged cart with the pre-merge one.
+   */
+  adoptCart: (cart: Cart) => Promise<void>;
   /** Re-reads the cart from the server. Needed when the cart changed WITHOUT
    * going through one of the mutations above — which happens exactly once, on
    * adopting an agent-built cart (`/carrito?c=…`), where the server swaps
@@ -108,6 +127,14 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     setCart({ lines: [], subtotalCents: 0, taxCents: 0 });
   }, []);
 
+  const adoptCart = React.useCallback(
+    (next: Cart) =>
+      enqueue(async () => {
+        setCart(next);
+      }),
+    [enqueue],
+  );
+
   const refreshCart = React.useCallback(
     () =>
       enqueue(async () => {
@@ -127,9 +154,10 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       updateItem,
       removeItem,
       clearCart,
+      adoptCart,
       refreshCart,
     }),
-    [cart, loading, isOpen, addItem, updateItem, removeItem, clearCart, refreshCart],
+    [cart, loading, isOpen, addItem, updateItem, removeItem, clearCart, adoptCart, refreshCart],
   );
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
