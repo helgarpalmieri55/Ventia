@@ -18,3 +18,5 @@ export * from './impersonation-schemas.js';
 export * from './shopper-schemas.js';
 export * from './dashboard-schemas.js';
 export * from './agent-command-schemas.js';
+export * from './collection-schemas.js';
+export * from './review-schemas.js';

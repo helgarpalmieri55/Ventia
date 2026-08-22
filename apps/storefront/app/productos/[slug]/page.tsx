@@ -7,6 +7,9 @@ import { ProductGrid } from '../../../components/product-grid';
 import { Price } from '../../../components/price';
 import { AddToCart } from '../../../components/add-to-cart';
 import { ProductImage } from '../../../components/product-image';
+import { ProductReviews } from '../../../components/product-reviews';
+import { StarRating } from '../../../components/star-rating';
+import { fetchProductReviews, formatAverage, reviewCountLabel } from '../../../lib/reviews-api';
 import { Badge } from '@ventia/ui';
 
 /** Shape of `GET /v1/storefront/products/:slug`'s response (see
@@ -119,6 +122,14 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
   );
   if (!product) notFound();
 
+  // Reviews are fetched AFTER the product rather than alongside it because
+  // they are addressed by the same slug and are meaningless if it does not
+  // resolve — and because this call cannot fail the page (see
+  // `fetchProductReviews`), so it has nothing to add to the notFound()
+  // decision above.
+  const reviews = await fetchProductReviews(tenantHost, slug);
+  const summary = reviews?.summary ?? null;
+
   // schema.org Product structured data. `price` is a plain decimal string in
   // pesos (the currency's major unit) per schema.org's Offer.price
   // convention — NOT `formatCOP`'s display formatting (`"$ 45.900"`) — derived
@@ -136,6 +147,20 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
       price: String(Math.round(product.priceCents / 100)),
       availability: product.inStock ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
     },
+    // Only when there is something to aggregate. `aggregateRating` with a
+    // count of 0 is invalid structured data, and Google's own rule is that the
+    // rating must match what a visitor SEES on the page — which is the second
+    // reason the API's average counts published reviews only. A number here
+    // that included hidden ones would be a claim the page itself contradicts.
+    ...(summary && summary.average !== null && summary.count > 0
+      ? {
+          aggregateRating: {
+            '@type': 'AggregateRating',
+            ratingValue: String(summary.average),
+            reviewCount: summary.count,
+          },
+        }
+      : {}),
   };
 
   return (
@@ -179,6 +204,22 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
 
           <div className="flex flex-col gap-4">
             <h1 className="text-2xl font-semibold">{product.name}</h1>
+
+            {/* Above the price, and a link rather than a static badge: this is
+                the one summary a shopper looks for before reading anything
+                else, and the reviews it summarizes are at the bottom of a long
+                page on a phone. Rendered only when there IS a rating — an
+                empty star row next to a new product looks like a bad one. */}
+            {summary && summary.average !== null ? (
+              <a href="#resenas" className="flex w-fit items-center gap-2 text-sm">
+                <StarRating average={summary.average} size="sm" />
+                <span className="font-medium">{formatAverage(summary.average)}</span>
+                <span className="text-muted-foreground underline underline-offset-4">
+                  {reviewCountLabel(summary.count)}
+                </span>
+              </a>
+            ) : null}
+
             <Price cents={product.priceCents} compareAtCents={product.compareAtCents} />
 
             <div>
@@ -206,6 +247,8 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
             <div className="whitespace-pre-wrap text-sm text-muted-foreground">{product.descriptionMd}</div>
           </div>
         </div>
+
+        <ProductReviews productId={product.id} data={reviews} />
 
         {product.related.length > 0 ? (
           <section>

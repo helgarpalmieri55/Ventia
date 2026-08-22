@@ -3,8 +3,10 @@ import type Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
 import { AdminModule } from './admin/admin.module';
 import { AgentModule } from './agent/agent.module';
+import { AgentCommandModule } from './agent-command/agent-command.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { CheckoutModule } from './checkout/checkout.module';
+import { CollectionsModule } from './collections/collections.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { HealthController } from './health/health.controller';
 import { ObservabilityModule } from './observability/observability.module';
@@ -17,6 +19,7 @@ import { ShopperModule } from './shopper/shopper.module';
 import { StaffModule } from './staff/staff.module';
 import { PlatformModule } from './platform/platform.module';
 import { PrivacyModule } from './privacy/privacy.module';
+import { ReviewsModule } from './reviews/reviews.module';
 import { StorefrontModule } from './storefront/storefront.module';
 import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { RedisModule, REDIS_CLIENT } from './common/redis.module';
@@ -35,8 +38,10 @@ export { REDIS_CLIENT };
     RedisModule,
     AdminModule,
     AgentModule,
+    AgentCommandModule,
     CatalogModule,
     CheckoutModule,
+    CollectionsModule,
     DashboardModule,
     ObservabilityModule,
     OnboardingModule,
@@ -48,6 +53,7 @@ export { REDIS_CLIENT };
     StaffModule,
     PlatformModule,
     PrivacyModule,
+    ReviewsModule,
     StorefrontModule,
     WhatsAppModule,
   ],

@@ -4,6 +4,8 @@ import { fetchTenantForHost } from '../lib/tenant';
 import { fetchStorefrontOrNull } from '../lib/storefront-api';
 import { formatProductCount } from '../lib/format';
 import { buildCategoryNav, type StorefrontCategory } from '../lib/category-tree';
+import { fetchCollections, visibleCollections } from '../lib/collections-api';
+import { CollectionStrip } from '../components/collection-strip';
 import { ProductGrid } from '../components/product-grid';
 import type { ProductCardData } from '../components/product-card';
 
@@ -45,11 +47,15 @@ export default async function Home() {
   // fetchStorefrontOrNull (not fetchStorefront): a transient upstream error
   // here (e.g. a suspend-race with middleware.ts's own tenant check) should
   // degrade this section to empty, not crash the whole page render.
-  const [categories, productsResult] = await Promise.all([
+  const [categories, collections, productsResult] = await Promise.all([
     fetchStorefrontOrNull<StorefrontCategory[]>(tenantHost, '/v1/storefront/categories'),
+    fetchCollections(tenantHost),
     fetchStorefrontOrNull<StorefrontProductListResult>(tenantHost, '/v1/storefront/products?sort=newest&pageSize=8'),
   ]);
   const newest = productsResult?.items ?? [];
+  // Empty strips are dropped here as well as server-side — see
+  // `visibleCollections` for why the rule is enforced at both ends.
+  const strips = visibleCollections(collections);
   // Top level only. The endpoint returns the store's whole category set as a
   // flat list, so before this every subcategory was rendered as its own
   // top-level tile — "Mujer", "Ropa", "Vestidos" side by side as if they were
@@ -93,6 +99,16 @@ export default async function Home() {
           </div>
         </section>
       ) : null}
+
+      {/* The merchant's own curation sits above "Novedades", which is the
+          system's automatic row: when a merchant has taken the trouble to
+          arrange a shop window, that window is what a shopper should meet
+          first. Below the category map, though — that is the store's
+          navigation, and a shopper who arrived looking for a department
+          should not have to scroll past a sale to find it. */}
+      {strips.map((collection) => (
+        <CollectionStrip key={collection.id} collection={collection} />
+      ))}
 
       <section>
         <h2 className="mb-4 text-xl font-semibold">Novedades</h2>

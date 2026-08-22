@@ -1,6 +1,7 @@
 import { CONVERSATIONS_PATH } from './conversations-api';
 import { CUSTOMERS_PATH } from './customers-api';
 import { DOMAINS_PATH } from './domains-api';
+import { ASSISTANT_PATH } from './assistant-api';
 import { ALERTS_PATH } from './payment-alerts-api';
 
 export type Role = 'owner' | 'staff';
@@ -48,6 +49,13 @@ const CATALOG_ITEMS: NavItem[] = [
   // merchant opens this — and its empty state is a real answer rather than
   // filler.
   { href: CONVERSATIONS_PATH, label: 'Conversaciones' },
+  // Both roles, mirroring the API: `AgentCommandController` sits behind
+  // AdminSessionGuard with no @Roles(), like the dashboard and orders. What it
+  // answers is a summary of orders, products and conversations a staff session
+  // can already page through one screen at a time, and it has no write tool at
+  // all — so gating the summary would hide nothing a staff member cannot
+  // already read.
+  { href: ASSISTANT_PATH, label: 'Asistente' },
 ];
 
 /** Owner-only items — the server mirrors this with @Roles('owner') on the
