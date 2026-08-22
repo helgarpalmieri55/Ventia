@@ -12,6 +12,7 @@ import { OpsModule } from './ops/ops.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentAlertsModule } from './payment-alerts/payment-alerts.module';
 import { SettingsModule } from './settings/settings.module';
+import { ShopperModule } from './shopper/shopper.module';
 import { StaffModule } from './staff/staff.module';
 import { PlatformModule } from './platform/platform.module';
 import { PrivacyModule } from './privacy/privacy.module';
@@ -41,6 +42,7 @@ export { REDIS_CLIENT };
     OrdersModule,
     PaymentAlertsModule,
     SettingsModule,
+    ShopperModule,
     StaffModule,
     PlatformModule,
     PrivacyModule,

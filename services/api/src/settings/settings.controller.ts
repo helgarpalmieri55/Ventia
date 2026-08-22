@@ -143,9 +143,22 @@ export class SettingsController {
     const input = parseOr400(themeSchema, body);
     const db = tenantDb(session.tenantId);
 
-    // PUT, not PATCH: `theme` is replaced wholesale (spec's storefront theme
-    // has no partial-update concept — every render needs colors/fontPair/
-    // radius present), unlike settings.storeInfo/payments's merge-in-place.
+    // PUT, not PATCH: `theme` is replaced wholesale, unlike
+    // settings.storeInfo/payments's merge-in-place. Still true now that
+    // `themeSchema` also accepts the preset shape (`{presetId, overrides}` —
+    // product.md §4's Dirección 2): `overrides` is sparse ON PURPOSE, so it
+    // is the merchant's complete set of tweaks, not a delta against whatever
+    // is already stored. Merging here instead would make a removed override
+    // impossible to express — the token would keep its old value forever.
+    //
+    // What lands in the column is exactly what the merchant chose, never the
+    // resolved tokens: resolution happens on read, in `@ventia/core`'s
+    // `resolveTheme`. Storing resolved tokens would freeze every preset store
+    // at the preset's value on the day they saved, which is precisely the
+    // "can never improve a preset" failure the presetId/overrides split
+    // exists to prevent. `GET /v1/admin/settings` likewise returns this raw
+    // blob (not resolved tokens) because the admin needs to know WHICH preset
+    // is selected and which tokens were deliberately overridden.
     const updated = await db.tenant.update({
       where: { id: session.tenantId },
       data: { theme: input as Prisma.InputJsonValue },

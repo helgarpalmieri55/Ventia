@@ -5,7 +5,17 @@ import { DEPARTAMENTOS, FONT_PAIRS, RADIUS_OPTIONS, type AgentTone, type FontPai
 import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Input, Select, Spinner } from '@ventia/ui';
 import { ApiError, apiFetch } from '../../../lib/api';
 import { errorMessage, fieldErrors } from '../../../lib/errors';
-import { FONT_PAIR_LABELS, RADIUS_LABELS, themeToFormState } from '../../../lib/theme-form';
+import {
+  CUSTOM_PRESET_LABEL,
+  CUSTOM_PRESET_VALUE,
+  FONT_PAIR_LABELS,
+  RADIUS_LABELS,
+  THEME_PRESET_OPTIONS,
+  applyPresetToFormState,
+  formStateToThemePayload,
+  presetIdFromSelectValue,
+  themeToFormState,
+} from '../../../lib/theme-form';
 import { EnviosTab } from '../../../components/shipping-tab';
 import { PagosTab } from '../../../components/pagos-tab';
 import { AgenteTab } from '../../../components/agente-tab';
@@ -422,9 +432,19 @@ function TiendaTab({ settings, onSaved }: TabProps) {
  * helper the onboarding wizard's BrandingStep uses for the identical
  * "don't clobber a saved theme with defaults on revisit" reasoning; the
  * font-pair/radius label maps are also shared from that module rather than
- * duplicated here. */
+ * duplicated here.
+ *
+ * The preset picker (product.md §4's Dirección 2) sits above the individual
+ * token controls and is labelled by what the merchant SELLS, not by what the
+ * look is called — "¿qué vendes?" is the question they can answer. Picking
+ * one snaps every control below to that preset's look; editing a control
+ * afterwards keeps the preset and records just that token as an override, so
+ * the store still tracks the preset everywhere it was left alone
+ * (`formStateToThemePayload`). The controls stay exactly as they were — this
+ * is a picker added to the existing form, not a redesign of it. */
 function MarcaTab({ settings, onSaved }: TabProps) {
   const initial = themeToFormState(settings.theme);
+  const [presetId, setPresetId] = useState(initial.presetId);
   const [primary, setPrimary] = useState(initial.primary);
   const [background, setBackground] = useState(initial.background);
   const [foreground, setForeground] = useState(initial.foreground);
@@ -444,13 +464,16 @@ function MarcaTab({ settings, onSaved }: TabProps) {
     setSaved(false);
     setSubmitting(true);
     try {
-      const themePayload = {
-        colors: { primary, background, foreground },
+      const themePayload = formStateToThemePayload({
+        presetId,
+        primary,
+        background,
+        foreground,
         fontPair,
         radius,
-        ...(logoUrl ? { logoUrl } : {}),
-        ...(faviconUrl ? { faviconUrl } : {}),
-      };
+        logoUrl,
+        faviconUrl,
+      });
       const updated = await apiFetch<SettingsResponse>('/v1/admin/settings/theme', {
         method: 'PUT',
         body: JSON.stringify(themePayload),
@@ -482,6 +505,35 @@ function MarcaTab({ settings, onSaved }: TabProps) {
       {error ? <Alert variant="error">{error}</Alert> : null}
       {saved ? <Alert variant="success">Los cambios se guardaron correctamente.</Alert> : null}
       {errors.colors ? <Alert variant="error">{errors.colors}</Alert> : null}
+      <FormField label="¿Qué vendes?" htmlFor="marca-preset">
+        <Select
+          value={presetId ?? CUSTOM_PRESET_VALUE}
+          onChange={(event) => {
+            // Every token control below is driven from the same snap, so the
+            // form shows the chosen look immediately — the merchant should
+            // not have to save and open the tienda to find out what they
+            // picked.
+            const next = applyPresetToFormState(
+              { presetId, primary, background, foreground, fontPair, radius, logoUrl, faviconUrl },
+              presetIdFromSelectValue(event.target.value),
+            );
+            setPresetId(next.presetId);
+            setPrimary(next.primary);
+            setBackground(next.background);
+            setForeground(next.foreground);
+            setFontPair(next.fontPair);
+            setRadius(next.radius);
+            setSaved(false);
+          }}
+        >
+          {THEME_PRESET_OPTIONS.map((preset) => (
+            <option key={preset.id} value={preset.id}>
+              {preset.sells} — {preset.label}
+            </option>
+          ))}
+          <option value={CUSTOM_PRESET_VALUE}>{CUSTOM_PRESET_LABEL}</option>
+        </Select>
+      </FormField>
       <div className="grid grid-cols-3 gap-4">
         <FormField label="Color primario" htmlFor="marca-primary">
           <Input

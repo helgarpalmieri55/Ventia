@@ -91,6 +91,125 @@ export class CartService {
     return this.buildDto(tenantId, cart.cookieKey, cart.items);
   }
 
+  /**
+   * Attaches the shopper's cart to their account at sign-in, merging whatever
+   * they already had with whatever they left behind.
+   *
+   * ## The requirement this exists for
+   *
+   * Signing in mid-checkout must not lose the basket. That is the whole
+   * feature: a shopper who reaches the payment step, realises they have an
+   * account, signs in, and finds an empty cart has been given a reason to
+   * abandon at the last screen.
+   *
+   * ## Which cart survives
+   *
+   * The GUEST one — the cart the browser is holding right now. Its cookie is
+   * already set, the shopper is looking at its contents, and keeping it means
+   * the page they are on does not change under them. The saved cart's lines
+   * are folded in and its row is deleted.
+   *
+   * The opposite choice (keep the saved cart) is defensible in the abstract
+   * and wrong here: it swaps the basket a shopper can see for one they cannot,
+   * at the exact moment they are deciding whether to pay.
+   *
+   * ## Merging lines
+   *
+   * Same product AND same variant means the same line, so quantities add.
+   * Different variant is a different line — a shopper with a size M saved and
+   * a size L in hand wants both, not one of them silently winning.
+   *
+   * Quantities are clamped to available stock for tracked products. Adding two
+   * baskets can easily exceed what the store has, and letting it through would
+   * move the failure to checkout, where it reads as "your order failed" rather
+   * than "we only have two left".
+   *
+   * Returns the cookie key the caller should set. Never throws on a missing or
+   * unknown guest key — a shopper signing in with no cart at all is ordinary.
+   */
+  async mergeOnSignIn(tenantId: string, shopperAccountId: string, guestCookieKey: string | null): Promise<string | null> {
+    const db = tenantDb(tenantId);
+
+    const [guest, saved] = await Promise.all([
+      guestCookieKey
+        ? db.cart.findFirst({ where: { tenantId, cookieKey: guestCookieKey }, include: { items: true } })
+        : null,
+      db.cart.findFirst({
+        where: { tenantId, shopperAccountId },
+        include: { items: true },
+        // Newest wins if a previous merge ever left two behind: it is the one
+        // whose contents the shopper most recently chose.
+        orderBy: { updatedAt: 'desc' },
+      }),
+    ]);
+
+    // Nothing in hand: adopt whatever was saved, if anything.
+    if (!guest) return saved?.cookieKey ?? null;
+
+    // Nothing saved, or the saved cart IS this one: just claim it.
+    if (!saved || saved.id === guest.id) {
+      await db.cart.update({ where: { id: guest.id }, data: { shopperAccountId } });
+      return guest.cookieKey;
+    }
+
+    await this.foldInto(tenantId, guest.id, guest.items, saved.items);
+    await db.cart.update({ where: { id: guest.id }, data: { shopperAccountId } });
+    // Delete AFTER folding, so a failure between the two leaves the shopper
+    // with both carts rather than neither.
+    await db.cart.delete({ where: { id: saved.id } });
+    return guest.cookieKey;
+  }
+
+  /** Adds `incoming` lines into the cart identified by `cartId`, summing
+   * quantities on a (productId, variantId) match and clamping to stock. */
+  private async foldInto(
+    tenantId: string,
+    cartId: string,
+    existing: CartItemRow[],
+    incoming: CartItemRow[],
+  ): Promise<void> {
+    const db = tenantDb(tenantId);
+    const key = (item: { productId: string; variantId: string | null }) => `${item.productId}:${item.variantId ?? ''}`;
+    const byKey = new Map(existing.map((item) => [key(item), item]));
+
+    for (const line of incoming) {
+      const match = byKey.get(key(line));
+      const wanted = (match?.qty ?? 0) + line.qty;
+      const capped = await this.clampToStock(tenantId, line.productId, line.variantId, wanted);
+      if (capped <= 0) continue;
+
+      if (match) {
+        if (capped !== match.qty) await db.cartItem.update({ where: { id: match.id }, data: { qty: capped } });
+      } else {
+        await db.cartItem.create({
+          data: { tenantId, cartId, productId: line.productId, variantId: line.variantId, qty: capped },
+        });
+      }
+    }
+  }
+
+  /** `wanted`, or what the store actually has. Untracked products are not
+   * capped — the merchant has told us not to count them. */
+  private async clampToStock(
+    tenantId: string,
+    productId: string,
+    variantId: string | null,
+    wanted: number,
+  ): Promise<number> {
+    const db = tenantDb(tenantId);
+    const product = await db.product.findFirst({
+      where: { id: productId, tenantId },
+      select: { trackInventory: true, stock: true },
+    });
+    if (!product || !product.trackInventory) return wanted;
+
+    if (variantId) {
+      const variant = await db.productVariant.findFirst({ where: { id: variantId }, select: { stock: true } });
+      return Math.min(wanted, variant?.stock ?? 0);
+    }
+    return Math.min(wanted, product.stock);
+  }
+
   async addItem(
     tenantId: string,
     cookieKey: string | null,

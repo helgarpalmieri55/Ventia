@@ -1,5 +1,6 @@
 import { Controller, Get, HttpException, NotFoundException, Req } from '@nestjs/common';
 import type { Request } from 'express';
+import { resolveTheme, type ResolvedThemeTokens } from '@ventia/core';
 import type { ResolvedTenant } from './domain-resolver';
 
 @Controller('v1/tenant')
@@ -34,7 +35,7 @@ export class TenantController {
   // detect `suspended` ahead of the route tree) is updated in the same
   // commit to key off the resulting 503 instead of a 200-with-status-field
   // body.
-  current(@Req() req: Request): ResolvedTenant & { theme: unknown; agentEnabled: boolean } {
+  current(@Req() req: Request): ResolvedTenant & { theme: ResolvedThemeTokens | null; agentEnabled: boolean } {
     if (!req.tenant || req.tenant.status === 'draft') {
       throw new NotFoundException({ error: 'TENANT_NOT_FOUND' });
     }
@@ -57,7 +58,24 @@ export class TenantController {
     // had budget.
     return {
       ...req.tenant,
-      theme: req.tenant.theme ?? null,
+      // Resolved, never raw (Dirección 2 / presets): a preset-based theme is
+      // stored as `{presetId, overrides}` and carries no `colors`/`fontPair`/
+      // `radius` of its own, so handing the blob to the storefront as-is would
+      // render every preset store with the neutral fallback look. Resolving
+      // here — through `@ventia/core`'s single `resolveTheme`, the same one
+      // the admin's Marca tab previews with, so the panel and the shop can
+      // never disagree — keeps presets entirely invisible to the storefront:
+      // it still receives the flat token bag it has always consumed.
+      //
+      // Backwards compatible by construction: for the pre-preset flat blob
+      // every existing tenant has stored, `resolveTheme(blob).tokens`
+      // deep-equals `blob` (asserted in packages/core/test/theme.test.ts), so
+      // no live store changes appearance. `null` in stays `null` out rather
+      // than becoming the resolved fallback, because the storefront's own
+      // `buildThemeVars(null)` already applies exactly those neutral defaults
+      // and `GET /v1/tenant` returning `null` for an unbranded tenant is an
+      // asserted part of this route's contract.
+      theme: req.tenant.theme == null ? null : resolveTheme(req.tenant.theme).tokens,
       agentEnabled: req.tenant.agentEnabled ?? false,
     };
   }

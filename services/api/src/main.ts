@@ -15,6 +15,7 @@ import { StockReservationWorker } from './payments/stock-reservation.worker';
 import { ConversationRetentionWorker } from './agent/conversation-retention.worker';
 import { SubscriptionSweepWorker } from './platform/subscription-sweep.worker';
 import { OpsPushWorker } from './ops/ops-push.worker';
+import { ShopperSessionCleanupWorker } from './shopper/shopper-session.worker';
 
 export async function createApp(): Promise<INestApplication> {
   // bodyParser: false — better-auth's toNodeHandler needs the raw (unparsed)
@@ -271,6 +272,12 @@ async function boot(): Promise<void> {
   // token are both set — so a deployment that only wants the pull endpoint
   // (or neither) opens no Redis connection here at all.
   await app.get(OpsPushWorker).start();
+
+  // Expired shopper sessions and spent link tokens. Same no-lifecycle-hook
+  // discipline as its siblings. The rows it removes are already inert — every
+  // lookup filters on expiry — so this is about not keeping credential
+  // material whose purpose has already been served.
+  await app.get(ShopperSessionCleanupWorker).start();
 
   // Express-level errors — i.e. anything that calls `next(err)` from
   // MIDDLEWARE rather than throwing inside a controller. `TenantMiddleware`

@@ -20,6 +20,9 @@ import { ShippingService } from './shipping.service';
   providers: [CartCookieGuard, CartService, ShippingService, CheckoutService, OrderTrackingService],
   // Exported for the agent's `get_order_status` tool — one implementation of
   // the double-factor lookup, shared with the public tracking endpoint.
-  exports: [OrderTrackingService],
+  // `CartService` is exported for `ShopperModule`: signing in merges the
+  // shopper's basket, and that logic belongs with the cart rather than being
+  // written a second time in the accounts module.
+  exports: [OrderTrackingService, CartService],
 })
 export class CheckoutModule {}

@@ -62,37 +62,11 @@ export const storeSettingsSchema = z.object({
     .optional(),
 });
 
-/** Fixed catalog of 5 font pairings (spec §5.4) — storefront theming does not
- * allow arbitrary font selection, only one of these curated pairs. */
-export const FONT_PAIRS = [
-  'inter-lora',
-  'poppins-source',
-  'montserrat-merriweather',
-  'raleway-open',
-  'worksans-bitter',
-] as const;
-export type FontPair = (typeof FONT_PAIRS)[number];
-
-export const RADIUS_OPTIONS = ['none', 'sm', 'md', 'lg', 'full'] as const;
-export type Radius = (typeof RADIUS_OPTIONS)[number];
-
-const hexColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/);
-
-/** `PUT /v1/admin/settings/theme` body. A PUT, not a PATCH: the caller
- * replaces `tenants.theme` wholesale, so every field required by the
- * storefront renderer (colors, fontPair, radius) must be present in every
- * request — there is no partial-theme concept. */
-export const themeSchema = z.object({
-  logoUrl: z.string().url().optional(),
-  faviconUrl: z.string().url().optional(),
-  colors: z.object({
-    primary: hexColorSchema,
-    background: hexColorSchema,
-    foreground: hexColorSchema,
-  }),
-  fontPair: z.enum(FONT_PAIRS),
-  radius: z.enum(RADIUS_OPTIONS),
-});
+/* The storefront theme — the font-pair/radius catalogs, the hex-colour rule
+ * and `themeSchema` itself — moved to `theme.ts` when presets arrived, so the
+ * schema sits next to `THEME_PRESETS` and `resolveTheme` rather than a
+ * package away from them. Re-exported unchanged through the `@ventia/core`
+ * barrel, which is how every consumer already imported it. */
 
 /** `providers.wompi` credentials, as accepted by `PATCH
  * /v1/admin/settings/payments` — see `packages/payments/src/index.ts`'s
@@ -218,7 +192,6 @@ export const agentSettingsSchema = z.object({
 export type AgentSettingsInput = z.infer<typeof agentSettingsSchema>;
 
 export type StoreSettingsInput = z.infer<typeof storeSettingsSchema>;
-export type ThemeInput = z.infer<typeof themeSchema>;
 export type WompiCredentialsInput = z.infer<typeof wompiCredentialsSchema>;
 export type MercadopagoCredentialsInput = z.infer<typeof mercadopagoCredentialsSchema>;
 export type EpaycoCredentialsInput = z.infer<typeof epaycoCredentialsSchema>;

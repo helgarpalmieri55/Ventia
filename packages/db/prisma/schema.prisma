@@ -365,13 +365,26 @@ model Cart {
   cookieKey String
   source    CartSource   @default(web)
   channel   SalesChannel @default(web)
+  /// The signed-in shopper this cart belongs to, once they signed in.
+  ///
+  /// NULL for every guest cart, which is most of them — guest checkout stays
+  /// supported and is the common path. Set on sign-in, which is what lets a
+  /// shopper who abandoned a basket on their phone find it on a laptop.
+  ///
+  /// Not unique: a shopper can hold one cart per store, but this column is
+  /// tenant-scoped like everything else, and `CartService.mergeOnSignIn`
+  /// collapses any second one rather than the database refusing it. A UNIQUE
+  /// here would turn an ordinary "signed in on a new device" into a 500.
+  shopperAccountId String?  @db.Uuid
   expiresAt DateTime?
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
   tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shopperAccount ShopperAccount? @relation(fields: [shopperAccountId], references: [id], onDelete: SetNull)
   items     CartItem[]
 
   @@unique([tenantId, cookieKey])
+  @@index([tenantId, shopperAccountId])
 }
 
 model CartItem {
@@ -449,6 +462,7 @@ model ShopperAccount {
   customer        Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
   sessions        ShopperSession[]
   tokens          ShopperToken[]
+  carts           Cart[]
 
   @@unique([tenantId, email])
   @@unique([customerId])

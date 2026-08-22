@@ -5,7 +5,7 @@ import { Alert, Button, Card, CardContent, CardHeader, CardTitle, FormField, Inp
 import { FONT_PAIRS, RADIUS_OPTIONS, type FontPair, type Radius } from '@ventia/core';
 import { ApiError, apiFetch } from '../../../../lib/api';
 import { errorMessage } from '../../../../lib/errors';
-import { FONT_PAIR_LABELS, RADIUS_LABELS, themeToFormState } from '../../../../lib/theme-form';
+import { FONT_PAIR_LABELS, RADIUS_LABELS, formStateToThemePayload, themeToFormState } from '../../../../lib/theme-form';
 
 interface ThemeResponse {
   theme: Record<string, unknown>;
@@ -50,13 +50,25 @@ export function BrandingStep({ onDone, theme }: BrandingStepProps) {
     setError(null);
     setSubmitting(true);
     try {
-      const themePayload = {
-        colors: { primary, background, foreground },
+      // Built through `formStateToThemePayload` rather than assembled here so
+      // `initial.presetId` survives: this PUT is a full replace, and a
+      // merchant who picked a preset in Configuración → Marca and then walked
+      // back through the wizard would otherwise have it flattened into a
+      // frozen copy of that preset's tokens — the same "revisit destroys the
+      // saved theme" class of bug this step's `themeToFormState` call exists
+      // to prevent, one level up. The wizard itself still has no preset
+      // picker (choosing one here is the next step of Dirección 2); it just
+      // no longer discards a choice made elsewhere.
+      const themePayload = formStateToThemePayload({
+        presetId: initial.presetId,
+        primary,
+        background,
+        foreground,
         fontPair,
         radius,
-        ...(logoUrl ? { logoUrl } : {}),
-        ...(faviconUrl ? { faviconUrl } : {}),
-      };
+        logoUrl,
+        faviconUrl,
+      });
       await apiFetch<ThemeResponse>('/v1/admin/settings/theme', {
         method: 'PUT',
         body: JSON.stringify(themePayload),
