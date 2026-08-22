@@ -478,3 +478,184 @@ describe('GET /v1/storefront/collections', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('GET /v1/storefront/collections/:slug', () => {
+  let veranoId: string;
+  let camiseta: string;
+  let abrigo: string;
+  let agotado: string;
+
+  beforeAll(async () => {
+    // Curated in an order that is neither alphabetical nor insertion order, so
+    // the assertion below can only pass if the MERCHANT's arrangement is what
+    // the page renders.
+    camiseta = await makeProduct(tenantId, 'Camiseta de lino');
+    abrigo = await makeProduct(tenantId, 'Abrigo de verano');
+    agotado = await makeProduct(tenantId, 'Sandalia agotada', 'archived');
+
+    const created = await request(server())
+      .post('/v1/admin/collections')
+      .set('cookie', cookie)
+      .send({ name: 'Verano', descriptionMd: 'Lo que nos gusta para el calor.' });
+    expect(created.status).toBe(201);
+    veranoId = created.body.id;
+
+    await request(server())
+      .put(`/v1/admin/collections/${veranoId}/products`)
+      .set('cookie', cookie)
+      .send({ productIds: [agotado, camiseta, abrigo] })
+      .expect(200);
+  });
+
+  it('returns the collection, its description and its buyable products in the merchant’s order', async () => {
+    const res = await request(server())
+      .get('/v1/storefront/collections/verano')
+      .set('x-tenant-domain', SHOP_DOMAIN);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: veranoId, slug: 'verano', name: 'Verano' });
+    // The one field the LIST deliberately withholds. This is the response with
+    // room to render it, so this is the one that carries it.
+    expect(res.body.descriptionMd).toBe('Lo que nos gusta para el calor.');
+    expect(res.body.products.map((p: { name: string }) => p.name)).toEqual([
+      'Camiseta de lino',
+      'Abrigo de verano',
+    ]);
+    expect(res.body.products[0].id).toBe(camiseta);
+    expect(res.body.products[1].id).toBe(abrigo);
+    expect(res.body.products[0]).toMatchObject({ priceCents: 45900, inStock: false, thumbnailUrl: null });
+    // The archived member is curated (the admin still lists it) and must not
+    // reach a shopper — same filter the strip applies.
+    expect(res.body.products.some((p: { id: string }) => p.id === agotado)).toBe(false);
+  });
+
+  it('carries the product’s FIRST photo as the tile thumbnail', async () => {
+    // Every other product in this file has no images, so without this the
+    // thumbnail could be hard-coded to `null` and nothing would notice — on a
+    // shop window whose whole job is showing pictures.
+    const conFoto = await makeProduct(tenantId, 'Vestido con foto');
+    await platformDb.productImage.createMany({
+      data: [
+        { tenantId, productId: conFoto, url: 'https://cdn.test/segunda.jpg', position: 1 },
+        { tenantId, productId: conFoto, url: 'https://cdn.test/portada.jpg', position: 0 },
+      ],
+    });
+    const conFotos = await request(server())
+      .post('/v1/admin/collections')
+      .set('cookie', cookie)
+      .send({ name: 'Con fotos' });
+    await request(server())
+      .put(`/v1/admin/collections/${conFotos.body.id}/products`)
+      .set('cookie', cookie)
+      .send({ productIds: [conFoto] })
+      .expect(200);
+
+    const page = await request(server())
+      .get('/v1/storefront/collections/con-fotos')
+      .set('x-tenant-domain', SHOP_DOMAIN);
+    // The merchant's cover image (`position: 0`), not whichever row the
+    // database handed back first.
+    expect(page.body.products[0].thumbnailUrl).toBe('https://cdn.test/portada.jpg');
+
+    const strip = await request(server()).get('/v1/storefront/collections').set('x-tenant-domain', SHOP_DOMAIN);
+    const fromStrip = strip.body.find((c: { slug: string }) => c.slug === 'con-fotos');
+    expect(fromStrip.products[0].thumbnailUrl).toBe('https://cdn.test/portada.jpg');
+
+    await request(server()).delete(`/v1/admin/collections/${conFotos.body.id}`).set('cookie', cookie).expect(204);
+  });
+
+  it('projects a tile identically to the strip, so the same product cannot differ between two clicks', async () => {
+    const strip = await request(server()).get('/v1/storefront/collections').set('x-tenant-domain', SHOP_DOMAIN);
+    const page = await request(server())
+      .get('/v1/storefront/collections/verano')
+      .set('x-tenant-domain', SHOP_DOMAIN);
+
+    const fromStrip = strip.body
+      .find((c: { slug: string }) => c.slug === 'verano')
+      .products.find((p: { id: string }) => p.id === camiseta);
+    const fromPage = page.body.products.find((p: { id: string }) => p.id === camiseta);
+    expect(fromPage).toEqual(fromStrip);
+  });
+
+  it('answers 200 with an empty list for a collection whose products are all gone, rather than 404', async () => {
+    // The list omits this collection — a strip that says nothing should not be
+    // there. Its own page keeps it, because the page has room to explain the
+    // sale ended, and the shopper following the merchant's own WhatsApp link a
+    // week later must not be told they mistyped the URL.
+    const vacia = await request(server())
+      .post('/v1/admin/collections')
+      .set('cookie', cookie)
+      .send({ name: 'Temporada que terminó' });
+    await request(server())
+      .put(`/v1/admin/collections/${vacia.body.id}/products`)
+      .set('cookie', cookie)
+      .send({ productIds: [agotado] })
+      .expect(200);
+
+    const listed = await request(server()).get('/v1/storefront/collections').set('x-tenant-domain', SHOP_DOMAIN);
+    expect(listed.body.map((c: { slug: string }) => c.slug)).not.toContain('temporada-que-termino');
+
+    const res = await request(server())
+      .get('/v1/storefront/collections/temporada-que-termino')
+      .set('x-tenant-domain', SHOP_DOMAIN);
+    expect(res.status).toBe(200);
+    expect(res.body.products).toEqual([]);
+
+    await request(server()).delete(`/v1/admin/collections/${vacia.body.id}`).set('cookie', cookie).expect(204);
+  });
+
+  it('404s a hidden collection, so its URL is not a preview channel for next month’s sale', async () => {
+    const oculta = await request(server())
+      .post('/v1/admin/collections')
+      .set('cookie', cookie)
+      .send({ name: 'Black Friday', isActive: false });
+    await request(server())
+      .put(`/v1/admin/collections/${oculta.body.id}/products`)
+      .set('cookie', cookie)
+      .send({ productIds: [camiseta] })
+      .expect(200);
+
+    const res = await request(server())
+      .get('/v1/storefront/collections/black-friday')
+      .set('x-tenant-domain', SHOP_DOMAIN);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('COLLECTION_NOT_FOUND');
+
+    await request(server()).delete(`/v1/admin/collections/${oculta.body.id}`).set('cookie', cookie).expect(204);
+  });
+
+  it('404s a slug that does not exist', async () => {
+    const res = await request(server())
+      .get('/v1/storefront/collections/no-existe')
+      .set('x-tenant-domain', SHOP_DOMAIN);
+    expect(res.status).toBe(404);
+  });
+
+  it('cannot be read across tenants: another store’s slug is simply not here', async () => {
+    const rival = await request(server())
+      .post('/v1/admin/collections')
+      .set('cookie', otherCookie)
+      .send({ name: 'Exclusivo rival' });
+    expect(rival.status).toBe(201);
+    const rivalProduct = await makeProduct(otherTenantId, 'Producto rival');
+    await request(server())
+      .put(`/v1/admin/collections/${rival.body.id}/products`)
+      .set('cookie', otherCookie)
+      .send({ productIds: [rivalProduct] })
+      .expect(200);
+
+    const res = await request(server())
+      .get('/v1/storefront/collections/exclusivo-rival')
+      .set('x-tenant-domain', SHOP_DOMAIN);
+    expect(res.status).toBe(404);
+  });
+
+  it('is behind the public tenant guard, exactly as the list is', async () => {
+    // DRAFT_DOMAIN's tenant (created by the list suite above) owns a `nuevos`
+    // collection. An unlaunched store looks like no store at all.
+    const res = await request(server())
+      .get('/v1/storefront/collections/nuevos')
+      .set('x-tenant-domain', DRAFT_DOMAIN);
+    expect(res.status).toBe(404);
+  });
+});

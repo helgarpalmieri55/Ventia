@@ -86,3 +86,59 @@ export async function fetchCollections(
 ): Promise<StorefrontCollection[] | null> {
   return fetchStorefrontOrNull<StorefrontCollection[]>(tenantHost, '/v1/storefront/collections', fetchImpl);
 }
+
+/**
+ * One collection, as `GET /v1/storefront/collections/:slug` returns it: the
+ * strip's shape plus the paragraph the merchant wrote.
+ *
+ * `descriptionMd` is only on THIS shape, never on a list row — the API sends
+ * it only here, and typing the list row without it is what stops a future
+ * home-page change from quietly depending on a field that request never
+ * carries.
+ */
+export interface StorefrontCollectionDetail extends StorefrontCollection {
+  descriptionMd: string;
+}
+
+/**
+ * Where a collection lives in this storefront.
+ *
+ * One function rather than two template strings, because the strip and the
+ * page's own breadcrumb both build it and a shop whose "Ver todo" link and
+ * whose canonical URL disagree by one character is a 404 nobody can reproduce.
+ *
+ * `encodeURIComponent` is belt-and-braces: `collectionSlugSchema` in
+ * `@ventia/core` already restricts a slug to `[a-z0-9-]`, so there is nothing
+ * to escape today. It costs nothing and it means this helper stays correct if
+ * that ever loosens.
+ */
+export function collectionHref(slug: string): string {
+  return `/colecciones/${encodeURIComponent(slug)}`;
+}
+
+/**
+ * Fetches one collection for its own page.
+ *
+ * `fetchStorefrontOrNull`, so `null` covers two different things — the
+ * collection genuinely does not exist (404: a deleted collection, a hidden
+ * one, a mistyped URL) and the API is momentarily unreachable — and the page
+ * turns both into `notFound()`. That is the same choice
+ * `app/categorias/[slug]/page.tsx` makes, and it is right for the same
+ * reason: this fetch IS the page, so there is no partial render to protect,
+ * and a 404 is a safer wrong answer than a stack trace.
+ *
+ * Note what it is NOT: the empty collection is not one of these cases. An
+ * active collection whose products have all been archived answers 200 with an
+ * empty `products`, and the page says so in words — see the API controller.
+ */
+export async function fetchCollection(
+  tenantHost: string,
+  slug: string,
+  fetchImpl?: typeof fetch,
+): Promise<StorefrontCollectionDetail | null> {
+  return fetchStorefrontOrNull<StorefrontCollectionDetail>(
+    tenantHost,
+    `/v1/storefront/collections/${encodeURIComponent(slug)}`,
+    fetchImpl,
+  );
+}

@@ -1,21 +1,28 @@
 import {
+  REVIEWS_PAGE_SIZE,
   distributionRows,
   formatAverage,
-  formatReviewDate,
   reviewCountLabel,
   type ProductReviews as ProductReviewsData,
 } from '../lib/reviews-api';
 import { ReviewComposer } from './review-composer';
+import { ReviewItem } from './review-item';
+import { ReviewPager } from './review-pager';
 import { StarRating } from './star-rating';
 
 /**
  * The reviews block on a product page: the average, the 5→1 breakdown, the
- * reviews themselves, and the one client island that lets a buyer add theirs.
+ * reviews themselves, the control that reaches the rest of them, and the
+ * island that lets a buyer add theirs.
  *
  * A Server Component, so the reviews are in the HTML — they are the part of a
  * product page a search engine most wants and a slow phone least wants to wait
- * for. Only `ReviewComposer` is client-side, because only it depends on who is
- * reading.
+ * for. Two client islands hang off it, and each one earns its place by
+ * depending on something the server does not know: `ReviewComposer` on who is
+ * reading, and `ReviewPager` on what the reader has asked to see. The FIRST
+ * page of reviews is server-rendered either way, so a shopper who never
+ * presses anything and a crawler that runs no JavaScript both get the same
+ * thing they got before either island existed.
  *
  * ## The empty state is not an empty section
  *
@@ -75,52 +82,26 @@ export function ProductReviews({ productId, data }: { productId: string; data: P
           <ReviewComposer productId={productId} />
         </div>
 
+        {/* ONE list, whoever rendered the row. The server writes the first
+            page's items and `ReviewPager` appends the rest into this same
+            `<ul>` — two adjacent lists would be announced as two lists of
+            reviews, which is not what a shopper is reading. */}
         <ul className="flex flex-col gap-6">
           {reviews.map((review) => (
-            <li key={review.id} className="flex flex-col gap-2 border-b border-border pb-6 last:border-b-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <StarRating average={review.rating} size="sm" />
-                <span className="text-sm font-medium">{review.authorLabel}</span>
-                {/* Said on every single review, not as a badge on some of
-                    them: on this store there is no other kind. It is the whole
-                    reason these reviews are worth more than a form anyone
-                    could fill in. */}
-                <span className="rounded-full bg-emerald-600/10 px-2 py-0.5 text-xs text-emerald-700">
-                  Compra verificada
-                </span>
-                <span className="text-xs text-muted-foreground">{formatReviewDate(review.createdAt)}</span>
-              </div>
-              {review.title ? <p className="font-medium">{review.title}</p> : null}
-              {review.bodyMd ? (
-                // Plain text with line breaks preserved — this app still has
-                // no markdown renderer (see the product description), and
-                // rendering shopper-supplied markdown as HTML would be the
-                // worst possible place to start.
-                <p className="whitespace-pre-wrap text-sm text-muted-foreground">{review.bodyMd}</p>
-              ) : null}
-
-              {review.replyMd ? (
-                <div className="mt-1 rounded-md border-l-2 border-primary/40 bg-muted/40 p-3">
-                  <p className="text-xs font-medium">
-                    Respuesta de la tienda
-                    {review.repliedAt ? ` · ${formatReviewDate(review.repliedAt)}` : ''}
-                  </p>
-                  <p className="whitespace-pre-wrap text-sm text-muted-foreground">{review.replyMd}</p>
-                </div>
-              ) : null}
-            </li>
+            <ReviewItem key={review.id} review={review} />
           ))}
+          {/* The pager replaces the sentence that used to sit here ("mostrando
+              las 10 reseñas más recientes de 34") and says the same true thing
+              while doing something about it. It renders nothing at all when
+              the whole list is already on screen, which is the common case. */}
+          <ReviewPager
+            total={summary?.count ?? reviews.length}
+            shownIds={reviews.map((review) => review.id)}
+            pageSize={data?.pageSize ?? REVIEWS_PAGE_SIZE}
+            firstPage={data?.page ?? 1}
+          />
         </ul>
       </div>
-
-      {summary && summary.count > reviews.length ? (
-        <p className="text-sm text-muted-foreground">
-          {/* Honest about what is on screen rather than pretending this is all
-              of them. A pager here would need a client island and a second
-              round trip; saying the number costs nothing and does not lie. */}
-          Mostrando las {reviews.length} reseñas más recientes de {summary.count}.
-        </p>
-      ) : null}
     </section>
   );
 }

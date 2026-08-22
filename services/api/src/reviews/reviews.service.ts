@@ -1,4 +1,4 @@
-import { HttpException, Injectable } from '@nestjs/common';
+import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { Prisma, tenantDb } from '@ventia/db';
 import {
   type RatingSummary,
@@ -7,6 +7,8 @@ import {
   reviewAuthorLabel,
   summarizeRatings,
 } from '@ventia/core';
+import { MAILER, type Mailer } from '../mailer/mailer';
+import { sendNewReviewEmail } from '../mailer/review-emails';
 
 /**
  * Reviews, on both sides of the counter.
@@ -26,10 +28,18 @@ import {
  *
  * There is no `approve`, no `pending`, and no code path that creates a review
  * with a status other than the column default (`published`). The merchant's
- * only lever is hiding one after the fact.
+ * only lever is hiding one after the fact — which is exactly why `create`
+ * emails them: the review is live from the instant it is written, so the
+ * window to answer a complaint publicly opens then, not the next time they
+ * happen to log in.
  */
 @Injectable()
 export class ReviewsService {
+  // Explicit @Inject: esbuild (vitest's transform) emits no `design:paramtypes`,
+  // so Nest cannot infer this from the parameter type — same reason every
+  // controller in this module injects its dependencies by token.
+  constructor(@Inject(MAILER) private readonly mailer: Mailer) {}
+
   /**
    * Order states that count as a purchase.
    *
@@ -195,6 +205,21 @@ export class ReviewsService {
         },
         select: OWN_REVIEW_SELECT,
       });
+
+      // Fire-and-forget, and awaited by nothing: the review row is written and
+      // already public, so a mail transport that is briefly down must not turn
+      // the shopper's successful POST into an error they cannot act on. Same
+      // posture as the order emails and the agent handoff notice.
+      void this.notifyMerchantOfReview(tenantId, input.productId, shopper.accountId, created).catch(
+        (err: unknown) => {
+          console.error('[reviews] new-review email failed', {
+            tenantId,
+            reviewId: created.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        },
+      );
+
       return toOwnReview(created);
     } catch (err) {
       // `@@unique([tenantId, productId, accountId])` — one review per shopper
@@ -205,6 +230,54 @@ export class ReviewsService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Tells the merchant a review just landed.
+   *
+   * Reads the three things the message needs on its own rather than taking
+   * them from `create`'s inputs: `create` holds ids, and an email holds names.
+   * One extra round trip, off the request's critical path (nothing awaits
+   * this), on the rare write that is a shopper posting a review — not on any
+   * read.
+   *
+   * Skipped silently when the merchant never set a contact email in
+   * `storeInfo`. No invented fallback address, matching the new-order alert in
+   * `order-emails.ts` — the alternative is mail to nobody, or worse, to
+   * whatever address happened to be nearest.
+   *
+   * The author is named the way the STOREFRONT names them
+   * (`reviewAuthorLabel`), not by their full identity: see
+   * `mailer/review-emails.ts` for why the address in particular stays in the
+   * admin.
+   */
+  private async notifyMerchantOfReview(
+    tenantId: string,
+    productId: string,
+    accountId: string,
+    review: { rating: number; title: string | null; bodyMd: string },
+  ): Promise<void> {
+    const db = tenantDb(tenantId);
+    const [tenant, product, account] = await Promise.all([
+      db.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { name: true, settings: true } }),
+      db.product.findFirstOrThrow({ where: { id: productId }, select: { name: true } }),
+      db.shopperAccount.findFirst({ where: { id: accountId }, select: { name: true } }),
+    ]);
+
+    const settings = tenant.settings as Record<string, unknown> | null;
+    const storeInfo = (settings?.storeInfo ?? {}) as Record<string, unknown>;
+    const contactEmail = typeof storeInfo.contactEmail === 'string' ? storeInfo.contactEmail.trim() : '';
+    if (contactEmail.length === 0) return;
+
+    await sendNewReviewEmail(this.mailer, {
+      merchantContactEmail: contactEmail,
+      tenantName: tenant.name,
+      productName: product.name,
+      rating: review.rating,
+      title: review.title,
+      bodyMd: review.bodyMd,
+      authorLabel: reviewAuthorLabel(account?.name ?? null),
+    });
   }
 
   /** This shopper's own review of this product, hidden ones included — they

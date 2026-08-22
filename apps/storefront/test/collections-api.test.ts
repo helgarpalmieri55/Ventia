@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   STRIP_MAX_PRODUCTS,
+  collectionHref,
+  fetchCollection,
   fetchCollections,
   visibleCollections,
   type StorefrontCollection,
@@ -89,5 +91,79 @@ describe('fetchCollections', () => {
     const fetchImpl = (async () =>
       ({ ok: false, status: 503, json: async () => ({}) }) as unknown as Response) as unknown as typeof fetch;
     await expect(fetchCollections('tienda.ventia.co', fetchImpl)).resolves.toBeNull();
+  });
+});
+
+describe('collectionHref', () => {
+  it('points at the collection page the strip links to and the page renders', () => {
+    expect(collectionHref('ofertas')).toBe('/colecciones/ofertas');
+  });
+
+  it('escapes a slug rather than emitting a URL with a raw separator in it', () => {
+    // `collectionSlugSchema` makes this unreachable today. It is asserted so
+    // that loosening the schema cannot silently start producing broken links.
+    expect(collectionHref('ropa/verano')).toBe('/colecciones/ropa%2Fverano');
+  });
+});
+
+describe('fetchCollection', () => {
+  it('asks for the one collection by slug, scoped to the tenant host', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ...collection('ofertas', 2), descriptionMd: 'Hasta agotar existencias' }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const found = await fetchCollection('tienda.ventia.co', 'ofertas', fetchImpl);
+    expect(found?.slug).toBe('ofertas');
+    // The field the LIST endpoint deliberately withholds: this is the request
+    // that carries it, and the page is the only thing that renders it.
+    expect(found?.descriptionMd).toBe('Hasta agotar existencias');
+    expect(calls[0].url).toContain('/v1/storefront/collections/ofertas');
+    expect((calls[0].init?.headers as Record<string, string>)['x-tenant-domain']).toBe('tienda.ventia.co');
+  });
+
+  it('escapes the slug it was given instead of pasting it into the path', async () => {
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    await fetchCollection('tienda.ventia.co', 'ropa/verano', fetchImpl);
+    expect(calls[0]).toContain('/v1/storefront/collections/ropa%2Fverano');
+  });
+
+  it('resolves to null for a collection that is not there, so the page can 404', async () => {
+    const fetchImpl = (async () =>
+      ({ ok: false, status: 404, json: async () => ({ error: 'COLLECTION_NOT_FOUND' }) }) as unknown as Response) as unknown as typeof fetch;
+    await expect(fetchCollection('tienda.ventia.co', 'no-existe', fetchImpl)).resolves.toBeNull();
+  });
+
+  it('resolves to null — not a thrown error — when the store is momentarily broken', async () => {
+    const fetchImpl = (async () =>
+      ({ ok: false, status: 503, json: async () => ({}) }) as unknown as Response) as unknown as typeof fetch;
+    await expect(fetchCollection('tienda.ventia.co', 'ofertas', fetchImpl)).resolves.toBeNull();
+  });
+
+  it('keeps an emptied collection as a real answer rather than a missing one', async () => {
+    // The API answers 200 with no products for an active collection whose
+    // members were all archived, and the page says so in words. If this ever
+    // became a 404 the merchant's own broadcast link would tell shoppers they
+    // mistyped it.
+    const fetchImpl = (async () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...collection('temporada-pasada', 0), descriptionMd: '' }),
+      }) as unknown as Response) as unknown as typeof fetch;
+
+    const found = await fetchCollection('tienda.ventia.co', 'temporada-pasada', fetchImpl);
+    expect(found).not.toBeNull();
+    expect(found?.products).toEqual([]);
   });
 });

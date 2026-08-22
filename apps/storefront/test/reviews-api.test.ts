@@ -2,20 +2,27 @@ import { describe, expect, it, vi } from 'vitest';
 import { AccountApiError } from '../lib/account-api';
 import {
   BODY_MAX,
+  REVIEWS_PAGE_SIZE,
+  REVIEW_PAGE_ERROR,
   TITLE_MAX,
   composerCopy,
   distributionRows,
   fetchProductReviews,
   fetchReviewEligibility,
+  fetchReviewsPage,
   formatAverage,
   formatReviewDate,
+  mergeReviewPages,
+  productSlugFromPath,
   reviewCountLabel,
   reviewErrorMessage,
   reviewFormError,
+  reviewPagerState,
   starFillPercents,
   submitReview,
   type EligibilityResult,
   type OwnReview,
+  type PublicReview,
   type RatingSummary,
 } from '../lib/reviews-api';
 
@@ -268,5 +275,226 @@ describe('reviewErrorMessage', () => {
       'No pudimos guardar tu reseña. Intenta de nuevo.',
     );
     expect(reviewErrorMessage(new Error('offline'))).toBe('No pudimos guardar tu reseña. Intenta de nuevo.');
+  });
+});
+
+// ---- the pager ------------------------------------------------------------
+
+function publicReview(id: string): PublicReview {
+  return {
+    id,
+    rating: 5,
+    title: null,
+    bodyMd: `Reseña ${id}`,
+    authorLabel: 'Ana P.',
+    createdAt: '2025-03-01T15:00:00.000Z',
+    replyMd: null,
+    repliedAt: null,
+  };
+}
+
+describe('REVIEWS_PAGE_SIZE', () => {
+  it('matches the API default, so "ver 10 reseñas más" is a promise the request keeps', () => {
+    // `DEFAULT_PAGE_SIZE` in
+    // services/api/src/reviews/storefront-reviews.controller.ts.
+    expect(REVIEWS_PAGE_SIZE).toBe(10);
+  });
+});
+
+describe('productSlugFromPath', () => {
+  it('reads the slug the reviews endpoint is keyed by off the product URL', () => {
+    expect(productSlugFromPath('/productos/camiseta-blanca')).toBe('camiseta-blanca');
+  });
+
+  it('tolerates a trailing slash', () => {
+    expect(productSlugFromPath('/productos/camiseta-blanca/')).toBe('camiseta-blanca');
+  });
+
+  it('decodes the segment, so it is not escaped twice on the way back out', () => {
+    expect(productSlugFromPath('/productos/caf%C3%A9')).toBe('café');
+  });
+
+  it('gives up — rather than guessing — on any route that is not a product page', () => {
+    // The pager renders nothing for `null`, which is exactly the behaviour the
+    // reviews section had before it existed.
+    expect(productSlugFromPath('/')).toBeNull();
+    expect(productSlugFromPath('/productos')).toBeNull();
+    expect(productSlugFromPath('/productos/')).toBeNull();
+    expect(productSlugFromPath('/categorias/ropa')).toBeNull();
+    expect(productSlugFromPath('/productos/camiseta/opiniones')).toBeNull();
+    expect(productSlugFromPath('/tienda/productos/camiseta')).toBeNull();
+  });
+
+  it('gives up on a malformed escape instead of throwing inside a render', () => {
+    expect(productSlugFromPath('/productos/%zz')).toBeNull();
+  });
+});
+
+describe('reviewPagerState', () => {
+  it('offers the next full page when there is more than one left', () => {
+    const state = reviewPagerState(10, 34, 10);
+    expect(state.hasMore).toBe(true);
+    expect(state.nextCount).toBe(10);
+    expect(state.statusLabel).toBe('Mostrando 10 de 34 reseñas.');
+    expect(state.buttonLabel).toBe('Ver 10 reseñas más');
+  });
+
+  it('promises only what is actually left, never a full page that is not there', () => {
+    const state = reviewPagerState(30, 34, 10);
+    expect(state.nextCount).toBe(4);
+    expect(state.buttonLabel).toBe('Ver 4 reseñas más');
+  });
+
+  it('says "1 reseña" when exactly one is left', () => {
+    expect(reviewPagerState(33, 34, 10).buttonLabel).toBe('Ver 1 reseña más');
+  });
+
+  it('draws no button once the whole list is on screen — a control that fetches nothing is broken', () => {
+    const state = reviewPagerState(34, 34, 10);
+    expect(state.hasMore).toBe(false);
+    expect(state.nextCount).toBe(0);
+    expect(state.buttonLabel).toBeNull();
+    expect(state.statusLabel).toBe('Mostrando las 34 reseñas.');
+  });
+
+  it('says nothing at all about a list that always fitted', () => {
+    // Three reviews on a product with three reviews: a running commentary
+    // under a list a shopper can count is noise, not information.
+    const state = reviewPagerState(3, 3, 10);
+    expect(state.hasMore).toBe(false);
+    expect(state.statusLabel).toBeNull();
+    expect(state.buttonLabel).toBeNull();
+  });
+
+  it('never counts past the total, even when the merchant hid one mid-read', () => {
+    // `total` is the store's published count and `shown` is what this browser
+    // holds; a review hidden between the two makes shown > total, and
+    // "mostrando 11 de 10" reads as a bug in the store.
+    const state = reviewPagerState(11, 10, 10);
+    expect(state.hasMore).toBe(false);
+    expect(state.nextCount).toBe(0);
+    expect(state.statusLabel).toBe('Mostrando las 11 reseñas.');
+  });
+
+  it('survives a page size of zero rather than offering "ver 0 reseñas más" forever', () => {
+    const state = reviewPagerState(0, 5, 0);
+    expect(state.nextCount).toBe(1);
+    expect(state.buttonLabel).toBe('Ver 1 reseña más');
+  });
+});
+
+describe('mergeReviewPages', () => {
+  it('appends a fresh page in the order it arrived', () => {
+    const merged = mergeReviewPages([publicReview('a')], [publicReview('b'), publicReview('c')]);
+    expect(merged.map((r) => r.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('drops a review the offset page repeated, so nobody is quoted twice', () => {
+    // Paging by OFFSET over a newest-first list: one review posted since the
+    // page loaded pushes every later row down one, and page 2 legitimately
+    // starts with the last row of page 1.
+    const merged = mergeReviewPages([publicReview('a'), publicReview('b')], [publicReview('b'), publicReview('c')]);
+    expect(merged.map((r) => r.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('also excludes the ids the SERVER already rendered, which it was never handed', () => {
+    const merged = mergeReviewPages([], [publicReview('server-1'), publicReview('nueva')], ['server-1']);
+    expect(merged.map((r) => r.id)).toEqual(['nueva']);
+  });
+
+  it('dedupes within one page as well as against the previous ones', () => {
+    const merged = mergeReviewPages([], [publicReview('a'), publicReview('a')]);
+    expect(merged.map((r) => r.id)).toEqual(['a']);
+  });
+
+  it('returns the SAME array when a page adds nothing, so React does not re-render for a no-op', () => {
+    const loaded = [publicReview('a')];
+    expect(mergeReviewPages(loaded, [publicReview('a')])).toBe(loaded);
+  });
+
+  it('does not mutate what it was given', () => {
+    const loaded = [publicReview('a')];
+    mergeReviewPages(loaded, [publicReview('b')]);
+    expect(loaded).toHaveLength(1);
+  });
+});
+
+describe('fetchReviewsPage', () => {
+  it('asks the same-origin proxy for the named page, at the size the button promised', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ summary: summary(), reviews: [publicReview('b')], page: 2, pageSize: 10 }),
+    );
+
+    const result = await fetchReviewsPage('camiseta-blanca', 2, 10, fetchImpl as unknown as typeof fetch);
+
+    expect(result.reviews.map((r) => r.id)).toEqual(['b']);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    // `/api/reviews/*`, NOT the API directly: `API_INTERNAL_URL` is an
+    // internal hostname the browser cannot reach.
+    expect(url).toBe('/api/reviews/camiseta-blanca?page=2&pageSize=10');
+    expect(init.method).toBe('GET');
+  });
+
+  it('escapes the slug rather than pasting it into the path', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ summary: summary(), reviews: [], page: 2, pageSize: 10 }));
+    await fetchReviewsPage('café/au', 2, 10, fetchImpl as unknown as typeof fetch);
+    expect((fetchImpl.mock.calls[0] as unknown as [string])[0]).toBe(
+      '/api/reviews/caf%C3%A9%2Fau?page=2&pageSize=10',
+    );
+  });
+
+  it('sends no credentials: published reviews are read by people who never signed in', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ summary: summary(), reviews: [], page: 2, pageSize: 10 }));
+    await fetchReviewsPage('camiseta', 2, 10, fetchImpl as unknown as typeof fetch);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.credentials).toBeUndefined();
+  });
+
+  it('throws rather than resolving empty, so "no pudimos cargar más" is not read as "no hay más"', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: 'PRODUCT_NOT_FOUND' }, 404));
+    await expect(
+      fetchReviewsPage('camiseta', 2, 10, fetchImpl as unknown as typeof fetch),
+    ).rejects.toBeInstanceOf(AccountApiError);
+  });
+});
+
+describe('REVIEW_PAGE_ERROR', () => {
+  it('is a retry prompt, not an error page: the reviews already fetched are still on screen', () => {
+    expect(REVIEW_PAGE_ERROR).toContain('Intenta de nuevo');
+  });
+});
+
+describe('reviewPagerState, once a page has come back empty', () => {
+  it('stops offering more even though the count still promises some', () => {
+    // `summary.count` and the list are two separate reads. A review hidden
+    // between them leaves a total that no offset will ever satisfy, and a
+    // button that does nothing while the number above it never moves is worse
+    // than no button.
+    const state = reviewPagerState(10, 34, 10, true);
+    expect(state.hasMore).toBe(false);
+    expect(state.buttonLabel).toBeNull();
+  });
+
+  it('still says what is on screen, so the list does not just stop without a word', () => {
+    expect(reviewPagerState(20, 34, 10, true).statusLabel).toBe('Mostrando las 20 reseñas.');
+  });
+
+  it('defaults to trusting the count, since an unexhausted pager has seen no empty page', () => {
+    expect(reviewPagerState(10, 34, 10).hasMore).toBe(true);
+  });
+});
+
+describe('an exhausted pager never answers by vanishing', () => {
+  it('replaces the promise with what is actually there, instead of removing the whole block', () => {
+    // 10 shown of a claimed 34, and page 2 came back empty. Without this the
+    // pager would render nothing at all — the button AND the "mostrando 10 de
+    // 34" line would disappear the instant the shopper pressed something.
+    const state = reviewPagerState(10, 34, 10, true);
+    expect(state.buttonLabel).toBeNull();
+    expect(state.statusLabel).toBe('Mostrando las 10 reseñas.');
+  });
+
+  it('still says nothing about a short list nobody ever paged', () => {
+    expect(reviewPagerState(3, 3, 10).statusLabel).toBeNull();
   });
 });

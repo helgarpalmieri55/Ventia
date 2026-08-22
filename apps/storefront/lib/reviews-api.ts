@@ -307,6 +307,206 @@ export function composerCopy(result: EligibilityResult | null): ComposerCopy {
   }
 }
 
+/**
+ * How many reviews one request brings back.
+ *
+ * Mirrors `DEFAULT_PAGE_SIZE` in
+ * `services/api/src/reviews/storefront-reviews.controller.ts`. Sent
+ * explicitly on every pager request rather than left to the API's default,
+ * because the pager's arithmetic ("ver 10 reseñas más") is a promise about
+ * how many arrive, and a default that drifted on the server would make this
+ * app lie in Spanish rather than merely fetch a different number.
+ *
+ * The FIRST page is not fetched by this app at all — the product page renders
+ * it server-side — so `ProductReviews` passes the API's own reported
+ * `pageSize` down and this constant is only the fallback for a response that
+ * did not carry one.
+ */
+export const REVIEWS_PAGE_SIZE = 10;
+
+/**
+ * The product slug from the URL the reviews section is standing on.
+ *
+ * ## Why the pager reads the address bar
+ *
+ * `ProductReviews` is a COMPONENT, not a page. Only a page receives
+ * `searchParams`/`params` in the App Router, so a link-based `?page=2` pager
+ * would have to be plumbed through `app/productos/[slug]/page.tsx` — and the
+ * component is handed `productId` and the reviews themselves, never the slug.
+ * The public reviews endpoint is keyed by slug (it hangs off the product's own
+ * URL), so the client island needs one.
+ *
+ * It is not a guess: the reviews block only ever renders on `/productos/<slug>`
+ * and that path segment IS the product slug the endpoint wants — the same
+ * value, from the same column, by construction.
+ *
+ * Returns `null` for anything that is not that route, and the pager drops its
+ * BUTTON when it does — keeping the "Mostrando 10 de 34 reseñas." line, which
+ * is exactly what the section said before any of this existed. Degrading to
+ * the previous behaviour rather than to nothing is what lets this afford to be
+ * strict about which paths it accepts.
+ */
+export function productSlugFromPath(pathname: string): string | null {
+  const match = /^\/productos\/([^/?#]+)\/?$/.exec(pathname);
+  if (!match) return null;
+  try {
+    // The pathname arrives percent-encoded; `fetchReviewsPage` re-encodes it.
+    // Decoding first is what keeps a slug from being double-escaped on the way
+    // back out.
+    const slug = decodeURIComponent(match[1]);
+    return slug.length > 0 ? slug : null;
+  } catch {
+    // A malformed escape (`%zz`) is not a slug this store ever minted.
+    return null;
+  }
+}
+
+/**
+ * One more page of reviews, through the storefront's own origin.
+ *
+ * Not a direct call to the API: `API_INTERNAL_URL` is an internal hostname the
+ * browser cannot reach at all (see `app/api/cart/[[...path]]/route.ts`), which
+ * is why every browser-side read in this app goes through a Route Handler.
+ * This one is `app/api/reviews/[slug]/route.ts` — a plain forwarder, no
+ * cookies involved, because published reviews are readable by someone who has
+ * never signed in.
+ *
+ * Throws on any non-OK status rather than resolving to `null`. The first page
+ * is already on screen, so a failure here is not "there are no reviews" — it
+ * is "we could not get more", and the pager has a sentence for that.
+ */
+export async function fetchReviewsPage(
+  slug: string,
+  page: number,
+  pageSize: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ProductReviews> {
+  const res = await fetchImpl(
+    `/api/reviews/${encodeURIComponent(slug)}?page=${page}&pageSize=${pageSize}`,
+    { method: 'GET' },
+  );
+  if (!res.ok) throw await reviewApiError(res);
+  return (await res.json()) as ProductReviews;
+}
+
+/**
+ * Appends a freshly fetched page to what is already on screen, dropping
+ * anything already there.
+ *
+ * The dedupe is not defensive habit. This pages by OFFSET over a list ordered
+ * `createdAt desc`, so a review posted between the server render and the
+ * shopper pressing the button shifts every later row down one — and page 2
+ * then legitimately repeats the last review of page 1. Rendering the same
+ * review twice, under a "compra verificada" badge, is the storefront claiming
+ * two people said the same thing.
+ *
+ * Nothing is reordered and nothing already shown is removed: the shopper is
+ * reading this list, and rows moving under them is worse than a row arriving
+ * late.
+ *
+ * `alreadyShownIds` is how the caller excludes rows it is NOT holding in
+ * `loaded` — the first page, which the server rendered into the HTML and which
+ * the pager therefore never has objects for. Ids and not reviews, so that
+ * page's bodies are not shipped a second time in the RSC payload just to be
+ * compared against.
+ */
+export function mergeReviewPages(
+  loaded: PublicReview[],
+  incoming: PublicReview[],
+  alreadyShownIds: readonly string[] = [],
+): PublicReview[] {
+  const seen = new Set([...alreadyShownIds, ...loaded.map((review) => review.id)]);
+  const fresh = incoming.filter((review) => {
+    if (seen.has(review.id)) return false;
+    // Adding as we go guards a page that repeats a row within ITSELF, as well
+    // as against the rows already on screen.
+    seen.add(review.id);
+    return true;
+  });
+  // Same array back when a page added nothing, so a React state setter given
+  // this result does not re-render for a no-op.
+  return fresh.length === 0 ? loaded : [...loaded, ...fresh];
+}
+
+/** What the pager renders, given how many reviews are on screen and how many
+ * the store says exist. */
+export interface ReviewPagerState {
+  /** Whether there is anything left to fetch. */
+  hasMore: boolean;
+  /** How many the next request would bring — never more than are left. */
+  nextCount: number;
+  /** "Mostrando 10 de 34 reseñas." — or `null` when the whole list is on
+   * screen and saying so would be noise. */
+  statusLabel: string | null;
+  /** The button's own text, `null` when there is no button. */
+  buttonLabel: string | null;
+}
+
+/**
+ * The pager's whole decision, as a pure function — which is the only reason it
+ * is testable at all in an app with no DOM test runner.
+ *
+ * Three things it must never get wrong:
+ *
+ * 1. **A button that fetches nothing.** `shown >= total` means the list is
+ *    complete; offering "ver más" there sends a request that comes back empty
+ *    and leaves the shopper pressing a dead control.
+ * 2. **A promise of more than exists.** With 34 reviews and 30 shown, the
+ *    button says "ver 4 reseñas más", not 10.
+ * 3. **Counting past the total.** `total` is the store's count of PUBLISHED
+ *    reviews and `shown` is what this browser has; a review hidden by the
+ *    merchant between the two can legitimately make `shown` exceed `total`.
+ *    The `Math.max(0, …)` is what keeps that from becoming a negative
+ *    `remaining` — a button offering "ver -1 reseñas más" under the line
+ *    "mostrando 11 de 10".
+ *
+ * `exhausted` is the caller saying it has seen a page come back with no rows
+ * at all, and it OVERRIDES the arithmetic. The count and the list are two
+ * different reads: a review hidden between them leaves a `total` that promises
+ * a row no offset will ever return, and without this the shopper is left
+ * pressing a button that does nothing while the number above it never moves.
+ * The list is the thing they are actually reading, so the list wins.
+ */
+export function reviewPagerState(
+  shown: number,
+  total: number,
+  pageSize: number,
+  exhausted = false,
+): ReviewPagerState {
+  const remaining = exhausted ? 0 : Math.max(0, total - shown);
+  // Never 0: a `pageSize` of zero would make `nextCount` 0 and leave a button
+  // that says "ver 0 reseñas más" and fetches nothing, forever.
+  const size = Math.max(1, pageSize);
+  const nextCount = Math.min(size, remaining);
+
+  if (remaining === 0) {
+    return {
+      hasMore: false,
+      nextCount: 0,
+      // Said once the shopper has actually paged — a product whose three
+      // reviews all fit on the first screen needs no running commentary. Also
+      // said whenever `exhausted` ended the paging, even if only one screenful
+      // is on show: the shopper pressed a button, and a control that answers
+      // by silently deleting itself (along with the "mostrando 10 de 34" line
+      // above it) reads as the page breaking under their hands.
+      statusLabel: shown > size || exhausted ? `Mostrando las ${reviewCountLabel(shown)}.` : null,
+      buttonLabel: null,
+    };
+  }
+
+  return {
+    hasMore: true,
+    nextCount,
+    statusLabel: `Mostrando ${shown} de ${reviewCountLabel(total)}.`,
+    buttonLabel: `Ver ${reviewCountLabel(nextCount)} más`,
+  };
+}
+
+/** What the shopper is told when one more page could not be fetched. Their
+ * reviews are still on screen, so this is a retry prompt and not an error
+ * page. */
+export const REVIEW_PAGE_ERROR = 'No pudimos cargar más reseñas. Intenta de nuevo.';
+
 /** Ratings the form offers, worst to best — the order a star row is drawn in. */
 export const RATING_CHOICES = [1, 2, 3, 4, 5] as const;
 

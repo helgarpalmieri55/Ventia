@@ -664,3 +664,205 @@ describe('GET /v1/admin/reviews', () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ---- the merchant hears about it -----------------------------------------
+
+/**
+ * A new review is public the instant it is written, so the merchant's window
+ * to answer a complaint opens then — not the next time they log in. These
+ * tests are about the wiring (does the send happen, with the right tenant's
+ * data, without ever failing the shopper's POST); the template's own copy is
+ * covered without a database in `review-emails.test.ts`.
+ */
+describe('the merchant is emailed when a review lands', () => {
+  const NOTIFY_EMAIL = `dueña-resenas-${RUN}@demo.co`;
+
+  /** The send is fire-and-forget — `create` does not await it — so the test
+   * has to wait for it rather than assert immediately after the response. */
+  async function waitForReviewEmail(timeoutMs = 5000): Promise<MailMessage | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const found = [...sent].reverse().find((m) => m.subject.startsWith('Nueva reseña'));
+      if (found || Date.now() > deadline) return found;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  /** A verified shopper who bought `productId`, ready to post. */
+  async function buyerFor(productId: string, label: string, name: string): Promise<string> {
+    const email = `${label}-${RUN}@example.com`;
+    const customerId = await createCustomer(email);
+    await createOrder({ customerId, productId, status: 'DELIVERED' });
+    return signUpShopper(email, { name });
+  }
+
+  async function setContactEmail(value: string | null): Promise<void> {
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    const settings = (tenant.settings ?? {}) as Record<string, unknown>;
+    const storeInfo = { ...((settings.storeInfo ?? {}) as Record<string, unknown>) };
+    if (value === null) delete storeInfo.contactEmail;
+    else storeInfo.contactEmail = value;
+    await prisma.tenant.update({
+      where: { id: tenantId },
+      data: { settings: { ...settings, storeInfo } },
+    });
+  }
+
+  it('sends nothing at all when the merchant never set a contact email', async () => {
+    await setContactEmail(null);
+    const cookie = await buyerFor(gorraId, 'sin-correo', 'Lucía Restrepo');
+    sent.length = 0;
+
+    const res = await postReview(cookie, { productId: gorraId, rating: 5, bodyMd: 'Muy cómoda' });
+    expect(res.status).toBe(201);
+
+    // No invented fallback address — mail to nobody is worse than no mail,
+    // same rule as the new-order alert in `order-emails.ts`.
+    expect(await waitForReviewEmail(1000)).toBeUndefined();
+  });
+
+  it('emails the merchant the review, and does not put the shopper address in it', async () => {
+    await setContactEmail(NOTIFY_EMAIL);
+    const buyerEmail = `con-correo-${RUN}@example.com`;
+    const customerId = await createCustomer(buyerEmail);
+    await createOrder({ customerId, productId: camisaId, status: 'DELIVERED' });
+    const cookie = await signUpShopper(buyerEmail, { name: 'Sofía Vargas' });
+    sent.length = 0;
+
+    const res = await postReview(cookie, {
+      productId: camisaId,
+      rating: 2,
+      title: 'Me quedó grande',
+      bodyMd: 'La talla no coincide con la tabla.',
+    });
+    expect(res.status).toBe(201);
+
+    const mail = await waitForReviewEmail();
+    expect(mail).toBeDefined();
+    expect(mail?.to).toBe(NOTIFY_EMAIL);
+    expect(mail?.subject).toContain('2 estrellas');
+    expect(mail?.subject).toContain('Camisa');
+    expect(mail?.text).toContain('La talla no coincide con la tabla.');
+    expect(mail?.text).toContain('Me quedó grande');
+    // Named the way the STOREFRONT names them, not by full identity.
+    expect(mail?.text).toContain('Sofía V.');
+    expect(mail?.text).not.toContain('Sofía Vargas');
+    // The merchant may see the address in the admin; an email is forwarded
+    // and left open on shared screens far more readily than an authenticated
+    // page is.
+    expect(mail?.text).not.toContain(buyerEmail);
+  });
+
+  it('names the product that was actually reviewed, not just any product in the store', async () => {
+    // This store sells Camisa, Gorra and a draft. An email headed "Camisa" for
+    // a 1-star review of the Gorra sends the merchant to argue with the wrong
+    // customer about the wrong thing.
+    await setContactEmail(NOTIFY_EMAIL);
+    const cookie = await buyerFor(gorraId, 'resena-gorra', 'Paula Nieto');
+    sent.length = 0;
+
+    expect((await postReview(cookie, { productId: gorraId, rating: 3, bodyMd: 'Le queda bien' })).status).toBe(201);
+
+    const mail = await waitForReviewEmail();
+    expect(mail?.subject).toContain('Gorra');
+    expect(mail?.subject).not.toContain('Camisa');
+  });
+
+  it('still answers 201 — and still publishes — when the mail transport is down', async () => {
+    await setContactEmail(NOTIFY_EMAIL);
+    const cookie = await buyerFor(camisaId, 'correo-caido', 'Diego Mora');
+
+    const mailer = app.get(MAILER);
+    const send = vi.spyOn(mailer, 'send').mockRejectedValueOnce(new Error('resend is down'));
+    let res: Awaited<ReturnType<typeof postReview>>;
+    try {
+      res = await postReview(cookie, { productId: camisaId, rating: 5, bodyMd: 'Excelente' });
+    } finally {
+      send.mockRestore();
+      // `mockRestore` puts back the ORIGINAL implementation, not the
+      // suite-wide recording spy installed in `beforeAll` — reinstall it so
+      // the rest of the file keeps seeing what was sent.
+      vi.spyOn(mailer, 'send').mockImplementation(async (msg: MailMessage) => {
+        sent.push(msg);
+      });
+    }
+
+    // The review row is already written and already public by the time the
+    // email is attempted; a transport outage must not turn the shopper's
+    // successful POST into an error they cannot act on.
+    expect(res.status).toBe(201);
+    const stored = await prisma.review.findFirstOrThrow({ where: { id: res.body.review.id } });
+    expect(stored.status).toBe('published');
+  });
+
+  it('never mails one merchant about another store’s review', async () => {
+    // Both stores have a contact email set; a review on OTHER_DOMAIN must
+    // reach that store's address and nothing of this one's.
+    await setContactEmail(NOTIFY_EMAIL);
+    const rivalContact = `dueño-rival-${RUN}@demo.co`;
+    await prisma.tenant.update({
+      where: { id: otherTenantId },
+      data: { settings: { storeInfo: { contactEmail: rivalContact } } },
+    });
+    const rivalProduct = await prisma.product.create({
+      data: { tenantId: otherTenantId, name: 'Bufanda rival', slug: 'bufanda', priceCents: 20_000, status: 'active' },
+    });
+    const rivalBuyerEmail = `rival-compradora-${RUN}@example.com`;
+    const rivalCustomer = await prisma.customer.create({
+      data: { tenantId: otherTenantId, email: rivalBuyerEmail, name: 'Marta Ruiz' },
+    });
+    orderNumber += 1;
+    await prisma.order.create({
+      data: {
+        tenantId: otherTenantId,
+        number: orderNumber,
+        reference: `VNT-TEST-${RUN}-${orderNumber}`,
+        customerId: rivalCustomer.id,
+        status: 'DELIVERED',
+        paymentStatus: 'COD',
+        email: rivalBuyerEmail,
+        phone: '3001112233',
+        shippingAddress: { linea1: 'Calle 2', ciudad: 'Cali' },
+        subtotalCents: 20_000,
+        taxCents: 0,
+        totalCents: 20_000,
+        items: {
+          create: [
+            {
+              tenantId: otherTenantId,
+              productId: rivalProduct.id,
+              nameSnapshot: 'Bufanda rival',
+              priceCentsSnapshot: 20_000,
+              qty: 1,
+              taxRateSnapshot: 'NINETEEN',
+            },
+          ],
+        },
+      },
+    });
+
+    await account('/register', 'post', OTHER_DOMAIN).send({
+      email: rivalBuyerEmail,
+      password: PASSWORD,
+      name: 'Marta Ruiz',
+    });
+    const token = lastLinkFor('Confirma tu correo');
+    await account('/verify-email', 'post', OTHER_DOMAIN).send({ token }).expect(200);
+    const signIn = await account('/sign-in', 'post', OTHER_DOMAIN).send({
+      email: rivalBuyerEmail,
+      password: PASSWORD,
+    });
+    const rivalCookie = (signIn.headers['set-cookie'] as unknown as string[])
+      .find((c) => c.startsWith('ventia_shopper='))!
+      .split(';')[0];
+
+    sent.length = 0;
+    const res = await postReview(rivalCookie, { productId: rivalProduct.id, rating: 5 }, OTHER_DOMAIN);
+    expect(res.status).toBe(201);
+
+    const mail = await waitForReviewEmail();
+    expect(mail?.to).toBe(rivalContact);
+    expect(mail?.to).not.toBe(NOTIFY_EMAIL);
+    expect(mail?.subject).toContain('Bufanda rival');
+  });
+});
