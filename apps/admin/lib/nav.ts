@@ -2,6 +2,8 @@ import { CONVERSATIONS_PATH } from './conversations-api';
 import { CUSTOMERS_PATH } from './customers-api';
 import { DOMAINS_PATH } from './domains-api';
 import { ASSISTANT_PATH } from './assistant-api';
+import { COLLECTIONS_PATH } from './collections-api';
+import { REVIEWS_PATH } from './reviews-api';
 import { ALERTS_PATH } from './payment-alerts-api';
 
 export type Role = 'owner' | 'staff';
@@ -16,6 +18,11 @@ export interface NavItem {
 const CATALOG_ITEMS: NavItem[] = [
   { href: '/productos', label: 'Productos' },
   { href: '/categorias', label: 'Categorías' },
+  // Next to Categorías because that is where a merchant looks for it, and
+  // deliberately not merged with it: a category is taxonomy (where a product
+  // lives), a collection is curation (a set the merchant assembled). See the
+  // `Collection` model comment for why conflating them breaks navigation.
+  { href: COLLECTIONS_PATH, label: 'Colecciones' },
   { href: '/importar', label: 'Importar CSV' },
   { href: '/pedidos', label: 'Pedidos' },
   // Both roles, mirroring the API: PrivacyController sits behind
@@ -49,6 +56,10 @@ const CATALOG_ITEMS: NavItem[] = [
   // merchant opens this — and its empty state is a real answer rather than
   // filler.
   { href: CONVERSATIONS_PATH, label: 'Conversaciones' },
+  // Both roles, same reasoning as Pedidos: hiding a bad review or answering it
+  // is customer work, not account administration, and the API mirrors that
+  // (no @Roles() on the moderation controller).
+  { href: REVIEWS_PATH, label: 'Reseñas' },
   // Both roles, mirroring the API: `AgentCommandController` sits behind
   // AdminSessionGuard with no @Roles(), like the dashboard and orders. What it
   // answers is a summary of orders, products and conversations a staff session

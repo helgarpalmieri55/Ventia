@@ -231,6 +231,16 @@ async function seedFixtures() {
   // the correct answer to "¿qué se está quedando quieto?".
   await seedProduct(shop.tenantId, { name: 'Ruana quieta', stock: 15, costCents: null });
   await seedProduct(shop.tenantId, { name: 'Agotada', stock: 0, costCents: 10_000 });
+  // Made to order: its `stock` column sits wherever it was last left, so
+  // reporting it as "quedan 0" would send the merchant to restock something
+  // that is never stocked.
+  await seedProduct(shop.tenantId, {
+    name: 'Sobre pedido',
+    stock: 0,
+    costCents: 10_000,
+    trackInventory: false,
+  });
+  await seedProduct(shop.tenantId, { name: 'Casi agotada', stock: 2, costCents: 10_000 });
   await seedProduct(shop.tenantId, { name: 'Borrador escondido', stock: 50, costCents: 10_000, status: 'draft' });
 
   await seedOrder(shop.tenantId, {
@@ -240,15 +250,33 @@ async function seedFixtures() {
   });
   await seedOrder(shop.tenantId, { at: '2026-08-13T15:00:00.000Z', totalCents: 80_000, status: 'PENDING' });
   // Cancelled: counted in the by-status breakdown, excluded from every peso
-  // figure, exactly as the tablero excludes it.
-  await seedOrder(shop.tenantId, { at: '2026-08-13T16:00:00.000Z', totalCents: 999_000, status: 'CANCELLED' });
+  // figure AND from every unit count, exactly as the tablero excludes it. It
+  // carries LINES on purpose — a cancelled order with no items would let the
+  // product tallies ignore the cancellation rule and still look right.
+  await seedOrder(shop.tenantId, {
+    at: '2026-08-13T16:00:00.000Z',
+    totalCents: 999_000,
+    status: 'CANCELLED',
+    items: [{ productId: camisa, name: 'Camisa que se mueve', priceCents: 60_000, qty: 5 }],
+  });
+  // Exactly midnight in Bogota on the day AFTER the window closes
+  // (2026-08-17T00:00 = 05:00 UTC). The upper bound is half-open, so this must
+  // fall outside — an inclusive bound would silently pull the next day's first
+  // orders into every window this product reports on.
+  await seedOrder(shop.tenantId, { at: '2026-08-17T05:00:00.000Z', totalCents: 555_000 });
 
   await seedOrder(neighbour.tenantId, { at: '2026-08-12T15:00:00.000Z', totalCents: NEIGHBOUR_TOTAL });
 }
 
 async function seedProduct(
   tenantId: string,
-  opts: { name: string; stock: number; costCents: number | null; status?: 'active' | 'draft' },
+  opts: {
+    name: string;
+    stock: number;
+    costCents: number | null;
+    status?: 'active' | 'draft';
+    trackInventory?: boolean;
+  },
 ): Promise<string> {
   const product = await prisma.product.create({
     data: {
@@ -258,6 +286,7 @@ async function seedProduct(
       priceCents: 60_000,
       costCents: opts.costCents,
       stock: opts.stock,
+      trackInventory: opts.trackInventory ?? true,
       status: opts.status ?? 'active',
     },
   });
@@ -589,6 +618,88 @@ describe('grounding — the tools tell the truth, including when they do not kno
     // Stated even when false, so the model never infers completeness from an
     // absent field.
     expect(payload.data.catalog_truncated).toBe(false);
+  });
+
+  it('does not count units from a cancelled order', async () => {
+    // Five of these shirts were "sold" on an order that was then cancelled.
+    // Counting them would tell the merchant a product is moving when it is not
+    // — and would disagree with their own tablero's top-products panel.
+    scripted = [
+      toolUseResponse('get_product_performance', { from: '2026-08-10', to: '2026-08-16', sort: 'bestselling' }),
+      textResponse('La camisa va de primera.'),
+    ];
+
+    await ask(shop.cookie, '¿qué se vendió más?');
+
+    const payload = firstToolPayload<{ products: Array<{ name: string; units_sold: number }> }>(1);
+    const camisa = payload.data.products.find((p) => p.name === 'Camisa que se mueve');
+    expect(camisa?.units_sold).toBe(2);
+  });
+
+  it('closes the window on Colombian midnight, exclusive', async () => {
+    // The seeded order at 2026-08-17T05:00Z is 00:00 on the 17th in Bogota —
+    // the first instant AFTER a window ending on the 16th. An inclusive upper
+    // bound would count it here and in every other window this product reports.
+    scripted = [
+      toolUseResponse('get_orders_snapshot', { from: '2026-08-10', to: '2026-08-16' }),
+      textResponse('Van 2 pedidos.'),
+    ];
+
+    await ask(shop.cookie, '¿cuántos pedidos van?');
+
+    const payload = firstToolPayload<{ total_sales_cents_excluding_cancelled: number }>(1);
+    expect(payload.data.total_sales_cents_excluding_cancelled).toBe(200_000);
+  });
+
+  it('ranks by stock but leaves made-to-order products out of it', async () => {
+    scripted = [
+      toolUseResponse('get_product_performance', { from: '2026-08-10', to: '2026-08-16', sort: 'lowest_stock' }),
+      textResponse('Se te está acabando la Agotada.'),
+    ];
+
+    await ask(shop.cookie, '¿qué se me está agotando?');
+
+    const payload = firstToolPayload<{ products: Array<{ name: string; stock: number }> }>(1);
+    const names = payload.data.products.map((p) => p.name);
+
+    // Fewest units first.
+    expect(names.slice(0, 2)).toEqual(['Agotada', 'Casi agotada']);
+    // A product that does not track inventory has no stock number worth
+    // ranking — listing it as "0 unidades" would send the merchant to restock
+    // something that is made to order.
+    expect(names).not.toContain('Sobre pedido');
+  });
+
+  it('admits when the catalogue is bigger than it looked at', async () => {
+    // The other half of "say when you do not know". A ranking over part of the
+    // catalogue reported as a complete one is exactly the invented certainty
+    // this feature must not have — so the flag is asserted against a store that
+    // genuinely exceeds the scan cap.
+    const big = await signUpWithTenant('tiendagrande@example.com', 'owner');
+    await prisma.tenantLimits.create({
+      data: { tenantId: big.tenantId, productsMax: 5000, aiMessagesMonth: LIMIT, staffSeats: 2 },
+    });
+    await prisma.product.createMany({
+      data: Array.from({ length: 1001 }, (_, i) => ({
+        tenantId: big.tenantId,
+        name: `Producto ${String(i).padStart(4, '0')}`,
+        slug: `producto-grande-${i}`,
+        priceCents: 10_000,
+        stock: 5,
+        status: 'active' as const,
+      })),
+    });
+
+    scripted = [
+      toolUseResponse('get_product_performance', { from: '2026-08-10', to: '2026-08-16', sort: 'slowest' }),
+      textResponse('Revisé parte del catálogo.'),
+    ];
+
+    await ask(big.cookie, '¿qué se está quedando quieto?');
+
+    const payload = firstToolPayload<{ catalog_truncated: boolean; catalog_scanned: number }>(1);
+    expect(payload.data.catalog_truncated).toBe(true);
+    expect(payload.data.catalog_scanned).toBe(1000);
   });
 
   it('keeps cancelled orders out of the peso figure but inside the breakdown', async () => {

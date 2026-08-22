@@ -226,6 +226,12 @@ describe('GET /v1/storefront/products/:slug/reviews', () => {
     expect((await publicReviews('no-existe')).status).toBe(404);
   });
 
+  it('caps pageSize so one request cannot ask for every review in the store', async () => {
+    const res = await publicReviews('gorra', '?pageSize=5000');
+    expect(res.status).toBe(200);
+    expect(res.body.pageSize).toBe(50);
+  });
+
   it('rejects a nonsense page number instead of computing a nonsense OFFSET', async () => {
     expect((await publicReviews('gorra', '?page=abc')).status).toBe(400);
     expect((await publicReviews('gorra', '?page=0')).status).toBe(400);
@@ -466,6 +472,10 @@ describe('the merchant hides a review', () => {
     expect(res.body.summary.count).toBe(3);
     expect(res.body.summary.average).toBe(3.3);
     expect(res.body.summary.distribution).toEqual({ 1: 1, 2: 0, 3: 0, 4: 1, 5: 1 });
+    // Newest first. A shopper opening a product page is asking "what do people
+    // say NOW", and a list that led with the oldest review would answer a
+    // different question — the one the store was like a year ago.
+    expect(res.body.reviews.map((r: { rating: number }) => r.rating)).toEqual([1, 4, 5]);
   });
 
   it('drops it from the list AND from the average, so the two agree', async () => {

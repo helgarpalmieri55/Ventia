@@ -288,6 +288,12 @@ describe('/v1/admin/collections/:id/products', () => {
       .send({ productIds: [camisa, camisa] });
     expect(repeated.status).toBe(400);
     expect(repeated.body.error).toBe('VALIDATION_FAILED');
+    // Asserted down to the message on purpose. Without the schema's own
+    // duplicate check the request still 400s — `assertProductsExist` counts
+    // distinct ids and sees 1 where 2 were sent — but it 400s saying the
+    // product does not exist, which sends the merchant looking for a deleted
+    // product that is sitting right there in their catalog.
+    expect(repeated.body.details.fieldErrors.productIds).toEqual(['no repitas el mismo producto']);
 
     const rival = await makeProduct(otherTenantId, 'Producto ajeno');
     const foreign = await request(server())
@@ -348,12 +354,17 @@ describe('/v1/admin/collections/:id/products', () => {
 describe('GET /v1/storefront/collections', () => {
   let novedades: string;
   let visible: string;
+  let tambienVisible: string;
   let archivado: string;
 
   beforeAll(async () => {
     // Everything the admin suite above left behind is either deleted or
-    // empty; these are the rows this suite asserts on.
+    // empty; these are the rows this suite asserts on. The two visible names
+    // are deliberately in reverse alphabetical order relative to the order
+    // they are curated in, so the assertion below can only pass if the
+    // MERCHANT's order survived — not the alphabet, and not insertion time.
     visible = await makeProduct(tenantId, 'Camiseta blanca');
+    tambienVisible = await makeProduct(tenantId, 'Abrigo largo');
     archivado = await makeProduct(tenantId, 'Camiseta agotada', 'archived');
     const borrador = await makeProduct(tenantId, 'Camiseta sin publicar', 'draft');
 
@@ -365,7 +376,7 @@ describe('GET /v1/storefront/collections', () => {
     await request(server())
       .put(`/v1/admin/collections/${novedades}/products`)
       .set('cookie', cookie)
-      .send({ productIds: [archivado, visible, borrador] })
+      .send({ productIds: [archivado, visible, borrador, tambienVisible] })
       .expect(200);
   });
 
@@ -377,8 +388,9 @@ describe('GET /v1/storefront/collections', () => {
     expect(strip).toBeDefined();
     // The archived and draft members are curated (the admin still lists them)
     // but a shopper must never see a strip advertising something unbuyable.
-    expect(strip.products.map((p: { name: string }) => p.name)).toEqual(['Camiseta blanca']);
+    expect(strip.products.map((p: { name: string }) => p.name)).toEqual(['Camiseta blanca', 'Abrigo largo']);
     expect(strip.products[0].id).toBe(visible);
+    expect(strip.products[1].id).toBe(tambienVisible);
     expect(strip.products[0]).toMatchObject({ priceCents: 45900, inStock: false, thumbnailUrl: null });
     // Nothing renders it, so it is deliberately not in the payload.
     expect(strip.descriptionMd).toBeUndefined();

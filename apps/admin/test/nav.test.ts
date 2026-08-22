@@ -2,18 +2,24 @@ import { describe, expect, it } from 'vitest';
 import { navItems } from '../lib/nav';
 
 describe('navItems', () => {
-  it('gives owners all 11 items in order, with es-CO labels', () => {
+  it('gives owners all 14 items in order, with es-CO labels', () => {
     const items = navItems('owner');
 
-    expect(items).toHaveLength(11);
+    expect(items).toHaveLength(14);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
+      // Next to Categorías because that is where a merchant looks for it, and
+      // separate from it because a category is taxonomy and a collection is
+      // curation — see the `Collection` model comment.
+      'Colecciones',
       'Importar CSV',
       'Pedidos',
       'Clientes',
       'Pagos por revisar',
       'Conversaciones',
+      'Reseñas',
+      'Asistente',
       'Equipo',
       'Configuración',
       'Dominios',
@@ -21,18 +27,24 @@ describe('navItems', () => {
     ]);
   });
 
-  it('gives staff only the 7 catalog items', () => {
+  it('gives staff only the 10 catalog items', () => {
     const items = navItems('staff');
 
-    expect(items).toHaveLength(7);
+    expect(items).toHaveLength(10);
     expect(items.map((item) => item.label)).toEqual([
       'Productos',
       'Categorías',
+      'Colecciones',
       'Importar CSV',
       'Pedidos',
       'Clientes',
       'Pagos por revisar',
       'Conversaciones',
+      // Both roles: hiding a bad review or answering it is customer work, not
+      // account administration, and the moderation API has no @Roles() either.
+      'Reseñas',
+      // Both roles, mirroring /v1/admin/ai/command, which is not owner-only.
+      'Asistente',
     ]);
   });
 

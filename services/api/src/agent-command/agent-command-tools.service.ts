@@ -306,6 +306,15 @@ export class AgentCommandToolsService {
         // No email, phone, shippingAddress or customerId — see rule 4 in this
         // file's header. `number` is the merchant-facing identifier and is what
         // they will search for on /pedidos.
+        select: {
+          number: true,
+          status: true,
+          paymentStatus: true,
+          totalCents: true,
+          channel: true,
+          source: true,
+          createdAt: true,
+        },
         orderBy: { createdAt: 'desc' },
         take: input.limit,
       }),
@@ -337,7 +346,6 @@ export class AgentCommandToolsService {
         by_status: countsByStatus(byStatus),
         by_payment_status: Object.fromEntries(byPayment.map((row) => [row.paymentStatus, row._count._all])),
         recent: recent.map((order) => ({
-          ...order,
           // Rendered as VNT-#### everywhere the merchant looks; the prefix is
           // added by the UI, so the raw number is what belongs here.
           order_number: order.number,

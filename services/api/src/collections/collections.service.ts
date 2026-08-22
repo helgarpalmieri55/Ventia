@@ -212,6 +212,14 @@ export class CollectionsService {
     } catch (err) {
       // `uniqueSlug` above read, then this wrote — two concurrent creates of
       // the same name both see the slug free and one of them loses here.
+      // Unreachable in a single-threaded run — `uniqueSlug` above has already
+      // walked the suffixes and found a free one — and kept anyway, because
+      // that walk is a check-then-act: two merchants (or two tabs) creating
+      // `ofertas` at the same instant both see the slug free and both insert.
+      // The unique index is what actually decides, and this turns its error
+      // into the 409 the caller can act on rather than a 500. A mutation test
+      // cannot kill this line for exactly that reason; do not delete it as
+      // dead code.
       if (isUniqueConstraintError(err)) throw new HttpException({ error: 'SLUG_TAKEN' }, 409);
       throw err;
     }
@@ -242,6 +250,7 @@ export class CollectionsService {
       return this.detail(session, collection.id);
     } catch (err) {
       if (isNotFoundError(err)) throw new HttpException({ error: 'NOT_FOUND' }, 404);
+      if (isUniqueConstraintError(err)) throw new HttpException({ error: 'SLUG_TAKEN' }, 409);
       throw err;
     }
   }
