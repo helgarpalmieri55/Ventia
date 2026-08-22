@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { platformDb, tenantDb, type ShopperTokenPurpose } from '@ventia/db';
+import { platformDb, type ShopperTokenPurpose } from '@ventia/db';
 import { MAILER, type Mailer } from '../mailer/mailer';
 import { hashPassword, hashSecret, issueSecret, normalizeEmail, verifyPassword } from './shopper-credentials';
 import { sendShopperLinkEmail } from '../mailer/shopper-emails';

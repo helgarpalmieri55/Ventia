@@ -1,4 +1,4 @@
-import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
+import { Injectable, type OnModuleDestroy } from '@nestjs/common';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
