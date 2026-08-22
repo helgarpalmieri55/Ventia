@@ -145,6 +145,15 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.1)(lightningcss@1.32.0)
 
+  packages/instagram:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.20.1)(lightningcss@1.32.0)
+
   packages/payments:
     devDependencies:
       '@types/node':
@@ -220,6 +229,9 @@ importers:
       '@ventia/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@ventia/instagram':
+        specifier: workspace:*
+        version: link:../../packages/instagram
       '@ventia/payments':
         specifier: workspace:*
         version: link:../../packages/payments
@@ -2417,6 +2429,7 @@ packages:
   eslint@9.39.5:
     resolution: {integrity: sha512-DgZS62aPLXKlnxILS/AYCoRvHaZeXceIzlXPkkGGzJWSow1aEk0lbTlxUSlyjC8jcaKxAdOnTDz+o1JFSBsyjw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'

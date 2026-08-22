@@ -1,0 +1,26 @@
+-- `ConversationChannel` gana `instagram`: el canal de Instagram
+-- (packages/instagram) ya tiene camino de entrada, así que una conversación
+-- puede haber empezado ahí.
+--
+-- ## Por qué esta migración añade el valor y no hace nada más
+--
+-- Prisma aplica cada archivo de migración dentro de UNA transacción, y
+-- PostgreSQL no deja que una transacción use un valor de enum que ella misma
+-- añadió (55P04, "unsafe use of new value"). El motivo está desarrollado en
+-- 20260821120000_tenant_content_policy_terms, que se encontró con lo mismo y
+-- lo midió contra la imagen de Postgres de este repo.
+--
+-- Así que la tabla del canal viaja en el archivo siguiente
+-- (20260822233000_instagram_accounts) y aquí no hay ni un UPDATE: hoy no hay
+-- ninguna conversación que reetiquetar, pero la restricción vale igual cuando
+-- la haya.
+--
+-- Añadido al final y no con `BEFORE`, porque así el orden de valores del tipo
+-- coincide con el orden en que están declarados en schema.prisma. Nada ordena
+-- por esta columna, así que el orden no compra comportamiento; compra un
+-- `prisma migrate diff --from-migrations --to-schema-datamodel --exit-code`
+-- limpio.
+--
+-- Sin GRANT: un tipo no tiene privilegios propios y la tabla `Conversation` ya
+-- los tiene desde 20260723182728_rls.
+ALTER TYPE "ConversationChannel" ADD VALUE 'instagram';

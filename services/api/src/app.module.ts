@@ -21,6 +21,7 @@ import { PlatformModule } from './platform/platform.module';
 import { PrivacyModule } from './privacy/privacy.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { StorefrontModule } from './storefront/storefront.module';
+import { InstagramModule } from './instagram/instagram.module';
 import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { RedisModule, REDIS_CLIENT } from './common/redis.module';
 import { DomainResolver } from './tenants/domain-resolver';
@@ -56,6 +57,7 @@ export { REDIS_CLIENT };
     ReviewsModule,
     StorefrontModule,
     WhatsAppModule,
+    InstagramModule,
   ],
   controllers: [HealthController, TenantController, TlsAskController, CustomDomainsController],
   providers: [

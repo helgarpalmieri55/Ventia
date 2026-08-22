@@ -151,18 +151,25 @@ export async function createApp(): Promise<INestApplication> {
         // `/webhooks/payments/:provider/:tenantId` — this middleware is mounted
         // on '/webhooks', so req.path is the remainder.
         //
-        // `/webhooks/whatsapp/:provider` deliberately falls through to `null`
-        // (no limiting). Its tenant is only knowable from `phone_number_id`
-        // INSIDE the payload, and this middleware runs before the body is even
-        // read — so the only key available here is the client address, which
-        // for Meta is a handful of edge IPs shared by every tenant. Keying on
-        // that would let one busy store throttle every other store's inbound
-        // messages, which is precisely the failure the per-tenant key below
-        // exists to avoid.
+        // `/webhooks/whatsapp/:provider` and `/webhooks/instagram/:provider`
+        // deliberately fall through to `null` (no limiting). Their tenant is
+        // only knowable from INSIDE the payload — `phone_number_id` for
+        // WhatsApp, `entry[].id` for Instagram — and this middleware runs
+        // before the body is even read, so the only key available here is the
+        // client address, which for Meta is a handful of edge IPs shared by
+        // every tenant. Keying on that would let one busy store throttle every
+        // other store's inbound messages, which is precisely the failure the
+        // per-tenant key below exists to avoid.
+        //
+        // Both channels are named because they are the same deliberate
+        // decision, not an oversight that happened twice: a reader who finds
+        // only WhatsApp here will reasonably conclude Instagram was forgotten
+        // and "fix" it into the shared-address bucket.
         //
         // What bounds that endpoint instead, in order: the provider signature
         // is verified before any work beyond one indexed lookup (so forged
-        // traffic costs almost nothing), `Message.externalId` dedupes retries,
+        // traffic costs almost nothing), `Message.externalId` dedupes retries
+        // (both channels record it, under the same unique constraint),
         // the per-conversation throttle caps a single shopper, and the monthly
         // budget caps the tenant. Four layers, none of which can be evaded by
         // volume from an address we cannot attribute.

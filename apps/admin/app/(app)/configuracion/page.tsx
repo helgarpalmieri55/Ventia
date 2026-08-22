@@ -20,6 +20,7 @@ import { EnviosTab } from '../../../components/shipping-tab';
 import { PagosTab } from '../../../components/pagos-tab';
 import { AgenteTab } from '../../../components/agente-tab';
 import { WhatsAppTab } from '../../../components/whatsapp-tab';
+import { InstagramTab } from '../../../components/instagram-tab';
 import { ContenidoTab } from '../../../components/contenido-tab';
 
 interface StoreInfo {
@@ -78,7 +79,7 @@ export interface SettingsResponse {
   };
 }
 
-type Tab = 'tienda' | 'marca' | 'pagos' | 'envios' | 'agente' | 'whatsapp' | 'contenido';
+type Tab = 'tienda' | 'marca' | 'pagos' | 'envios' | 'agente' | 'whatsapp' | 'instagram' | 'contenido';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'tienda', label: 'Tienda' },
@@ -87,6 +88,9 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'envios', label: 'Envíos' },
   { key: 'agente', label: 'Asistente IA' },
   { key: 'whatsapp', label: 'WhatsApp' },
+  // Justo detrás de WhatsApp: son el mismo trabajo para el comerciante
+  // (conectar un canal de mensajería de Meta) y se configuran seguidos.
+  { key: 'instagram', label: 'Instagram' },
   { key: 'contenido', label: 'Contenido' },
 ];
 
@@ -181,6 +185,9 @@ export default function ConfiguracionPage() {
         </div>
         <div hidden={tab !== 'whatsapp'}>
           <WhatsAppTab />
+        </div>
+        <div hidden={tab !== 'instagram'}>
+          <InstagramTab />
         </div>
         <div hidden={tab !== 'contenido'}>
           <ContenidoTab />

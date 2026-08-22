@@ -43,6 +43,13 @@ const MESSAGES: Record<string, string> = {
   WHATSAPP_NUMBER_ALREADY_CONNECTED:
     'Ese número ya está conectado en otra tienda. Revisa el identificador que ingresaste; si de verdad es tuyo, contacta soporte.',
   WHATSAPP_NUMBER_NOT_FOUND: 'No encontramos este número de WhatsApp. Actualiza la página.',
+  // La restricción única de `igAccountId` en InstagramAccount: otra tienda ya
+  // registró esa cuenta. Mismo razonamiento que el de WhatsApp de arriba — lo
+  // abrumadoramente probable es un identificador mal copiado, y quedarnos con
+  // la cuenta en silencio rompería el enrutamiento de la otra tienda.
+  INSTAGRAM_ACCOUNT_ALREADY_CONNECTED:
+    'Esa cuenta de Instagram ya está conectada en otra tienda. Revisa el identificador que ingresaste; si de verdad es tuya, contacta soporte.',
+  INSTAGRAM_ACCOUNT_NOT_FOUND: 'No encontramos esta cuenta de Instagram. Actualiza la página.',
   // `TenantDomain.domain` is globally unique because it is what tenant
   // resolution keys on, so the API refuses to move a domain between stores
   // (custom-domains.controller.ts answers 409 even when the claimant is this

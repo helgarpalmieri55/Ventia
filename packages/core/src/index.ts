@@ -12,6 +12,7 @@ export * from './shipping-schemas.js';
 export { generateOrderReference, isOrderReference, ORDER_REFERENCE_PREFIX } from './order-reference.js';
 export * from './agent-tools.js';
 export * from './whatsapp-schemas.js';
+export * from './instagram-schemas.js';
 export * from './platform-schemas.js';
 export * from './privacy-schemas.js';
 export * from './impersonation-schemas.js';

@@ -80,9 +80,17 @@ enum SalesChannel {
   other
 }
 
+/// Por dónde entró la conversación.
+///
+/// `instagram` se añadió con el canal de Instagram (packages/instagram): a
+/// diferencia de `SalesChannel.instagram`, que existía desde antes como una
+/// etiqueta que el comerciante ponía a mano, este valor lo escribe un camino
+/// de entrada de verdad — un mensaje directo de Instagram que contesta el
+/// agente.
 enum ConversationChannel {
   web
   whatsapp
+  instagram
 }
 
 /// Mirrors `WhatsAppProviderId` in packages/whatsapp/src/index.ts. An enum
@@ -141,6 +149,7 @@ model Tenant {
   contents      TenantContent[]
   subscription  Subscription?
   whatsappNumbers WhatsAppNumber[]
+  instagramAccounts InstagramAccount[]
 }
 
 model TenantDomain {
@@ -1361,6 +1370,103 @@ model WhatsAppNumber {
   /// and a deleted tenant must not leave a live routing entry behind — an
   /// orphaned row would keep matching inbound deliveries for a store that no
   /// longer exists.
+  @@index([tenantId])
+}
+
+// ---- Canal de Instagram ----
+
+/// Mirrors `InstagramProviderId` in packages/instagram/src/index.ts.
+///
+/// Un solo miembro hoy, y aun así un enum y no un `String` libre por el mismo
+/// motivo que en `WhatsAppProviderId`: el valor elige qué adaptador parsea una
+/// entrega y firma un envío. La segunda integración de Meta para lo mismo
+/// (Instagram API con Instagram Login: sin página de Facebook, envío contra
+/// `graph.instagram.com`) entra aquí como un valor más el día que haga falta;
+/// el enum es lo que obliga a que ese día sea una migración y no una errata.
+enum InstagramProviderId {
+  graph
+}
+
+/// La cuenta de Instagram que un inquilino tiene conectada.
+///
+/// Esta tabla existe, en vez de otra clave dentro de `Tenant.settings`, por lo
+/// mismo que `WhatsAppNumber`: el enrutamiento de entrada. Todos los demás
+/// webhooks de este código llevan el inquilino en la ruta
+/// (`/webhooks/payments/:provider/:tenantId`), pero Meta entrega UN webhook por
+/// app cubriendo todas las cuentas conectadas a ella, así que lo único que
+/// identifica al inquilino es el `entry[].id` que viene DENTRO del payload. Un
+/// valor que llega en el payload hay que buscarlo, y para buscarlo tiene que
+/// ser una columna indexada de verdad.
+///
+/// Una fila de aquí es exactamente de lo que se arma `InstagramConfig`
+/// (packages/instagram): `igAccountId` y `verifyToken` directos, `token` y
+/// `appSecret` descifrando `credentialsEnc` en la API.
+model InstagramAccount {
+  id       String              @id @default(uuid()) @db.Uuid
+  tenantId String              @db.Uuid
+  provider InstagramProviderId @default(graph)
+
+  /// LA clave de enrutamiento: el id de la cuenta profesional de Instagram,
+  /// que es lo que Meta pone en `entry[].id` de cada entrega.
+  ///
+  /// `@unique` global, deliberadamente NO `@@unique([tenantId, igAccountId])`.
+  /// Una entrega trae este valor y nada más, así que si dos inquilinos
+  /// pudieran reclamar el mismo, la búsqueda devolvería dos filas y el
+  /// enrutamiento sería ambiguo — y "ambiguo" aquí significa los clientes de
+  /// una tienda hablando con el agente de otra, con su conversación y sus
+  /// pedidos a la vista. Es una propiedad de seguridad que garantiza la base
+  /// de datos: la comprobación en la aplicación ("¿esta cuenta ya está
+  /// conectada?") es una carrera, un índice UNIQUE no.
+  igAccountId String @unique
+
+  /// El id de la página de Facebook a la que está vinculada la cuenta.
+  ///
+  /// NO se enruta por aquí y no va en la ruta del envío: se envía contra el id
+  /// de la cuenta de Instagram. Se guarda porque es de donde sale el token (es
+  /// un token de página), porque la suscripción al webhook se hace sobre la
+  /// página, y porque es el dato que un comerciante y quien le dé soporte
+  /// necesitan comparar contra lo que ven en el panel de Meta.
+  ///
+  /// Nullable porque la otra integración de Meta (Instagram Login) no tiene
+  /// página ninguna; con `provider = graph` siempre viene.
+  pageId String?
+
+  /// El @usuario de la cuenta, para que el comerciante reconozca cuál conectó.
+  /// Solo para mostrar — el enrutamiento es siempre `igAccountId`.
+  username String
+
+  /// pending | connected | disabled. `disabled` es como un comerciante apaga
+  /// el canal sin perder las credenciales. `String` libre como
+  /// `WhatsAppNumber.status`, `Order.status` y `Conversation.status`, que es
+  /// la convención de este esquema para los estados de ciclo de vida que
+  /// lleva el flujo de administración.
+  status String @default("pending")
+
+  /// Blob AES-256-GCM (`base64(iv):base64(tag):base64(ciphertext)`), el mismo
+  /// esquema y la misma llave que las credenciales de pasarela — ver
+  /// services/api/src/payments/encryption.ts. Guarda el token de página y el
+  /// app secret de Meta.
+  ///
+  /// NO lo puede leer el código con ámbito de inquilino: `ventia_app` tiene un
+  /// GRANT SELECT por columnas que deja fuera esta y `verifyToken`. El motivo
+  /// completo está en la migración.
+  credentialsEnc String?
+
+  /// El `hub.verify_token` de Meta, que se devuelve tal cual en el saludo GET.
+  /// Es un secreto compartido, así que cae bajo la misma revocación por
+  /// columna que `credentialsEnc`.
+  verifyToken String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Cascade + este índice: la pestaña "Instagram" del admin lista las cuentas
+  /// del inquilino, y un inquilino borrado no puede dejar viva una entrada de
+  /// enrutamiento — una fila huérfana seguiría casando entregas de una tienda
+  /// que ya no existe y, como `igAccountId` es único global, además impediría
+  /// volver a conectar esa cuenta nunca.
   @@index([tenantId])
 }
 

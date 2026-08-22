@@ -39,7 +39,7 @@ import { platformDb } from '@ventia/db';
 export const PLAN_LIMIT_ERROR = 'PLAN_LIMIT_EXCEEDED';
 
 /** Plan entitlements that are on or off. */
-export type PlanBooleanFeature = 'customDomain' | 'humanHandoff' | 'whatsappChannel';
+export type PlanBooleanFeature = 'customDomain' | 'humanHandoff' | 'whatsappChannel' | 'instagramChannel';
 
 /** Plan entitlements that are a countable ceiling. */
 export type PlanQuota = 'productsMax' | 'aiCreditsMonth' | 'staffSeats';
@@ -57,6 +57,10 @@ export interface PlanLimits {
   customDomain: boolean;
   humanHandoff: boolean;
   whatsappChannel: boolean;
+  /** El canal de Instagram (packages/instagram). Lo traen Crece y Escala;
+   * Emprende no. Se comprueba al conectar la cuenta y otra vez en cada mensaje
+   * entrante, porque un plan se puede bajar después de conectarla. */
+  instagramChannel: boolean;
 }
 
 /**

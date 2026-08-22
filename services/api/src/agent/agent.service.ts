@@ -20,6 +20,11 @@ import { buildSystemPrompt } from './system-prompt';
 const SALES_CHANNEL_FOR: Record<ConversationChannel, SalesChannel> = {
   web: 'web',
   whatsapp: 'whatsapp',
+  // Añadido con el canal de Instagram (packages/instagram). Este mapa hizo
+  // exactamente lo que decía su comentario: al declarar el valor nuevo en
+  // `ConversationChannel`, la compilación falló aquí hasta decir qué vende, en
+  // vez de dejar que un cast lo colara como 'other'.
+  instagram: 'instagram',
 };
 
 /**
