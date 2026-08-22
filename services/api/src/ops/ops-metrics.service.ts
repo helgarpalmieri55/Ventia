@@ -58,6 +58,11 @@ export interface StoreMetrics {
     percentUsed: number | null;
     inputTokens: number;
     outputTokens: number;
+    /** Prompt-cache traffic. `cacheReadTokens` climbing while `inputTokens`
+     * stays flat is caching working; both flat means the prompt is below the
+     * provider's minimum cacheable length and the marker is being ignored. */
+    cacheWriteTokens: number;
+    cacheReadTokens: number;
     /** `null` when prices are unconfigured — see the class doc. */
     costMicroUsd: number | null;
     costCents: number | null;
@@ -87,6 +92,8 @@ export interface OpsSnapshot {
       messages: number;
       inputTokens: number;
       outputTokens: number;
+      cacheWriteTokens: number;
+      cacheReadTokens: number;
       costMicroUsd: number | null;
       costCents: number | null;
     };
@@ -170,6 +177,8 @@ export class OpsMetricsService {
           messages: usageRows.reduce((sum, row) => sum + row.messagesCount, 0),
           inputTokens: usageRows.reduce((sum, row) => sum + row.inputTokens, 0),
           outputTokens: usageRows.reduce((sum, row) => sum + row.outputTokens, 0),
+          cacheWriteTokens: usageRows.reduce((sum, row) => sum + row.cacheWriteTokens, 0),
+          cacheReadTokens: usageRows.reduce((sum, row) => sum + row.cacheReadTokens, 0),
           // Summed in micro-USD and rounded ONCE at the end. Rounding each
           // tenant to cents first and adding those would lose most of the
           // total on a platform of small stores.
@@ -252,6 +261,8 @@ export class OpsMetricsService {
         percentUsed,
         inputTokens: usage?.inputTokens ?? 0,
         outputTokens: usage?.outputTokens ?? 0,
+        cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+        cacheReadTokens: usage?.cacheReadTokens ?? 0,
         costMicroUsd: pricingConfigured ? microUsd : null,
         costCents: pricingConfigured ? microUsdToCents(microUsd) : null,
       },
@@ -323,5 +334,7 @@ interface UsageRow {
   messagesCount: number;
   inputTokens: number;
   outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
   costMicroUsd: bigint;
 }

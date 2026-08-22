@@ -47,8 +47,32 @@ const SALES_CHANNEL_FOR: Record<ConversationChannel, SalesChannel> = {
 
 export const ANTHROPIC_CLIENT = Symbol('ANTHROPIC_CLIENT');
 
+/** Env var overriding the model this agent runs on. */
+export const AGENT_MODEL_ENV = 'AGENT_MODEL';
+
 /** SPEC.md §7's model of record for this product. */
-const MODEL = 'claude-opus-5';
+export const DEFAULT_MODEL = 'claude-opus-5';
+
+/**
+ * Which model answers shoppers.
+ *
+ * Configurable because it is the single largest lever on what this product
+ * costs to run, and changing it should not require a deploy of new code — an
+ * operator watching the OPS feed's cost figures needs to be able to try a
+ * cheaper tier, measure, and move back if answers get worse.
+ *
+ * The DEFAULT is deliberately left where it was rather than lowered here.
+ * Catalogue lookup and cart building almost certainly do not need the top
+ * tier, and moving down is very likely the right call — but it is a
+ * QUALITY decision, and the only honest way to make it is to run
+ * `test/agent-evals.test.ts` against a real key on both tiers and compare.
+ * Silently swapping the model in a commit about cost would be shipping an
+ * unmeasured regression in how the agent talks to a merchant's customers.
+ */
+export function agentModel(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = (env[AGENT_MODEL_ENV] ?? '').trim();
+  return configured.length > 0 ? configured : DEFAULT_MODEL;
+}
 
 /**
  * How many model round-trips one shopper turn may take.
@@ -264,11 +288,13 @@ export class AgentService {
     const toolResults: AgentReply['toolResults'] = [];
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheWriteTokens = 0;
+    let cacheReadTokens = 0;
     let finalText = '';
 
     for (let turn = 0; turn < MAX_MODEL_TURNS; turn++) {
       const response = await this.anthropic.messages.create({
-        model: MODEL,
+        model: agentModel(),
         max_tokens: 2048,
         // Adaptive thinking with LOW effort: this is a sales chat, and a
         // shopper watching a widget feels every second. Low effort still
@@ -277,13 +303,32 @@ export class AgentService {
         // predictable against a plan limit. Raise it if answers get shallow.
         thinking: { type: 'adaptive' },
         output_config: { effort: 'low' },
-        system,
+        // Marked cacheable, which is the single biggest cost reduction
+        // available to this loop and costs nothing in behaviour.
+        //
+        // The cacheable prefix is tools -> system -> messages, so a breakpoint
+        // on the system block covers the tool schemas too. Both are
+        // byte-identical on every turn of every conversation for a given
+        // tenant, and without this they were re-sent and re-billed at full
+        // input price on each of the up-to-four model round-trips a single
+        // shopper question makes.
+        //
+        // Below the provider's minimum cacheable length the marker is ignored
+        // rather than rejected, so a short prompt degrades to exactly the
+        // previous behaviour.
+        system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
         tools,
         messages,
       });
 
       inputTokens += response.usage.input_tokens;
       outputTokens += response.usage.output_tokens;
+      // Cache tokens are reported SEPARATELY from `input_tokens` and are billed
+      // at different rates — reads far cheaper, writes slightly dearer. Folding
+      // them into `inputTokens` would price a cache hit as a full-price read
+      // and hide the saving this change exists to produce.
+      cacheWriteTokens += response.usage.cache_creation_input_tokens ?? 0;
+      cacheReadTokens += response.usage.cache_read_input_tokens ?? 0;
 
       // Append the assistant turn verbatim. Not just the text: tool_use blocks
       // must come back unchanged or the follow-up tool_result has nothing to
@@ -354,7 +399,7 @@ export class AgentService {
         outputTokens,
       },
     });
-    await this.budget.record(tenantId, { inputTokens, outputTokens });
+    await this.budget.record(tenantId, { inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens });
 
     emit({ type: 'message', text: finalText });
     return {

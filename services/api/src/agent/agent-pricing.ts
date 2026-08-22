@@ -32,10 +32,18 @@
 export const INPUT_PRICE_ENV = 'AGENT_PRICE_INPUT_USD_PER_MTOK';
 /** USD per 1,000,000 output tokens, e.g. `5.00`. */
 export const OUTPUT_PRICE_ENV = 'AGENT_PRICE_OUTPUT_USD_PER_MTOK';
+/** USD per 1,000,000 tokens WRITTEN into the prompt cache. Optional. */
+export const CACHE_WRITE_PRICE_ENV = 'AGENT_PRICE_CACHE_WRITE_USD_PER_MTOK';
+/** USD per 1,000,000 tokens READ from the prompt cache. Optional. */
+export const CACHE_READ_PRICE_ENV = 'AGENT_PRICE_CACHE_READ_USD_PER_MTOK';
 
 export interface AgentPricing {
   inputUsdPerMTok: number;
   outputUsdPerMTok: number;
+  /** Cache rates. Both default to the BASE INPUT price when unset — see
+   * {@link agentPricing} for why that direction and not the real ratios. */
+  cacheWriteUsdPerMTok: number;
+  cacheReadUsdPerMTok: number;
 }
 
 /**
@@ -53,7 +61,27 @@ export function agentPricing(env: NodeJS.ProcessEnv = process.env): AgentPricing
   const input = parsePrice(env[INPUT_PRICE_ENV]);
   const output = parsePrice(env[OUTPUT_PRICE_ENV]);
   if (input === null || output === null) return null;
-  return { inputUsdPerMTok: input, outputUsdPerMTok: output };
+
+  // The two cache rates are OPTIONAL, and an unset one falls back to the base
+  // input price rather than to a hardcoded multiple of it.
+  //
+  // Providers do publish standard ratios (a cache read costs a fraction of a
+  // fresh input token, a write slightly more than one), and applying them here
+  // would produce a prettier number. It would also be this module inventing a
+  // price, which is the one thing it exists not to do — and getting it wrong
+  // in the cheap direction would report a margin the operator does not have.
+  //
+  // Falling back to the base input rate can only OVERSTATE cost, because a
+  // cache read is never dearer than a fresh read. An operator who sets nothing
+  // sees a conservative figure and can only be pleasantly surprised by the real
+  // invoice; one who sets the real rates sees the truth. Neither ever believes
+  // they are more profitable than they are.
+  return {
+    inputUsdPerMTok: input,
+    outputUsdPerMTok: output,
+    cacheWriteUsdPerMTok: parsePrice(env[CACHE_WRITE_PRICE_ENV]) ?? input,
+    cacheReadUsdPerMTok: parsePrice(env[CACHE_READ_PRICE_ENV]) ?? input,
+  };
 }
 
 function parsePrice(raw: string | undefined): number | null {
@@ -76,13 +104,27 @@ function parsePrice(raw: string | undefined): number | null {
  * is a rounding pedantry rather than real money; it costs nothing to be right.
  */
 export function priceMicroUsd(
-  tokens: { inputTokens: number; outputTokens: number },
+  tokens: TokenCounts,
   pricing: AgentPricing | null = agentPricing(),
 ): number | null {
   if (pricing === null) return null;
   const usd =
-    (tokens.inputTokens * pricing.inputUsdPerMTok + tokens.outputTokens * pricing.outputUsdPerMTok) / 1_000_000;
+    (tokens.inputTokens * pricing.inputUsdPerMTok +
+      tokens.outputTokens * pricing.outputUsdPerMTok +
+      (tokens.cacheWriteTokens ?? 0) * pricing.cacheWriteUsdPerMTok +
+      (tokens.cacheReadTokens ?? 0) * pricing.cacheReadUsdPerMTok) /
+    1_000_000;
   return Math.round(usd * 1_000_000);
+}
+
+/** What one turn consumed. The cache halves are optional so a caller that
+ * predates caching — or a turn whose prompt was too short to cache — needs no
+ * change. */
+export interface TokenCounts {
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens?: number;
+  cacheReadTokens?: number;
 }
 
 /** Micro-USD to whole cents, for the operator views that still speak cents.

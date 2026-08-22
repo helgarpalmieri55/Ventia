@@ -26,6 +26,12 @@ let variantId: string;
 let scripted: unknown[] = [];
 let createCalls: Array<Record<string, unknown>> = [];
 
+/** The prompt text out of the cacheable block array the loop sends. */
+function systemText(call: { system?: unknown }): string {
+  const system = call.system as Array<{ text: string }>;
+  return system.map((block) => block.text).join('\n');
+}
+
 function textResponse(text: string) {
   return {
     content: [{ type: 'text', text }],
@@ -142,6 +148,62 @@ describe('agent loop — a plain answer', () => {
     expect(usage?.messagesCount).toBe(1);
     expect(usage?.inputTokens).toBe(10);
     expect(usage?.outputTokens).toBe(5);
+  });
+
+  it('marks the system prompt cacheable, which is what makes the prompt cheap', async () => {
+    // The cacheable prefix is tools -> system -> messages, so a breakpoint on
+    // the system block covers the tool schemas too. Both are byte-identical on
+    // every turn of every conversation; without this they were re-sent and
+    // re-billed at full input price on each of the up-to-four round-trips one
+    // shopper question can make.
+    scripted = [textResponse('listo')];
+
+    await agent.respond({ tenantId, message: 'hola' });
+
+    const system = createCalls[0].system as Array<{ type: string; cache_control?: { type: string } }>;
+    expect(Array.isArray(system)).toBe(true);
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('meters cache tokens separately from ordinary input', async () => {
+    // Three counters and not one: the three are billed at three different
+    // rates, so folding cache reads into `inputTokens` would price every hit
+    // as a full-price read and erase the saving in the very report meant to
+    // show it.
+    await prisma.agentUsage.deleteMany({ where: { tenantId } });
+    scripted = [
+      {
+        content: [{ type: 'text', text: 'listo' }],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 1200,
+          cache_read_input_tokens: 3400,
+        },
+        stop_reason: 'end_turn',
+      },
+    ];
+
+    await agent.respond({ tenantId, message: 'hola' });
+
+    const usage = await prisma.agentUsage.findFirst({ where: { tenantId } });
+    expect(usage?.inputTokens).toBe(10);
+    expect(usage?.cacheWriteTokens).toBe(1200);
+    expect(usage?.cacheReadTokens).toBe(3400);
+  });
+
+  it('survives a provider response that reports no cache fields at all', async () => {
+    // Below the minimum cacheable length the marker is ignored and the usage
+    // block carries no cache keys. That must record as zero, not NaN — a NaN
+    // increment would poison the tenant's whole month.
+    await prisma.agentUsage.deleteMany({ where: { tenantId } });
+    scripted = [textResponse('listo')];
+
+    await agent.respond({ tenantId, message: 'hola' });
+
+    const usage = await prisma.agentUsage.findFirst({ where: { tenantId } });
+    expect(usage?.cacheWriteTokens).toBe(0);
+    expect(usage?.cacheReadTokens).toBe(0);
   });
 
   it('prices the turn at write time when model prices are configured', async () => {
@@ -391,8 +453,10 @@ describe('agent loop — the plan decides which tools exist', () => {
     await agent.respond({ tenantId, message: 'hola' });
     await agent.respond({ tenantId: withHandoff.id, message: 'hola' });
 
-    expect(createCalls[0].system as string).not.toContain('escalate_to_human');
-    expect(createCalls[1].system as string).toContain('escalate_to_human');
+    // `system` is a block array now, not a bare string — it carries the cache
+    // breakpoint. The prompt text is the first block's `text`.
+    expect(systemText(createCalls[0])).not.toContain('escalate_to_human');
+    expect(systemText(createCalls[1])).toContain('escalate_to_human');
   });
 });
 

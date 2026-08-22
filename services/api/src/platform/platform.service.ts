@@ -405,6 +405,10 @@ export class PlatformService {
       messagesLimit: limit,
       inputTokens: usage?.inputTokens ?? 0,
       outputTokens: usage?.outputTokens ?? 0,
+      /** Prompt-cache traffic. Reads rising while `inputTokens` stays flat is
+       * what caching working looks like. */
+      cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+      cacheReadTokens: usage?.cacheReadTokens ?? 0,
       // Derived from `costMicroUsd`, NOT read off the `costCents` column.
       // That column was never written by anything, so this line used to report
       // every tenant on the platform as costing exactly zero — an operator
@@ -500,6 +504,8 @@ interface AgentUsageRow {
   messagesCount: number;
   inputTokens: number;
   outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
   /** Prisma maps a Postgres BIGINT to a JS `bigint`, which `JSON.stringify`
    * refuses outright. Every read converts to `number` at this boundary — safe
    * well past any realistic total, since one micro-USD is 1e-6 of a dollar and

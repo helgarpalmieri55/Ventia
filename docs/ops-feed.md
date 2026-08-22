@@ -24,6 +24,8 @@ openssl rand -hex 32          # -> OPS_METRICS_TOKEN
 | `OPS_PUSH_INTERVAL_SECONDS` | 60. Floor is 10. |
 | `AGENT_PRICE_INPUT_USD_PER_MTOK` | Every cost field is `null`. |
 | `AGENT_PRICE_OUTPUT_USD_PER_MTOK` | Same — both or neither. |
+| `AGENT_PRICE_CACHE_WRITE_USD_PER_MTOK` | Falls back to the base input price. |
+| `AGENT_PRICE_CACHE_READ_USD_PER_MTOK` | Falls back to the base input price. |
 
 The token minimum is 32 characters and shorter values are refused rather than
 accepted with a warning: this one credential reaches every store's cost and
@@ -107,6 +109,22 @@ This is not defensive style for its own sake. The column this replaced,
 incremented the three counters beside it and stopped — so the operator console
 read it and reported every store on the platform as costing exactly zero. A
 confident wrong number is worse than an absent one, because it gets believed.
+
+### Cache rates fall back conservatively
+
+The agent marks its system prompt and tool schemas cacheable, and the snapshot
+reports `cacheWriteTokens` and `cacheReadTokens` beside `inputTokens` because
+the three are billed at three different rates.
+
+If you do not set the cache rates, both are priced at the **base input rate**.
+A cache read is never dearer than a fresh read, so that can only overstate cost
+— set nothing and your margin is conservative, set the real rates and it is
+exact. There is no built-in discount ratio, because a wrong one in the cheap
+direction would report a margin you do not have.
+
+`cacheReadTokens` climbing while `inputTokens` stays flat is caching working.
+Both flat means the prompt is below the provider's minimum cacheable length and
+the marker is being ignored — harmless, but no saving either.
 
 Costs accumulate in **micro-USD** (millionths of a dollar): one shopper turn
 costs a fraction of a cent, and rounding each increment to whole cents rounds

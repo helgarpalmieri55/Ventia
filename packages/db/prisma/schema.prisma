@@ -954,6 +954,19 @@ model AgentUsage {
   month         String // "2026-07"
   inputTokens   Int    @default(0)
   outputTokens  Int    @default(0)
+  /// Tokens written into, and read out of, the provider's prompt cache.
+  ///
+  /// Separate columns rather than folded into `inputTokens` because the three
+  /// are billed at three different rates — a cache read is far cheaper than a
+  /// fresh input token, a cache write slightly dearer. Adding them together
+  /// would price every cache hit as a full read and erase, in the reporting,
+  /// exactly the saving that caching produces.
+  ///
+  /// Both are 0 for turns taken before caching was enabled, and stay 0 when a
+  /// prompt is below the provider's minimum cacheable length — in which case
+  /// the cache marker is ignored and every token is an ordinary input token.
+  cacheWriteTokens Int @default(0)
+  cacheReadTokens  Int @default(0)
   /// DEAD since it was added, and kept only so the column can be dropped in a
   /// separate migration once nothing reads it. Nothing ever wrote it —
   /// `AgentBudgetService.record()` incremented the three counters around it

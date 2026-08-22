@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { platformDb } from '@ventia/db';
 import { isPlanFeatureEnabledOn, loadPlanLimits } from '../common/plan-limits';
-import { priceMicroUsd } from './agent-pricing';
+import { priceMicroUsd, type TokenCounts } from './agent-pricing';
 
 /**
  * The per-tenant monthly AI budget (docs/SPEC.md §7): "at 90% → merchant
@@ -112,7 +112,7 @@ export class AgentBudgetService {
    * the model call completes. */
   async record(
     tenantId: string,
-    tokens: { inputTokens: number; outputTokens: number },
+    tokens: TokenCounts,
     now: Date = new Date(),
   ): Promise<void> {
     const month = currentYearMonth(now);
@@ -138,12 +138,16 @@ export class AgentBudgetService {
         messagesCount: 1,
         inputTokens: tokens.inputTokens,
         outputTokens: tokens.outputTokens,
+        cacheWriteTokens: tokens.cacheWriteTokens ?? 0,
+        cacheReadTokens: tokens.cacheReadTokens ?? 0,
         costMicroUsd,
       },
       update: {
         messagesCount: { increment: 1 },
         inputTokens: { increment: tokens.inputTokens },
         outputTokens: { increment: tokens.outputTokens },
+        cacheWriteTokens: { increment: tokens.cacheWriteTokens ?? 0 },
+        cacheReadTokens: { increment: tokens.cacheReadTokens ?? 0 },
         // Atomic like its siblings: two shoppers answered in the same instant
         // must add both costs, not race and keep one.
         costMicroUsd: { increment: costMicroUsd },
