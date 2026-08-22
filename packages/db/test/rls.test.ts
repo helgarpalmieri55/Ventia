@@ -652,3 +652,141 @@ describe('Shopper accounts: tenant data, but the credential is not', () => {
     expect(after!.customerId).toBeNull();
   });
 });
+
+describe('Collections, reviews, addresses and wishlist: ordinary tenant tables', () => {
+  let productId: string;
+  let accountId: string;
+  let orderId: string;
+
+  beforeAll(async () => {
+    const product = await prisma.product.findFirstOrThrow({ where: { tenantId: T1 } });
+    productId = product.id;
+    const account = await prisma.shopperAccount.create({
+      data: { tenantId: T1, email: `reviewer-${Date.now()}@example.com` },
+    });
+    accountId = account.id;
+    const order = await prisma.order.create({
+      data: {
+        tenantId: T1,
+        number: 5001,
+        reference: `VNT-rev-${Date.now()}`,
+        email: 'reviewer@example.com',
+        phone: '3001112233',
+        shippingAddress: { departamento: 'Bogotá D.C.', municipio: 'Bogotá', linea1: 'Calle 1' },
+        subtotalCents: 1000,
+        taxCents: 0,
+        totalCents: 1000,
+      },
+    });
+    orderId = order.id;
+  });
+
+  it('a store sees only its own collections', async () => {
+    await prisma.collection.create({ data: { tenantId: T1, name: 'Ofertas', slug: 'ofertas' } });
+    await prisma.collection.create({ data: { tenantId: T2, name: 'Ajena', slug: 'ajena' } });
+
+    const rows = await asTenant(T1, (tx) => tx.$queryRaw<{ slug: string }[]>`SELECT "slug" FROM "Collection"`);
+    expect(rows.map((r) => r.slug)).toEqual(['ofertas']);
+  });
+
+  it('a merchant can write its own collections — these are not read-only tables', async () => {
+    // Unlike `AgentUsage` or `ShopperSession`, a collection IS the merchant's
+    // own data and the admin edits it through `tenantDb`. The grant has to be
+    // there, and a test that only proved isolation would not notice its loss.
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`
+        INSERT INTO "Collection" ("id", "tenantId", "name", "slug", "updatedAt")
+        VALUES (gen_random_uuid(), ${T1}::uuid, 'Nuevos', 'nuevos', now())
+      `),
+    ).resolves.toBeGreaterThan(0);
+  });
+
+  it('refuses to write a collection into ANOTHER store', async () => {
+    // The WITH CHECK half of the policy. Without it a tenant-scoped insert
+    // could name someone else's tenantId and land in their storefront.
+    await expect(
+      asTenant(T1, (tx) => tx.$executeRaw`
+        INSERT INTO "Collection" ("id", "tenantId", "name", "slug", "updatedAt")
+        VALUES (gen_random_uuid(), ${T2}::uuid, 'Intruso', 'intruso', now())
+      `),
+    ).rejects.toThrow(/row-level security/i);
+  });
+
+  it('refuses a rating outside 1..5 at the database, not just in Zod', async () => {
+    // An out-of-range rating skews every average a shopper reads, and the
+    // CHECK is the only layer a future import script cannot route around.
+    for (const rating of [0, 6, -1]) {
+      await expect(
+        prisma.review.create({ data: { tenantId: T1, productId, accountId, orderId, rating } }),
+        String(rating),
+      ).rejects.toThrow(/Review_rating_range|constraint/i);
+    }
+    await expect(
+      prisma.review.create({ data: { tenantId: T1, productId, accountId, orderId, rating: 5 } }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('allows one review per shopper per product', async () => {
+    // What makes review bombing cost a purchase each time instead of a loop.
+    await expect(
+      prisma.review.create({ data: { tenantId: T1, productId, accountId, orderId, rating: 1 } }),
+    ).rejects.toThrow(/[Uu]nique constraint/);
+  });
+
+  it('allows at most ONE default address per shopper', async () => {
+    // A partial unique index, because the application version of this rule
+    // (clear the old default, then set the new one) is a check-then-act that
+    // two browser tabs can interleave — and "which address does checkout
+    // pre-fill" must not have two answers.
+    const address = { departamento: 'Bogotá D.C.', municipio: 'Bogotá', linea1: 'Calle 1' };
+    await prisma.shopperAddress.create({ data: { tenantId: T1, accountId, address, isDefault: true } });
+
+    await expect(
+      prisma.shopperAddress.create({ data: { tenantId: T1, accountId, address, isDefault: true } }),
+    ).rejects.toThrow(/[Uu]nique constraint/);
+
+    // ...but any number of non-default ones.
+    await expect(
+      prisma.shopperAddress.create({ data: { tenantId: T1, accountId, address, isDefault: false } }),
+    ).resolves.toBeTruthy();
+    await expect(
+      prisma.shopperAddress.create({ data: { tenantId: T1, accountId, address, isDefault: false } }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('keeps a wishlist entry unique per shopper and product', async () => {
+    await prisma.wishlistItem.create({ data: { tenantId: T1, accountId, productId } });
+    await expect(
+      prisma.wishlistItem.create({ data: { tenantId: T1, accountId, productId } }),
+    ).rejects.toThrow(/[Uu]nique constraint/);
+  });
+
+  it('deleting the order takes its review with it', async () => {
+    // An erasure request removes the order; a review left behind would claim a
+    // purchase that no longer exists, which is exactly the claim it is for.
+    const order = await prisma.order.create({
+      data: {
+        tenantId: T2,
+        number: 5002,
+        reference: `VNT-rev2-${Date.now()}`,
+        email: 'otra@example.com',
+        phone: '3001112233',
+        shippingAddress: { departamento: 'Bogotá D.C.', municipio: 'Bogotá', linea1: 'Calle 2' },
+        subtotalCents: 1000,
+        taxCents: 0,
+        totalCents: 1000,
+      },
+    });
+    const otherProduct = await prisma.product.findFirstOrThrow({ where: { tenantId: T2 } });
+    const otherAccount = await prisma.shopperAccount.create({
+      data: { tenantId: T2, email: `otro-${Date.now()}@example.com` },
+    });
+    const review = await prisma.review.create({
+      data: { tenantId: T2, productId: otherProduct.id, accountId: otherAccount.id, orderId: order.id, rating: 4 },
+    });
+
+    await prisma.order.delete({ where: { id: order.id } });
+
+    expect(await prisma.review.findUnique({ where: { id: review.id } })).toBeNull();
+  });
+});

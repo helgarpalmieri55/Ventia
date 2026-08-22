@@ -6,6 +6,17 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   'Customer', 'Order', 'OrderItem', 'OrderEvent', 'Payment', 'Conversation',
   'Message', 'AgentUsage', 'TenantContent', 'NotificationLog',
   'Shipment', 'Invoice', 'StaffInvite',
+  // Ordinary tenant tables (20260822180000). Nothing here is a credential or
+  // an enforcement input, so they keep the standard grants — unlike
+  // `ShopperSession`/`ShopperToken`, which are deliberately absent from this
+  // list because `ventia_app` cannot open them at all.
+  //
+  // Worth stating once: RLS isolates by TENANT, not by shopper. One shopper
+  // reading another's saved address inside the SAME store is prevented by the
+  // application filtering on the account id from the session, exactly as the
+  // order-history route does. The database cannot help there — both rows
+  // legitimately belong to the same tenant.
+  'Collection', 'CollectionProduct', 'Review', 'ShopperAddress', 'WishlistItem',
   // READ-ONLY for tenants. `ventia_app` holds SELECT and nothing else on this
   // table, and its RLS policy is `FOR SELECT` only (see
   // 20260815120000_webhook_event_tenant_read) — the sole writer,

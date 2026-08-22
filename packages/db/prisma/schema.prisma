@@ -129,6 +129,8 @@ model Tenant {
   domains       TenantDomain[]
   limits        TenantLimits?
   shopperAccounts ShopperAccount[]
+  collections   Collection[]
+  reviews       Review[]
   memberships   Membership[]
   categories    Category[]
   products      Product[]
@@ -301,6 +303,9 @@ model Product {
   variants       ProductVariant[]
   images         ProductImage[]
   categories     ProductCategory[]
+  collections    CollectionProduct[]
+  reviews        Review[]
+  wishlistedBy   WishlistItem[]
 
   @@unique([tenantId, slug])
   @@unique([tenantId, sku])
@@ -463,6 +468,9 @@ model ShopperAccount {
   sessions        ShopperSession[]
   tokens          ShopperToken[]
   carts           Cart[]
+  addresses       ShopperAddress[]
+  wishlist        WishlistItem[]
+  reviews         Review[]
 
   @@unique([tenantId, email])
   @@unique([customerId])
@@ -516,6 +524,156 @@ model ShopperToken {
 
   @@index([tenantId, accountId, purpose])
   @@index([expiresAt])
+}
+
+/// A merchant-curated set of products — the "Nuevos", "Ofertas", "Mujer"
+/// strips in the storefront design.
+///
+/// ## Why this is not a Category
+///
+/// A category is TAXONOMY: where a product lives, one place in a tree, the
+/// thing a shopper navigates by. A collection is CURATION: a set the merchant
+/// assembled for a reason unrelated to taxonomy — a season, a sale, a home-page
+/// strip — and a product belongs to as many as the merchant likes without any
+/// of them contradicting each other.
+///
+/// Forcing the two into one model is how "Ofertas" ends up a sibling of
+/// "Camisas" in the navigation menu, and how a discounted shirt has to choose
+/// between being findable and being on sale.
+model Collection {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @db.Uuid
+  name          String
+  slug          String
+  descriptionMd String   @default("")
+  /// Order within the storefront. Manual, because the whole point of a
+  /// collection is that the merchant chose it — sorting it by something the
+  /// system computes would be curation the merchant did not do.
+  position      Int      @default(0)
+  /// Hidden collections keep their products. A merchant assembling next
+  /// month's sale needs somewhere to build it, and deleting it to hide it
+  /// would throw the work away.
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  products      CollectionProduct[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, isActive])
+}
+
+/// Membership, with the merchant's own ordering.
+model CollectionProduct {
+  tenantId     String     @db.Uuid
+  collectionId String     @db.Uuid
+  productId    String     @db.Uuid
+  /// Position WITHIN this collection. The same product can be first in
+  /// "Ofertas" and last in "Nuevos": ordering belongs to the membership, not
+  /// to either side of it.
+  position     Int        @default(0)
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, productId])
+  @@index([tenantId, collectionId, position])
+}
+
+/// Whether a review is visible in the storefront.
+enum ReviewStatus {
+  published
+  /// Hidden BY THE MERCHANT. Not deleted: hiding a review leaves a trace, and
+  /// the row is also what keeps "you already reviewed this" true.
+  hidden
+}
+
+/// A shopper's review of a product they actually bought.
+///
+/// ## Why a purchase is required, and why that replaces a moderation queue
+///
+/// `orderId` is NOT NULL, so only someone with an order containing this
+/// product can review it, and the unique constraint allows one review per
+/// shopper per product.
+///
+/// That rule does the work moderation would, without the failure mode a queue
+/// has on THIS platform: a small merchant who opens their admin twice a week
+/// would leave real reviews unpublished for days, and a review that appears a
+/// week late is worth a fraction of one that appears. Meanwhile the thing
+/// moderation exists to stop — competitor sabotage, spam links, review bombing
+/// — costs an attacker a completed purchase per review here, which is not a
+/// campaign anyone runs against a small store.
+///
+/// So reviews publish immediately and the merchant can HIDE one. That is the
+/// opposite default from "pending until approved", deliberately: the merchant's
+/// remedy is after the fact, because the alternative silently costs them every
+/// review they never got round to approving.
+model Review {
+  id        String       @id @default(uuid()) @db.Uuid
+  tenantId  String       @db.Uuid
+  productId String       @db.Uuid
+  /// Who wrote it. Required — an anonymous review is unverifiable by
+  /// construction, and this platform has somewhere to put a shopper identity.
+  accountId String       @db.Uuid
+  /// The purchase that entitles them to it. Required; see above.
+  orderId   String       @db.Uuid
+  /// 1..5, enforced by a CHECK constraint in the migration and not only in
+  /// Zod — a rating outside the range would quietly skew every average that
+  /// reads this table, and averages are what a shopper actually sees.
+  rating    Int
+  title     String?
+  bodyMd    String       @default("")
+  status    ReviewStatus @default(published)
+  /// The merchant's public answer. One per review, in the same row: a reply is
+  /// not a review and needs no identity, ordering or rating of its own.
+  replyMd   String?
+  repliedAt DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  tenant    Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product   Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  account   ShopperAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, productId, accountId])
+  @@index([tenantId, productId, status])
+}
+
+/// An address a shopper saved for next time.
+///
+/// The address is the SAME JSON shape `Order.shippingAddress` stores and
+/// `@ventia/core`'s address schema validates. A second, columnar shape would
+/// mean two definitions of a Colombian address kept in step by hand, and the
+/// one that drifts is always the one checkout does not read.
+model ShopperAddress {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  accountId String   @db.Uuid
+  /// What the shopper calls it — "Casa", "Oficina". Optional: most people have
+  /// one address and naming it is a chore.
+  label     String?
+  address   Json
+  /// The one checkout pre-fills. A PARTIAL unique index in the migration keeps
+  /// it to at most one per account, so "which is the default" can never have
+  /// two answers.
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  account   ShopperAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, accountId])
+}
+
+/// A product a shopper wants to come back to.
+model WishlistItem {
+  tenantId  String   @db.Uuid
+  accountId String   @db.Uuid
+  productId String   @db.Uuid
+  createdAt DateTime @default(now())
+  account   ShopperAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  product   Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([accountId, productId])
+  @@index([tenantId, accountId, createdAt])
 }
 
 model Order {
@@ -649,6 +807,7 @@ model Order {
   items                OrderItem[]
   events               OrderEvent[]
   payments             Payment[]
+  reviews              Review[]
 
   @@unique([tenantId, number])
   @@index([tenantId, status])
