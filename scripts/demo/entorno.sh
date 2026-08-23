@@ -51,6 +51,47 @@ cargar_env
 export DATABASE_URL REDIS_URL AUTH_SECRET API_URL API_INTERNAL_URL ADMIN_URL PLATFORM_ROOT_DOMAIN
 export S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_BUCKET S3_PUBLIC_URL PAYMENTS_ENCRYPTION_KEY
 
+# --- la URL pública, que es lo que Meta puede alcanzar ----------------------
+#
+# `API_PUBLIC_URL` a propósito NO tiene valor por defecto aquí. La lee el API
+# (`apiPublicUrl()` en instagram-admin.controller.ts y en
+# whatsapp-admin.controller.ts) para armar la URL de callback que el panel
+# enseña con su botón de copiar, y su propio respaldo es
+# `http://api.ventia.localhost` — una URL que Meta NO puede alcanzar jamás.
+#
+# Dejarla vacía es la señal que usa `tunel.sh` para saber que tiene que
+# levantar un túnel. Ponerla (en el .env, o exportándola) es la forma de decir
+# "ya tengo una URL pública mía", y entonces no se levanta ninguno.
+#
+# Dónde deja escrita el túnel su URL, para que la lean OTRAS terminales: la que
+# corre `pnpm run demo:comprobar` mientras el arranque ocupa la primera. Fuera
+# del repositorio a propósito — es estado de una ejecución, no del proyecto, y
+# así no aparece en `git status` justo antes de grabar.
+: "${ARCHIVO_TUNEL:=${TMPDIR:-/tmp}/ventia-demo-tunel-$(id -u).url}"
+export ARCHIVO_TUNEL
+
+# --- los identificadores de la cuenta REAL de Meta --------------------------
+#
+# Vacíos por defecto, y solo se leen para IMPRIMIR (el bloque de `pegar.mjs`) y
+# para COMPROBAR (`comprobar.mjs`). No son credenciales: el token de acceso y
+# el app secret se pegan en el panel y acaban cifrados en la base, nunca aquí.
+#
+# Puestos en el `.env` de la raíz, el bloque del final del arranque sale con
+# las URLs ya completas y no con huecos que rellenar a mano.
+#
+#   META_IG_ACCOUNT_ID=17841...     Instagram -> Configuración de la API
+#   META_WA_PHONE_NUMBER_ID=1093... WhatsApp  -> Configuración de la API
+#   META_VERIFY_TOKEN=...           te lo inventas; el mismo que pegas en Meta
+#
+# Los dos específicos existen por si se quiere un token distinto por canal, que
+# es lo razonable si los dos canales viven en apps de Meta distintas.
+: "${META_IG_ACCOUNT_ID:=}"
+: "${META_WA_PHONE_NUMBER_ID:=}"
+: "${META_VERIFY_TOKEN:=}"
+: "${META_IG_VERIFY_TOKEN:=$META_VERIFY_TOKEN}"
+: "${META_WA_VERIFY_TOKEN:=$META_VERIFY_TOKEN}"
+export META_IG_ACCOUNT_ID META_WA_PHONE_NUMBER_ID META_VERIFY_TOKEN META_IG_VERIFY_TOKEN META_WA_VERIFY_TOKEN
+
 # ---------------------------------------------------------------------------
 
 # La llave de cifrado tiene que decodificar a EXACTAMENTE 32 bytes: es la de
