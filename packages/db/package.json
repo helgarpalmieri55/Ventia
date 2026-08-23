@@ -13,11 +13,13 @@
     "generate": "prisma generate",
     "migrate:dev": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
-    "seed": "tsx src/seed.ts"
+    "seed": "tsx src/seed.ts",
+    "seed:demo": "tsx src/seed-demo.ts"
   },
   "dependencies": { "@prisma/client": "^6.0.0", "@ventia/core": "workspace:*" },
   "devDependencies": {
     "prisma": "^6.0.0",
+    "@types/node": "^22.0.0",
     "vitest": "^2.1.0",
     "testcontainers": "^10.13.0",
     "@testcontainers/postgresql": "^10.13.0",

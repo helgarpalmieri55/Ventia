@@ -1,0 +1,3 @@
+Deje aquí fotos de verdad con el slug del producto por nombre
+(cafe-narino-el-mirador-340g.jpg, logo.png, ...) y
+`node scripts/demo/fotos.mjs` las sube en vez de las láminas generadas.

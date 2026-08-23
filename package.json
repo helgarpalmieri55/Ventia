@@ -9,7 +9,16 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "build": "turbo run build"
+    "build": "turbo run build",
+    "demo": "bash scripts/demo/arranque.sh",
+    "demo:limpio": "bash scripts/demo/arranque.sh --limpio",
+    "demo:reiniciar": "bash scripts/demo/reiniciar.sh",
+    "demo:parar": "bash scripts/demo/parar.sh",
+    "demo:seed": "bash scripts/demo/seed.sh",
+    "demo:fotos": "bash scripts/demo/con-entorno.sh node scripts/demo/fotos.mjs",
+    "demo:ig": "node scripts/demo/ig.mjs",
+    "demo:wa": "node scripts/demo/wa.mjs",
+    "demo:test": "turbo run build --filter=@ventia/instagram --filter=@ventia/whatsapp && node --test scripts/demo/lib/*.test.mjs && pnpm --filter @ventia/db exec vitest run test/seed-demo.test.ts"
   },
   "devDependencies": {
     "turbo": "^2.3.0",

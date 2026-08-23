@@ -1,0 +1,71 @@
+{
+  "_": "Fuente ÚNICA de verdad de la demo. La lee el seed (packages/db/src/seed-demo.ts) y la leen los simuladores (scripts/demo/*.mjs). Si un secreto de aquí no coincide entre las dos mitades, el webhook se rechaza por firma y no hay forma de verlo desde fuera: por eso está en un solo archivo y no duplicado.",
+
+  "tienda": {
+    "id": "decaf000-0000-4000-8000-000000000001",
+    "slug": "la-cumbre",
+    "nombre": "Tostaduría La Cumbre",
+    "plan": "crece",
+    "dominio": "la-cumbre.ventia.localhost"
+  },
+
+  "duena": {
+    "email": "camila@lacumbre.co",
+    "nombre": "Camila Restrepo",
+    "clave": "Cumbre2026!"
+  },
+
+  "instagram": {
+    "_": "igAccountId es la clave de enrutamiento: va en entry[].id de cada entrega y es UNIQUE global en InstagramAccount. appSecret firma X-Hub-Signature-256; el seed lo cifra dentro de credentialsEnc y el simulador firma con este mismo valor en claro.",
+    "proveedor": "graph",
+    "igAccountId": "17841400000000091",
+    "pageId": "102000000000091",
+    "usuario": "tostaduria.lacumbre",
+    "token": "IGQVJDEMO-token-de-pagina-falso-solo-para-la-demo",
+    "appSecret": "5f2c9a1d4b7e8036demo-ig-app-secret",
+    "verifyToken": "la-cumbre-ig-verify-2026",
+    "compradorIgsid": "7351902348571106",
+    "compradorNombre": "Laura Gómez"
+  },
+
+  "whatsapp": {
+    "_": "externalId es el phone_number_id de Meta: clave de enrutamiento y UNIQUE global en WhatsAppNumber.",
+    "proveedor": "cloud",
+    "externalId": "109300000000091",
+    "wabaId": "115000000000091",
+    "telefonoVisible": "+57 300 214 8890",
+    "telefonoMeta": "573002148890",
+    "token": "EAADEMO-token-de-sistema-falso-solo-para-la-demo",
+    "appSecret": "8a41d7c2e9b6035demo-wa-app-secret",
+    "verifyToken": "la-cumbre-wa-verify-2026",
+    "compradorTelefono": "573114458820",
+    "compradorNombre": "Andrés Melo"
+  },
+
+  "urls": {
+    "api": "http://localhost:4000",
+    "apiPublica": "http://api.ventia.localhost",
+    "admin": "http://admin.ventia.localhost",
+    "tienda": "http://la-cumbre.ventia.localhost"
+  },
+
+  "fotos": {
+    "_": "Prefijo público de MinIO donde scripts/demo/fotos.mjs sube las imágenes. El seed hace HEAD sobre cada URL y solo escribe la fila ProductImage si responde 200 — una foto rota en cámara es peor que el marcador de 'sin foto' que ya dibuja el storefront.",
+    "prefijo": "demo/la-cumbre",
+    "__laminas": "Una lámina por producto. El slug tiene que casar UNO A UNO con el catálogo de packages/db/src/seed-demo-datos.ts, y hay una prueba que lo comprueba: sin ella, añadir un producto y olvidarse de la lámina daría un producto sin foto en mitad de una cuadrícula que sí las tiene. El título es el de la lámina, más corto que el nombre del producto porque tiene que caber en la tarjeta.",
+    "laminas": [
+      { "slug": "cafe-narino-el-mirador-340g", "titulo": "Café Nariño · El Mirador" },
+      { "slug": "cafe-huila-pitalito-340g", "titulo": "Café Huila · Pitalito" },
+      { "slug": "cafe-antioquia-jardin-340g", "titulo": "Café Antioquia · Jardín" },
+      { "slug": "mezcla-la-cumbre", "titulo": "Mezcla La Cumbre" },
+      { "slug": "descafeinado-tolima-340g", "titulo": "Descafeinado Tolima" },
+      { "slug": "prensa-francesa-600ml", "titulo": "Prensa francesa 600 ml" },
+      { "slug": "molino-manual-ceramica", "titulo": "Molino manual de cerámica" },
+      { "slug": "greca-italiana-6-tazas", "titulo": "Greca italiana 6 tazas" },
+      { "slug": "filtro-v60-mas-100-filtros", "titulo": "Filtro V60 y 100 filtros" },
+      { "slug": "taza-ceramica-la-cumbre-300ml", "titulo": "Taza de cerámica 300 ml" },
+      { "slug": "kit-primer-origen", "titulo": "Kit Primer Origen" },
+      { "slug": "caja-regalo-tres-origenes", "titulo": "Caja Regalo Tres Orígenes" }
+    ]
+  }
+}
