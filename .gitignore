@@ -8,3 +8,8 @@ coverage/
 test-results/
 playwright-report/
 blob-report/
+
+# Volcado de Redis que aparece si algo arranca redis-server desde la raíz
+# del repositorio (los scripts de demo lo hacen cuando no hay docker). Es un
+# artefacto de ejecución, no fuente.
+dump.rdb
