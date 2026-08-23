@@ -3,6 +3,7 @@ import type Redis from 'ioredis';
 import { platformDb } from '@ventia/db';
 import { AdminModule } from './admin/admin.module';
 import { AgentModule } from './agent/agent.module';
+import { ConversationsModule } from './agent/conversations.module';
 import { AgentCommandModule } from './agent-command/agent-command.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { CheckoutModule } from './checkout/checkout.module';
@@ -39,6 +40,9 @@ export { REDIS_CLIENT };
     RedisModule,
     AdminModule,
     AgentModule,
+    // Depende de AgentModule, InstagramModule y WhatsAppModule; nadie depende
+    // de él. Ver su cabecera para por qué no vive dentro de AgentModule.
+    ConversationsModule,
     AgentCommandModule,
     CatalogModule,
     CheckoutModule,

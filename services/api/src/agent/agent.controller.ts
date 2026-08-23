@@ -1,10 +1,12 @@
-import { Body, Controller, Inject, Post, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, Inject, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { agentMessageInput, type AgentMessageInput } from '@ventia/core';
 import { parseOr400 } from '../catalog/parse';
 import { PublicTenantGuard } from '../storefront/public-tenant.guard';
 import { StorefrontTenantId } from '../storefront/storefront-tenant.decorator';
+import { tenantDb } from '@ventia/db';
 import { AgentService, type AgentEvent, type AgentReply } from './agent.service';
+import { HUMAN_MESSAGE_ROLE } from './human-takeover';
 
 /**
  * The storefront's public entry point to the AI sales agent (docs/SPEC.md §7).
@@ -38,6 +40,13 @@ import { AgentService, type AgentEvent, type AgentReply } from './agent.service'
  * throttle inside the service.
  */
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Cuántas respuestas humanas devuelve un sondeo. Muy por encima de lo que una
+ * persona escribe entre dos sondeos; el tope existe para que una conversación
+ * patológica no se convierta en una consulta lenta. */
+const REPLIES_LIMIT = 50;
+
 @Controller('v1/storefront/agent')
 @UseGuards(PublicTenantGuard)
 export class AgentController {
@@ -45,6 +54,73 @@ export class AgentController {
   // TS transform) doesn't emit `design:paramtypes`, so injection by type alone
   // can't resolve.
   constructor(@Inject(AgentService) private readonly agent: AgentService) {}
+
+  /**
+   * Lo que una PERSONA de la tienda le escribió a este comprador desde el
+   * panel, para que el widget lo enseñe sin que el comprador tenga que volver
+   * a escribir.
+   *
+   * ## Por qué existe
+   *
+   * Los otros dos canales tienen entrega propia: una respuesta humana sale por
+   * la Graph API y le llega al comprador esté donde esté. El widget no tiene
+   * nada parecido — solo abre un stream MIENTRAS dura un turno—, así que sin
+   * esto el comerciante escribiría en el panel, vería un «enviado», y el
+   * comprador no recibiría nunca nada. Un fallo silencioso, que es justo lo que
+   * este producto no puede permitirse en la función de atención.
+   *
+   * ## Por qué SOLO los mensajes de la persona, y solo del canal `web`
+   *
+   * Lo mínimo que resuelve el problema. Los mensajes del agente ya llegan por
+   * el stream del turno, así que devolverlos aquí solo crearía duplicados que
+   * el widget tendría que deduplicar. Y limitarlo a `channel = 'web'` cierra la
+   * única pregunta incómoda que abre un endpoint anónimo por id: un id de
+   * conversación de Instagram —que un comerciante puede tener a la vista en el
+   * panel— no puede convertirse en una forma de leer ese hilo desde fuera.
+   *
+   * El id no es un secreto (es un UUID v4 en `sessionStorage`, y el propio
+   * widget ya lo usa para continuar la conversación), pero no hace falta que lo
+   * sea: lo que devuelve esto es exactamente lo que la tienda acaba de decidir
+   * enviarle a quien tenga ese id.
+   */
+  @Get('conversations/:id/replies')
+  async replies(
+    @StorefrontTenantId() tenantId: string,
+    @Param('id') id: string,
+    @Query('after') after: string | undefined,
+  ) {
+    if (!UUID.test(id)) throw new HttpException({ error: 'CONVERSATION_NOT_FOUND' }, 404);
+    const db = tenantDb(tenantId);
+    const conversation = await db.conversation.findFirst({
+      where: { id, tenantId, channel: 'web' },
+      select: { id: true, status: true },
+    });
+    if (!conversation) throw new HttpException({ error: 'CONVERSATION_NOT_FOUND' }, 404);
+
+    // `after` es la marca del último mensaje que el widget ya pintó. Una fecha
+    // ilegible se ignora en vez de rechazarse: quien llama es un widget cuyo
+    // peor caso aceptable es repetir mensajes, no quedarse sin ellos.
+    const since = after ? new Date(after) : null;
+    const messages = await db.message.findMany({
+      where: {
+        tenantId,
+        conversationId: id,
+        role: HUMAN_MESSAGE_ROLE,
+        ...(since && Number.isFinite(since.getTime()) ? { createdAt: { gt: since } } : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+      take: REPLIES_LIMIT,
+      select: { id: true, content: true, createdAt: true },
+    });
+
+    return {
+      // Para que el widget pueda decir «te está atendiendo una persona» en vez
+      // de dejar al comprador esperando una respuesta automática que no va a
+      // llegar.
+      status: conversation.status,
+      messages,
+    };
+  }
 
   @Post('messages')
   async message(@StorefrontTenantId() tenantId: string, @Body() body: unknown): Promise<AgentReply> {

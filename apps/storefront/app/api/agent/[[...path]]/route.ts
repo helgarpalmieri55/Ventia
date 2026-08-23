@@ -25,6 +25,44 @@ const API_URL = process.env.API_INTERNAL_URL ?? 'http://localhost:4000';
 
 type RouteParams = { params: Promise<{ path?: string[] }> };
 
+/**
+ * GET, para el sondeo de respuestas humanas.
+ *
+ * Existe desde que el comerciante puede contestar como persona desde el panel:
+ * los otros dos canales entregan solos (Instagram y WhatsApp llevan el mensaje
+ * al teléfono del comprador), y el widget no tiene entrega ninguna — solo abre
+ * un stream mientras dura un turno. Sin esto, contestar a una conversación del
+ * chat de la tienda sería un botón que no le llega a nadie.
+ *
+ * Se lee entero con `await upstream.text()`, al contrario que el POST de abajo:
+ * la respuesta es un JSON pequeño y no un stream, así que aquí no hay nada que
+ * no bufferizar.
+ */
+export async function GET(req: Request, { params }: RouteParams): Promise<Response> {
+  const host = req.headers.get('host') ?? '';
+  const cookie = req.headers.get('cookie');
+  const path = (await params).path;
+  if (!isSafeProxyPath(path)) return new Response(null, { status: 404 });
+
+  const upstreamHeaders: Record<string, string> = { 'x-tenant-domain': host };
+  if (cookie) upstreamHeaders.cookie = cookie;
+
+  const suffix = path && path.length > 0 ? `/${path.join('/')}` : '';
+  // La cadena de consulta viaja tal cual: es el `?after=` con el que el widget
+  // pide solo lo que todavía no ha pintado.
+  const query = new URL(req.url).search;
+  const upstream = await fetch(`${API_URL}/v1/storefront/agent${suffix}${query}`, {
+    headers: upstreamHeaders,
+    cache: 'no-store',
+  });
+
+  return new Response(await upstream.text(), {
+    status: upstream.status,
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+  });
+}
+
+
 export async function POST(req: Request, { params }: RouteParams): Promise<Response> {
   const host = req.headers.get('host') ?? '';
   const cookie = req.headers.get('cookie');

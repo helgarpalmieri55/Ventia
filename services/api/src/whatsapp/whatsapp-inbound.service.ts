@@ -59,7 +59,7 @@ export class WhatsAppInboundService {
       // channel it no longer pays for.
       if (!(await isPlanFeatureEnabled(tenantId, 'whatsappChannel'))) return;
 
-      const conversationId = await this.resolveConversation(tenantId, message.from);
+      const conversationId = await this.resolveConversation(tenantId, message.from, input.numberId);
       const reply = await this.agent.respond({
         tenantId,
         conversationId,
@@ -75,6 +75,12 @@ export class WhatsAppInboundService {
         // call; this is the one that cannot be raced.
         externalId: message.externalId,
       });
+
+      // El agente calló porque una persona está atendiendo esta conversación.
+      // El mensaje del comprador ya quedó guardado por `respond` —el comerciante
+      // lo necesita en el panel—, y lo que no puede pasar es que el bot hable
+      // encima de esa persona.
+      if (reply.silenced) return;
 
       const baseUrl = await this.storefrontBaseUrl(tenantId);
       const bodies = renderForWhatsApp(reply, baseUrl);
@@ -127,17 +133,45 @@ export class WhatsAppInboundService {
    * expects the store to remember. Reuses the most recent non-resolved
    * conversation so a merchant marking one handled starts the next message
    * fresh rather than reopening a closed case.
+   *
+   * Anota además `channelAccountId` (el número por el que entró, para poder
+   * contestar después desde el panel sin adivinar cuál de los números del
+   * inquilino usar) y `lastInboundAt`.
+   *
+   * `lastInboundAt` es aquí NUESTRA hora de recepción, no la del comprador, y
+   * conviene decirlo en vez de dejarlo parecer lo que no es: `InboundMessage`
+   * de `@ventia/whatsapp` no lleva `timestamp` —ninguno de los dos adaptadores
+   * lo normaliza—, así que no hay marca del proveedor que guardar. La
+   * diferencia son los segundos que tarda una entrega, y hoy este dato no
+   * gobierna ninguna ventana en WhatsApp: `HumanReplyService` solo aplica la de
+   * Instagram, y explica ahí por qué la de la Cloud API queda pendiente de un
+   * cambio en `packages/whatsapp`.
    */
-  private async resolveConversation(tenantId: string, shopperRef: string): Promise<string> {
+  private async resolveConversation(tenantId: string, shopperRef: string, numberId: string): Promise<string> {
     const db = tenantDb(tenantId);
+    const lastInboundAt = new Date();
+
     const existing = await db.conversation.findFirst({
       where: { tenantId, channel: 'whatsapp', shopperRef, status: { not: 'resolved' } },
       orderBy: { startedAt: 'desc' },
     });
-    if (existing) return existing.id;
+    if (existing) {
+      await db.conversation.update({
+        where: { id: existing.id },
+        data: { lastInboundAt, channelAccountId: numberId },
+      });
+      return existing.id;
+    }
 
     const created = await db.conversation.create({
-      data: { tenantId, channel: 'whatsapp', shopperRef, status: 'open' },
+      data: {
+        tenantId,
+        channel: 'whatsapp',
+        shopperRef,
+        status: 'open',
+        lastInboundAt,
+        channelAccountId: numberId,
+      },
     });
     return created.id;
   }

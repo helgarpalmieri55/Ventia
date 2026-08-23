@@ -1,4 +1,5 @@
 import type { ApiError } from './api';
+import { MOTIVO_BLOQUEO } from './conversations-live';
 
 /** es-CO copy for every error code the API is known to emit (see
  * services/api/src/**\/*.ts for the `error: '...'` literals), plus the
@@ -65,6 +66,18 @@ const MESSAGES: Record<string, string> = {
   // than as a failure, because nothing the merchant did was wrong.
   DOMAIN_NOT_VERIFIED:
     'Primero tenemos que verificar este dominio. Publica el registro TXT que te mostramos y pulsa Verificar.',
+  CONVERSATION_NOT_FOUND: 'No encontramos esta conversación. Actualiza la página.',
+  // Los cuatro motivos por los que una conversación no admite una respuesta
+  // humana, con LOS MISMOS textos que el panel pinta junto al cuadro de texto
+  // ANTES de que el comerciante escriba. Se incorporan en vez de copiarse: aquí
+  // llegan como códigos 409, que es el caso en que la pantalla se quedó vieja y
+  // el envío se intentó igual, y sería absurdo que el mismo hecho se explicara
+  // con dos frases distintas según cuándo se detecta.
+  ...MOTIVO_BLOQUEO,
+  // El canal aceptó la petición y rechazó el mensaje. Se dice sin rodeos que NO
+  // salió: el comerciante tiene que saber que ese cliente sigue sin respuesta.
+  REPLY_NOT_DELIVERED:
+    'No pudimos entregar tu respuesta por este canal. El cliente todavía no la recibió; intenta de nuevo.',
   NETWORK: 'No pudimos conectar con el servidor. Verifica tu conexión.',
   UNKNOWN: 'Ocurrió un error inesperado. Intenta de nuevo.',
 };

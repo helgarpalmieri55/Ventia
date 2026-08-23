@@ -70,14 +70,19 @@ const TOP_PRODUCTS = 5;
  * The `Conversation.status` values that mean A PERSON GOT INVOLVED.
  *
  * There is no escalation event log — `Conversation.status` is a single mutable
- * column, written in exactly two places: `escalate_to_human`
- * (agent-tools.service.ts) sets `'escalated'`, and the merchant clicking
- * "resolver" (conversations.controller.ts) sets `'resolved'`. So a
- * conversation the agent handed over and the merchant then answered ends up
- * `'resolved'`, and counting only `'escalated'` as a handover would quietly
- * re-credit every handled escalation to the AI — the rate would climb every
- * time the merchant did the agent's work for it. Both statuses therefore count
- * as human-touched.
+ * column, written in exactly three places: `escalate_to_human`
+ * (agent-tools.service.ts) sets `'escalated'`, the merchant clicking
+ * "resolver" (conversations.controller.ts) sets `'resolved'`, y contestar desde
+ * el panel (`POST :id/reply`) deja `'human'`. So a conversation the agent
+ * handed over and the merchant then answered ends up `'resolved'`, and counting
+ * only `'escalated'` as a handover would quietly re-credit every handled
+ * escalation to the AI — the rate would climb every time the merchant did the
+ * agent's work for it. Los tres estados cuentan como tocados por una persona.
+ *
+ * `'human'` es el más literal de los tres: significa que el comerciante ESTÁ
+ * escribiendo en esa conversación ahora mismo y que el agente está callado.
+ * Dejarlo fuera le acreditaría a la IA justo las conversaciones que atendió
+ * alguien a mano.
  *
  * Anything else (today: `'open'`, the value every conversation starts at)
  * counts as handled by the agent alone. Two consequences worth stating:
@@ -89,7 +94,7 @@ const TOP_PRODUCTS = 5;
  *  - A NEW status added to the product must be classified here. Add it to this
  *    set if it means a person stepped in.
  */
-const HUMAN_TOUCHED_STATUSES: ReadonlySet<string> = new Set(['escalated', 'resolved']);
+const HUMAN_TOUCHED_STATUSES: ReadonlySet<string> = new Set(['escalated', 'resolved', 'human']);
 
 /** The channel list, checked against Prisma's own enum. If a member is added
  * to `SalesChannel` and not to `DASHBOARD_SALES_CHANNELS`, this line still

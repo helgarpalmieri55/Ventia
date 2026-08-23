@@ -82,6 +82,49 @@ export class InstagramAccountsService {
     };
   }
 
+  /**
+   * La cuenta con la que ESTE inquilino puede contestar por Instagram, y su
+   * configuración lista para enviar.
+   *
+   * Es el gemelo de salida de {@link resolveInbound}, y existe porque una
+   * respuesta escrita por una persona desde el panel no llega con ningún
+   * payload del que sacar la cuenta. Acotado por `tenantId` en TODOS los
+   * caminos: sin eso, un id de cuenta traído de una conversación ajena sería un
+   * inquilino enviando con las credenciales de otro.
+   *
+   * `accountId` es el `Conversation.channelAccountId` que anotó el camino de
+   * entrada. Cuando falta —conversaciones anteriores a esa columna— se cae a
+   * «la única cuenta conectada de este inquilino»: con una sola cuenta no hay
+   * ambigüedad ninguna, y con varias devuelve `null` en vez de sortear, porque
+   * un IGSID solo identifica a una persona FRENTE A LA CUENTA que lo emitió y
+   * enviar por la equivocada es, en el mejor caso, un rechazo de Meta.
+   *
+   * `null` también para una cuenta desactivada, por lo mismo que en la entrada:
+   * un canal que el comerciante cree apagado no puede seguir hablando.
+   */
+  async resolveOutbound(
+    tenantId: string,
+    accountId?: string | null,
+  ): Promise<{ provider: InstagramProviderId; config: InstagramConfig } | null> {
+    if (accountId) {
+      const row = await platformDb.instagramAccount.findFirst({ where: { id: accountId, tenantId } });
+      if (!row || row.status === 'disabled') return null;
+      return { provider: row.provider, config: this.toConfig(row.igAccountId, row.credentialsEnc, row.verifyToken) };
+    }
+
+    // `take: 2` y no `findFirst`: hacen falta DOS filas para distinguir «una
+    // sola, sin ambigüedad» de «varias, no se puede adivinar», y no hace falta
+    // ninguna más.
+    const rows = await platformDb.instagramAccount.findMany({
+      where: { tenantId, status: { not: 'disabled' } },
+      orderBy: { createdAt: 'asc' },
+      take: 2,
+    });
+    if (rows.length !== 1) return null;
+    const row = rows[0];
+    return { provider: row.provider, config: this.toConfig(row.igAccountId, row.credentialsEnc, row.verifyToken) };
+  }
+
   /** Todas las cuentas que ha conectado un inquilino, sin credenciales. */
   async listForTenant(tenantId: string): Promise<InstagramAccountView[]> {
     const rows = await platformDb.instagramAccount.findMany({

@@ -86,7 +86,10 @@ export class InstagramInboundService {
       // incluye.
       if (!(await isPlanFeatureEnabled(tenantId, 'instagramChannel'))) return;
 
-      const conversationId = await this.resolveConversation(tenantId, message.from);
+      const conversationId = await this.resolveConversation(tenantId, message.from, {
+        accountId: input.accountId,
+        sentAtMs: message.sentAtMs,
+      });
       const reply = await this.agent.respond({
         tenantId,
         conversationId,
@@ -103,6 +106,15 @@ export class InstagramInboundService {
         // que evita una llamada al modelo; esta es la que no se puede correr.
         externalId: message.externalId,
       });
+
+      // El agente calló porque una persona está atendiendo esta conversación.
+      // El mensaje del comprador ya quedó guardado (lo hace `respond`), que es
+      // lo que el comerciante necesita ver en el panel; lo que no puede pasar
+      // es que salga nada por el canal encima de lo que esa persona escribe.
+      // Los renderizadores devolverían cero cuerpos igualmente con un texto
+      // vacío, pero salir aquí ahorra la consulta del dominio y dice en una
+      // línea lo que si no habría que deducir.
+      if (reply.silenced) return;
 
       const baseUrl = await this.storefrontBaseUrl(tenantId);
       const bodies = renderForInstagram(reply, baseUrl);
@@ -175,17 +187,55 @@ export class InstagramInboundService {
    * identificadores incomparables (un IGSID no es un teléfono), y mezclarlos
    * en un canal cualquiera haría que el panel de conversaciones y el desglose
    * por canal del tablero mintieran.
+   *
+   * De paso anota las dos cosas que hacen falta para que UNA PERSONA pueda
+   * contestar después desde el panel:
+   *
+   *  - `lastInboundAt`, con la marca de tiempo DE META y no con la nuestra. Es
+   *    contra ella contra la que se mide la ventana de 24 horas, y una
+   *    respuesta humana se escribe horas más tarde sin ningún mensaje entrante
+   *    a mano contra el que medirla.
+   *  - `channelAccountId`, la cuenta por la que entró. Un IGSID solo identifica
+   *    a esta persona FRENTE A ESTA CUENTA; sin anotarlo, un inquilino con dos
+   *    cuentas conectadas no tendría por dónde contestar sin adivinar.
+   *
+   * Se escribe en cada mensaje, también en las conversaciones que ya existían:
+   * `lastInboundAt` cambia por definición con cada mensaje, y `channelAccountId`
+   * es lo que rellena las conversaciones anteriores a la columna en cuanto el
+   * comprador vuelve a escribir.
    */
-  private async resolveConversation(tenantId: string, shopperRef: string): Promise<string> {
+  private async resolveConversation(
+    tenantId: string,
+    shopperRef: string,
+    inbound: { accountId: string; sentAtMs: number },
+  ): Promise<string> {
     const db = tenantDb(tenantId);
+    // Si Meta mandó una marca de tiempo imposible, se usa la nuestra: una
+    // ventana medida contra `Invalid Date` no se cierra nunca, que es el fallo
+    // que hay que evitar.
+    const lastInboundAt = Number.isFinite(inbound.sentAtMs) ? new Date(inbound.sentAtMs) : new Date();
+
     const existing = await db.conversation.findFirst({
       where: { tenantId, channel: 'instagram', shopperRef, status: { not: 'resolved' } },
       orderBy: { startedAt: 'desc' },
     });
-    if (existing) return existing.id;
+    if (existing) {
+      await db.conversation.update({
+        where: { id: existing.id },
+        data: { lastInboundAt, channelAccountId: inbound.accountId },
+      });
+      return existing.id;
+    }
 
     const created = await db.conversation.create({
-      data: { tenantId, channel: 'instagram', shopperRef, status: 'open' },
+      data: {
+        tenantId,
+        channel: 'instagram',
+        shopperRef,
+        status: 'open',
+        lastInboundAt,
+        channelAccountId: inbound.accountId,
+      },
     });
     return created.id;
   }

@@ -83,6 +83,41 @@ export class WhatsAppNumbersService {
     };
   }
 
+  /**
+   * El número con el que ESTE inquilino puede contestar por WhatsApp, y su
+   * configuración lista para enviar.
+   *
+   * Gemelo de salida de {@link resolveInbound}. Existe por lo mismo que el de
+   * Instagram: una respuesta escrita por una persona desde el panel no llega
+   * con ningún payload del que sacar el número. Acotado por `tenantId` en todos
+   * los caminos, para que un id traído de una conversación ajena no envíe con
+   * las credenciales de otro.
+   *
+   * Con `numberId` ausente (conversaciones anteriores a
+   * `Conversation.channelAccountId`) cae a «el único número conectado» y
+   * devuelve `null` si hay varios: enviar desde el número equivocado le cambia
+   * el remitente al comprador, y eso no se adivina.
+   */
+  async resolveOutbound(
+    tenantId: string,
+    numberId?: string | null,
+  ): Promise<{ provider: WhatsAppProviderId; config: WhatsAppConfig } | null> {
+    if (numberId) {
+      const row = await platformDb.whatsAppNumber.findFirst({ where: { id: numberId, tenantId } });
+      if (!row || row.status === 'disabled') return null;
+      return { provider: row.provider, config: this.toConfig(row.externalId, row.credentialsEnc, row.verifyToken) };
+    }
+
+    const rows = await platformDb.whatsAppNumber.findMany({
+      where: { tenantId, status: { not: 'disabled' } },
+      orderBy: { createdAt: 'asc' },
+      take: 2,
+    });
+    if (rows.length !== 1) return null;
+    const row = rows[0];
+    return { provider: row.provider, config: this.toConfig(row.externalId, row.credentialsEnc, row.verifyToken) };
+  }
+
   /** Every number a tenant has connected, credential-free. */
   async listForTenant(tenantId: string): Promise<WhatsAppNumberView[]> {
     const rows = await platformDb.whatsAppNumber.findMany({

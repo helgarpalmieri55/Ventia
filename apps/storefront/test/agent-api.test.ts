@@ -3,6 +3,7 @@ import {
   AgentApiError,
   adoptCart,
   cartLinkFromTool,
+  fetchHumanReplies,
   productsFromTool,
   streamAgentMessage,
   type AgentStreamEvent,
@@ -173,5 +174,60 @@ describe('adoptCart', () => {
     // an expected outcome, not an exception.
     const fetchImpl = vi.fn().mockResolvedValue(new Response('{"error":"CART_NOT_FOUND"}', { status: 404 }));
     await expect(adoptCart('stale', fetchImpl)).resolves.toBe(false);
+  });
+});
+
+
+describe('fetchHumanReplies — lo que le escribió una persona de la tienda', () => {
+  /**
+   * La entrega que le falta al widget.
+   *
+   * Instagram y WhatsApp llevan una respuesta humana al teléfono del comprador
+   * por su cuenta; aquí no hay nada equivalente, así que sin este sondeo el
+   * comerciante contestaría y el comprador no vería nada.
+   */
+
+  it('pide solo lo posterior a lo que ya se pintó', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ status: 'human', messages: [] }), { status: 200 }));
+
+    await fetchHumanReplies('c-1', '2026-08-23T10:00:00.000Z', fetchImpl);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      '/api/agent/conversations/c-1/replies?after=2026-08-23T10%3A00%3A00.000Z',
+    );
+  });
+
+  it('sin marca previa pide todo', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ status: 'open', messages: [] }), { status: 200 }));
+
+    await fetchHumanReplies('c-1', null, fetchImpl);
+
+    expect(fetchImpl).toHaveBeenCalledWith('/api/agent/conversations/c-1/replies');
+  });
+
+  it('devuelve el estado y los mensajes tal cual', async () => {
+    const cuerpo = {
+      status: 'human',
+      messages: [{ id: 'm1', content: 'Soy Marcela, te ayudo.', createdAt: '2026-08-23T10:01:00.000Z' }],
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify(cuerpo), { status: 200 }));
+
+    await expect(fetchHumanReplies('c-1', null, fetchImpl)).resolves.toEqual(cuerpo);
+  });
+
+  it('un fallo de red devuelve null en vez de romper el chat', async () => {
+    // Es un sondeo de fondo: el siguiente lo arregla solo, y una excepción aquí
+    // tumbaría un chat que por lo demás funciona.
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('offline'));
+    await expect(fetchHumanReplies('c-1', null, fetchImpl)).resolves.toBeNull();
+  });
+
+  it('una conversación que el servidor no reconoce devuelve null', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response('{"error":"CONVERSATION_NOT_FOUND"}', { status: 404 }));
+    await expect(fetchHumanReplies('c-1', null, fetchImpl)).resolves.toBeNull();
   });
 });

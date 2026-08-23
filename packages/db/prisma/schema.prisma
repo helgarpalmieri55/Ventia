@@ -1182,8 +1182,55 @@ model Conversation {
   tenantId   String              @db.Uuid
   channel    ConversationChannel
   shopperRef String?
+
+  /// open | escalated | human | resolved.
+  ///
+  /// `human` es el traspaso REAL: el comerciante contestó desde el panel y a
+  /// partir de ahí atiende una persona. Mientras vale `human`, el agente calla
+  /// (`AgentService.respond`) — sigue guardando lo que escribe el comprador,
+  /// para que el comerciante lo lea en vivo, pero no contesta. Se vuelve a
+  /// `open` cuando el comerciante devuelve la conversación al asistente.
+  ///
+  /// Sigue siendo un `String` libre, como `Order.status`: es la convención de
+  /// este esquema para estados de ciclo de vida que gobierna el flujo de
+  /// administración, y convertirlo hoy en enum obligaría a una migración de
+  /// datos por cada estado nuevo del producto.
   status     String              @default("open")
   startedAt  DateTime            @default(now())
+
+  /// Cuándo escribió el comprador por última vez, en la marca de tiempo del
+  /// PROVEEDOR cuando la trae (Instagram sí; WhatsApp no, ver
+  /// `whatsapp-inbound.service.ts`).
+  ///
+  /// `packages/instagram/src/window.ts` argumenta —con razón— que el AGENTE no
+  /// necesita guardar esto: solo habla contestando a un mensaje entrante, y
+  /// ese mensaje trae su propia marca de tiempo. Una respuesta humana rompe esa
+  /// premisa: la inicia el comerciante desde el panel, minutos u horas después,
+  /// sin ningún mensaje entrante a mano contra el que medir. Y la ventana de 24
+  /// horas de Meta se aplica igual a lo que escribe una persona. Sin esta
+  /// columna, el panel no puede decirle al comerciante «esta conversación ya no
+  /// admite respuesta» ANTES de que escriba.
+  ///
+  /// Nulo en las conversaciones anteriores a esta columna y en las del widget
+  /// web, donde no hay ninguna ventana que respetar.
+  lastInboundAt DateTime?
+
+  /// La cuenta del canal por la que entró la conversación: `InstagramAccount.id`
+  /// o `WhatsAppNumber.id` según `channel`.
+  ///
+  /// Hace falta para poder CONTESTAR. Un IGSID solo tiene sentido frente a la
+  /// cuenta que lo emitió, así que un inquilino con dos cuentas conectadas no
+  /// puede resolverse adivinando: enviar por la cuenta equivocada es un envío
+  /// que Meta rechaza (o, peor, que llega a otra persona). El camino de entrada
+  /// ya sabe cuál es, así que lo escribe al pasar.
+  ///
+  /// Sin clave foránea a propósito: apunta a dos tablas distintas según el
+  /// canal. Nulo para el widget web y para las conversaciones anteriores a esta
+  /// columna, y el camino de respuesta cae entonces a «la única cuenta conectada
+  /// de este inquilino en este canal», negándose cuando hay más de una en vez de
+  /// elegir por sorteo.
+  channelAccountId String? @db.Uuid
+
   tenant     Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   messages   Message[]
 
@@ -1198,6 +1245,19 @@ model Message {
   id             String       @id @default(uuid()) @db.Uuid
   tenantId       String       @db.Uuid
   conversationId String       @db.Uuid
+
+  /// user | assistant | human | tool.
+  ///
+  /// `human` es lo que ESCRIBIÓ UNA PERSONA del equipo desde el panel, y existe
+  /// separado de `assistant` para que el transcripto diga quién dijo cada cosa.
+  /// No es cosmético: `assistant` acarrea la revelación de experiencia
+  /// automatizada («te respondo de forma automática»), y anteponérsela a lo que
+  /// escribió una persona sería mentir. La distinción también es lo que hace
+  /// que el agente sepa, al recuperar la conversación, que quien habló antes no
+  /// fue él y que le toca volver a revelarse.
+  ///
+  /// `tool` es un registro de depuración de qué herramientas corrieron; nunca
+  /// se le muestra al comerciante ni se le reenvía al modelo.
   role           String
   content        String
   toolCalls      Json?

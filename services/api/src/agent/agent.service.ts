@@ -5,7 +5,14 @@ import { AGENT_TOOL_JSON_SCHEMAS, AGENT_TOOL_NAMES } from '@ventia/core';
 import { AgentToolsService } from './agent-tools.service';
 import { AgentBudgetService, BUDGET_EXHAUSTED_REPLY } from './agent-budget.service';
 import { AgentThrottleService, THROTTLED_REPLY } from './agent-throttle.service';
-import { buildAutomationDisclosure, buildSystemPrompt, needsDisclosure } from './system-prompt';
+import { buildAutomationDisclosure, buildSystemPrompt } from './system-prompt';
+import {
+  HUMAN_MESSAGE_ROLE,
+  TRANSCRIPT_ROLES,
+  OUTBOUND_ROLES,
+  isHumanAttended,
+  needsDisclosureAfter,
+} from './human-takeover';
 
 /**
  * Where a conversation's shopper is standing, as the orders/carts side names it.
@@ -115,6 +122,19 @@ export interface AgentReply {
    * either the message budget is spent or this is a repeat inside the
    * cool-down. Also no model call. */
   throttled: boolean;
+  /**
+   * Cierto cuando el agente CALLÓ porque una persona está atendiendo esta
+   * conversación (`Conversation.status = 'human'`). El mensaje del comprador se
+   * guardó —el comerciante tiene que leerlo en el panel— y no hubo ni turno de
+   * modelo ni respuesta.
+   *
+   * `text` va vacío en ese caso, así que los renderizadores ya devuelven cero
+   * cuerpos y ningún transporte enviaría nada aunque se olvidara de mirar este
+   * campo. Está de todas formas porque un transporte que se ahorra el render
+   * completo se lee mejor, y porque «no contesté a propósito» y «no tuve nada
+   * que decir» son cosas distintas que quien llama merece poder distinguir.
+   */
+  silenced: boolean;
 }
 
 /**
@@ -222,6 +242,44 @@ export class AgentService {
     const conversation = await this.resolveConversation(tenantId, input.conversationId, input.shopperRef);
     emit({ type: 'conversation', conversationId: conversation.id });
 
+    // ## El agente calla mientras atiende una persona
+    //
+    // Antes de todo lo demás, porque «no hables» tiene que ganarle a cualquier
+    // otro camino de salida. En particular al freno por conversación, que unas
+    // líneas más abajo REPITE la última respuesta del agente ante un duplicado:
+    // hacer eso encima de una persona sería el bot hablando dos veces sobre lo
+    // que acaba de decir alguien del equipo.
+    //
+    // El mensaje del comprador SÍ se guarda, y esa es la mitad importante. El
+    // comerciante está mirando el panel; si lo que acaba de llegar no se
+    // guardara, la conversación que está atendiendo se quedaría muda para él
+    // justo mientras la atiende. También se conserva `externalId`, así que el
+    // índice único sigue siendo lo que impide que un reintento de Meta cuente
+    // dos veces.
+    //
+    // Y se salta el freno a propósito: no se envía nada, así que no hay nada
+    // que frenar, y lo único que el freno podría hacer aquí es ESCONDERLE al
+    // comerciante una línea que el comprador sí escribió.
+    if (isHumanAttended(conversation.status)) {
+      await db.message.create({
+        data: {
+          tenantId,
+          conversationId: conversation.id,
+          role: 'user',
+          content: message,
+          externalId: input.externalId ?? null,
+        },
+      });
+      return {
+        conversationId: conversation.id,
+        text: '',
+        toolResults: [],
+        budgetExhausted: false,
+        throttled: false,
+        silenced: true,
+      };
+    }
+
     // Checked before ANYTHING is persisted: a throttled message costs the
     // merchant neither a row nor a token, which is the whole point — the
     // budget path below deliberately does persist, because a shopper refused
@@ -254,6 +312,7 @@ export class AgentService {
         toolResults: [],
         budgetExhausted: false,
         throttled: true,
+        silenced: false,
       };
     }
 
@@ -290,13 +349,19 @@ export class AgentService {
     // agotado también es un mensaje automático, y también puede ser lo primero
     // que lea un comprador.
     const tenant = await platformDb.tenant.findUniqueOrThrow({ where: { id: tenantId } });
-    // Cuándo habló el agente por última vez AQUÍ. Es el único estado que hace
-    // falta: no hay columna «ya revelado» que pueda desincronizarse de la
-    // conversación, y el propio transcripto es la prueba de qué vio el
-    // comprador. Ojo con el orden: se lee después de guardar el mensaje del
-    // comprador, que es de rol `user` y por tanto no interfiere.
-    const lastAssistant = await this.lastAssistantMessage(tenantId, conversation.id);
-    const disclosure = needsDisclosure(lastAssistant?.createdAt ?? null)
+    // Lo último que salió de la tienda hacia este comprador, lo escribiera el
+    // agente o una persona del equipo. Es el único estado que hace falta: no
+    // hay columna «ya revelado» que pueda desincronizarse de la conversación, y
+    // el propio transcripto es la prueba de qué vio el comprador. Ojo con el
+    // orden: se lee después de guardar el mensaje del comprador, que es de rol
+    // `user` y por tanto no interfiere.
+    //
+    // Que mire también las filas `human` es lo que hace que devolverle la
+    // conversación al asistente vuelva a revelar la automatización: quien
+    // acababa de contestar era una persona, y el comprador cree que sigue
+    // hablando con ella. Ver `needsDisclosureAfter`.
+    const lastOutbound = await this.lastOutboundMessage(tenantId, conversation.id);
+    const disclosure = needsDisclosureAfter(lastOutbound)
       ? buildAutomationDisclosure({
           storeName: tenant.name,
           agentConfig: tenant.agentConfig,
@@ -342,6 +407,7 @@ export class AgentService {
         toolResults: [],
         budgetExhausted: true,
         throttled: false,
+        silenced: false,
       };
     }
 
@@ -491,16 +557,30 @@ export class AgentService {
       toolResults,
       budgetExhausted: false,
       throttled: false,
+      silenced: false,
     };
   }
 
-  /** La última fila que escribió el agente en esta conversación. Dos usos: qué
-   * dijo (para contestar un duplicado sin gastar un turno) y CUÁNDO lo dijo
-   * (para decidir si este turno abre una sesión nueva y toca revelar). */
+  /** La última fila que escribió EL AGENTE en esta conversación, para contestar
+   * un duplicado sin gastar un turno.
+   *
+   * Acotado a `assistant` a propósito: repetirle a un comprador impaciente lo
+   * que escribió una persona del equipo, y repetírselo desde el bot, sería
+   * ponerle a esa persona palabras que no volvió a decir. */
   private async lastAssistantMessage(tenantId: string, conversationId: string) {
     return tenantDb(tenantId).message.findFirst({
       where: { tenantId, conversationId, role: 'assistant' },
       orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  /** Lo último que salió de la tienda hacia el comprador: del agente o de una
+   * persona, lo que sea más reciente. Es lo que decide si toca revelar. */
+  private async lastOutboundMessage(tenantId: string, conversationId: string) {
+    return tenantDb(tenantId).message.findFirst({
+      where: { tenantId, conversationId, role: { in: [...OUTBOUND_ROLES] } },
+      orderBy: { createdAt: 'desc' },
+      select: { role: true, createdAt: true },
     });
   }
 
@@ -530,16 +610,25 @@ export class AgentService {
    * The last {@link HISTORY_LIMIT} messages, oldest first, as Anthropic
    * message params.
    *
-   * Only `user` and `assistant` rows with real text are replayed. The `tool`
-   * rows this service writes are a transcript record for the merchant, not
-   * conversation state — replaying them would produce `tool_result` blocks
+   * Only `user`, `assistant` and `human` rows with real text are replayed. The
+   * `tool` rows this service writes are a transcript record for the merchant,
+   * not conversation state — replaying them would produce `tool_result` blocks
    * with no matching `tool_use` in the same history window, which the API
    * rejects. The model gets the same continuity a human reading the
    * transcript would.
+   *
+   * Lo que escribió una persona del equipo (`human`) viaja como `assistant`,
+   * que es el rol que la API tiene para «lado de la tienda». No es una
+   * confusión de identidades: es justo la continuidad que hace falta para que,
+   * al devolverle la conversación al asistente, este no vuelva a preguntar lo
+   * que el comerciante ya preguntó ni contradiga lo que ya prometió. Que ese
+   * tramo lo escribiera una persona no se pierde: es lo que decide la
+   * revelación (`needsDisclosureAfter`), y es lo que el transcripto le muestra
+   * al comerciante con un rol distinto.
    */
   private async loadHistory(tenantId: string, conversationId: string): Promise<Anthropic.MessageParam[]> {
     const rows = await tenantDb(tenantId).message.findMany({
-      where: { tenantId, conversationId, role: { in: ['user', 'assistant'] } },
+      where: { tenantId, conversationId, role: { in: [...TRANSCRIPT_ROLES] } },
       orderBy: { createdAt: 'desc' },
       take: HISTORY_LIMIT,
     });
@@ -548,7 +637,10 @@ export class AgentService {
       .reverse()
       .filter((row) => row.content.trim().length > 0)
       .map((row) => ({
-        role: row.role === 'assistant' ? ('assistant' as const) : ('user' as const),
+        role:
+          row.role === 'assistant' || row.role === HUMAN_MESSAGE_ROLE
+            ? ('assistant' as const)
+            : ('user' as const),
         content: row.content,
       }));
   }

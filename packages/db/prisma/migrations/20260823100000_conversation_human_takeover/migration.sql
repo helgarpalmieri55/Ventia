@@ -1,0 +1,41 @@
+-- Atención humana: el comerciante contesta desde el panel y el agente calla.
+--
+-- Dos columnas nuevas en "Conversation", las dos anulables y sin relleno, así
+-- que la migración es instantánea y no bloquea nada:
+--
+--   lastInboundAt     cuándo escribió el comprador por última vez, para poder
+--                     decidir la ventana de 24 horas de Meta ANTES de que el
+--                     comerciante escriba una respuesta que Meta rechazaría.
+--                     `packages/instagram/src/window.ts` explica por qué el
+--                     AGENTE no necesita guardar esto (siempre contesta a un
+--                     mensaje que trae su propia marca de tiempo); una respuesta
+--                     humana no tiene ese mensaje a mano, que es exactamente lo
+--                     que cambia con esta columna.
+--
+--   channelAccountId  por qué cuenta entró la conversación: "InstagramAccount"."id"
+--                     o "WhatsAppNumber"."id" según "channel". Un IGSID solo
+--                     identifica a una persona FRENTE A UNA CUENTA, así que sin
+--                     esto un inquilino con dos cuentas conectadas no tendría
+--                     forma de saber por cuál contestar.
+--
+-- Sin FOREIGN KEY a propósito: la columna apunta a dos tablas distintas según
+-- el canal, y no existe en Postgres una clave foránea polimórfica. Lo que
+-- protege el caso importante no es la FK sino el WHERE del camino de respuesta,
+-- que siempre acota por "tenantId" — una fila huérfana o de otro inquilino no
+-- resuelve a ninguna credencial y la respuesta se niega con un error legible.
+ALTER TABLE "Conversation" ADD COLUMN "lastInboundAt" TIMESTAMP(3);
+ALTER TABLE "Conversation" ADD COLUMN "channelAccountId" UUID;
+
+-- Ningún índice nuevo.
+--
+-- `lastInboundAt` y `channelAccountId` solo se leen por el id de UNA
+-- conversación que ya se buscó por clave primaria, nunca como filtro ni como
+-- orden. Un índice aquí sería escritura extra en el camino más caliente del
+-- agente (cada mensaje entrante actualiza `lastInboundAt`) a cambio de nada.
+--
+-- El estado nuevo `'human'` tampoco necesita migración de datos: "status" es un
+-- `String` libre y `'human'` no existe todavía en ninguna fila. Lo que sí exige
+-- es clasificarlo en `HUMAN_TOUCHED_STATUSES`
+-- (services/api/src/dashboard/dashboard.service.ts), como pide el comentario de
+-- esa constante — si no, el tablero le seguiría acreditando a la IA las
+-- conversaciones que atendió una persona.

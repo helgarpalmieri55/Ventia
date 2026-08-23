@@ -6,6 +6,7 @@ import { formatCOP } from '../lib/format';
 import { ProductImage } from './product-image';
 import {
   cartLinkFromTool,
+  fetchHumanReplies,
   productsFromTool,
   streamAgentMessage,
   type AgentProduct,
@@ -42,8 +43,21 @@ import {
 const STORAGE_KEY = 'ventia_agent_conversation';
 const NETWORK_ERROR = 'No pude responderte en este momento. Intenta de nuevo.';
 
+/**
+ * Cada cuánto se pregunta si alguien de la tienda escribió.
+ *
+ * Solo mientras el panel está abierto. Cinco segundos es lo mismo que sondea el
+ * panel del comerciante: por debajo nadie nota la diferencia, y por encima una
+ * respuesta escrita a mano tarda lo bastante como para que el comprador crea
+ * que no le contestaron.
+ */
+const INTERVALO_RESPUESTAS_MS = 5000;
+
 interface ChatMessage {
-  role: 'user' | 'agent';
+  /** `equipo` es una persona de la tienda escribiendo desde el panel. Es un
+   * rol propio y no `agent` a propósito: quien escribe no es el asistente, y
+   * pintarlo igual haría que el comprador creyera lo contrario. */
+  role: 'user' | 'agent' | 'equipo';
   text: string;
   products: AgentProduct[];
   cartLink: CartLinkData | null;
@@ -60,10 +74,59 @@ export function ChatWidget({ agentName = 'Asesor' }: { agentName?: string }) {
   const [sending, setSending] = useState(false);
   const conversationId = useRef<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** La marca del último mensaje de una persona que ya se pintó, para pedir
+   * solo lo siguiente y no repetir nada. */
+  const ultimaRespuestaHumana = useRef<string | null>(null);
+  /** Si una persona de la tienda está atendiendo esta conversación. */
+  const [atendidaPorPersona, setAtendidaPorPersona] = useState(false);
 
   useEffect(() => {
     conversationId.current = sessionStorage.getItem(STORAGE_KEY) ?? undefined;
   }, []);
+
+  /**
+   * El sondeo de respuestas humanas.
+   *
+   * Los otros dos canales del producto no lo necesitan: una respuesta escrita
+   * desde el panel sale por la Graph API y le llega al comprador al teléfono.
+   * Este widget no tiene entrega propia —solo abre un stream mientras dura un
+   * turno—, así que sin esto el comerciante contestaría y el comprador no
+   * recibiría nunca nada.
+   *
+   * Solo mientras el panel está abierto y solo si ya hay conversación: un
+   * lanzador cerrado en una pestaña de fondo no tiene por qué pedir nada.
+   */
+  useEffect(() => {
+    if (!open) return;
+
+    let vivo = true;
+    const sondear = async () => {
+      const id = conversationId.current;
+      if (!id) return;
+      const respuesta = await fetchHumanReplies(id, ultimaRespuestaHumana.current);
+      if (!vivo || !respuesta) return;
+
+      setAtendidaPorPersona(respuesta.status === 'human');
+      if (respuesta.messages.length === 0) return;
+      ultimaRespuestaHumana.current = respuesta.messages[respuesta.messages.length - 1].createdAt;
+      setMessages((prev) => [
+        ...prev,
+        ...respuesta.messages.map((m) => ({
+          role: 'equipo' as const,
+          text: m.content,
+          products: [],
+          cartLink: null,
+        })),
+      ]);
+    };
+
+    void sondear();
+    const timer = setInterval(() => void sondear(), INTERVALO_RESPUESTAS_MS);
+    return () => {
+      vivo = false;
+      clearInterval(timer);
+    };
+  }, [open]);
 
   // Keeps the newest message in view as the answer streams in.
   useEffect(() => {
@@ -104,10 +167,17 @@ export function ChatWidget({ agentName = 'Asesor' }: { agentName?: string }) {
           updateLast((msg) => ({ ...msg, text: event.text }));
         } else if (event.type === 'error') {
           updateLast((msg) => ({ ...msg, text: event.message }));
+        } else if (event.type === 'done' && event.silenced) {
+          // El asistente calló porque una persona está atendiendo esta
+          // conversación. La burbuja vacía que se añadió al enviar se quita —
+          // dejarla ahí sería un hueco esperando una respuesta que no va a
+          // llegar por esa vía— y en su lugar se dice quién va a contestar.
+          setAtendidaPorPersona(true);
+          setMessages((prev) => prev.filter((msg, i) => i !== prev.length - 1 || msg.text.length > 0));
         }
-        // `done` carries no information the events above have not already
-        // delivered; it exists so a caller that reconnects mid-turn has one
-        // terminal frame to look for.
+        // Por lo demás `done` no trae nada que los eventos de arriba no hayan
+        // entregado ya; existe para que quien se reconecte a mitad de turno
+        // tenga un marco terminal que buscar.
       }
     } catch (err) {
       console.error('[agent] stream failed', err);
@@ -152,6 +222,16 @@ export function ChatWidget({ agentName = 'Asesor' }: { agentName?: string }) {
             {messages.map((msg, i) => (
               <ChatBubble key={i} message={msg} pending={sending && i === messages.length - 1} />
             ))}
+
+            {atendidaPorPersona ? (
+              // Decírselo al comprador, y no dejar que lo deduzca de un
+              // silencio. Es también lo que la política de Meta busca en el
+              // otro sentido: quien habla con una persona tiene que saberlo,
+              // igual que quien habla con una máquina.
+              <p className="self-center text-xs text-muted-foreground">
+                Te está respondiendo una persona del equipo.
+              </p>
+            ) : null}
           </div>
 
           <form
@@ -187,6 +267,17 @@ function ChatBubble({ message, pending }: { message: ChatMessage; pending: boole
   if (message.role === 'user') {
     return (
       <p className="self-end rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">{message.text}</p>
+    );
+  }
+
+  if (message.role === 'equipo') {
+    // Una burbuja distinta de la del asistente, con su etiqueta: el comprador
+    // tiene que poder ver que ahora le contesta alguien del equipo.
+    return (
+      <div className="flex flex-col gap-0.5 self-start rounded-lg border border-primary bg-background px-3 py-2">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Equipo de la tienda</span>
+        <p className="whitespace-pre-wrap text-sm">{message.text}</p>
+      </div>
     );
   }
 

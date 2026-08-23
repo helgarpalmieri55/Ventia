@@ -14,7 +14,7 @@ export type AgentStreamEvent =
   | { type: 'conversation'; conversationId: string }
   | { type: 'tool'; name: string; result: AgentToolResult }
   | { type: 'message'; text: string }
-  | { type: 'done'; conversationId: string; text: string; toolResults: Array<{ name: string; result: AgentToolResult }>; budgetExhausted: boolean; throttled: boolean }
+  | { type: 'done'; conversationId: string; text: string; toolResults: Array<{ name: string; result: AgentToolResult }>; budgetExhausted: boolean; throttled: boolean; silenced?: boolean }
   | { type: 'error'; message: string };
 
 export interface AgentToolResult {
@@ -147,6 +147,48 @@ export function cartLinkFromTool(name: string, result: AgentToolResult): CartLin
         item_count: typeof data.item_count === 'number' ? data.item_count : 0,
       }
     : null;
+}
+
+/** Una respuesta escrita por una PERSONA de la tienda, tal como la devuelve
+ * `GET /v1/storefront/agent/conversations/:id/replies`. */
+export interface HumanReply {
+  id: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface ConversationReplies {
+  /** El estado de la conversación. `'human'` significa que la está atendiendo
+   * una persona y que el asistente no va a contestar. */
+  status: string;
+  messages: HumanReply[];
+}
+
+/**
+ * Lo que una persona de la tienda le ha escrito a este comprador desde el
+ * panel, después de `after`.
+ *
+ * Solo los mensajes de la PERSONA: los del asistente ya llegan por el stream
+ * del turno, y devolverlos aquí obligaría al widget a deduplicar dos fuentes
+ * de lo mismo.
+ *
+ * Devuelve `null` ante cualquier fallo en vez de lanzar. Es un sondeo de fondo:
+ * un error de red aquí no puede romper un chat que por lo demás funciona, y el
+ * sondeo siguiente lo arregla solo.
+ */
+export async function fetchHumanReplies(
+  conversationId: string,
+  after: string | null,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ConversationReplies | null> {
+  const query = after ? `?after=${encodeURIComponent(after)}` : '';
+  try {
+    const res = await fetchImpl(`/api/agent/conversations/${conversationId}/replies${query}`);
+    if (!res.ok) return null;
+    return (await res.json()) as ConversationReplies;
+  } catch {
+    return null;
+  }
 }
 
 /** Adopts an agent-built cart (`/carrito?c=<key>`) so every later cart call

@@ -5,7 +5,6 @@ import { AgentBudgetService } from './agent-budget.service';
 import { AgentThrottleService } from './agent-throttle.service';
 import { AgentController } from './agent.controller';
 import { AgentAdminController } from './agent-admin.controller';
-import { ConversationsController } from './conversations.controller';
 import { AgentService, ANTHROPIC_CLIENT } from './agent.service';
 import { ConversationRetentionWorker } from './conversation-retention.worker';
 import { RedisModule } from '../common/redis.module';
@@ -31,7 +30,10 @@ import { CheckoutModule } from '../checkout/checkout.module';
  */
 @Module({
   imports: [RedisModule, StorefrontModule, CheckoutModule, AdminModule, MailerModule],
-  controllers: [AgentController, AgentAdminController, ConversationsController],
+  // `ConversationsController` se fue a `ConversationsModule`: contestar como
+  // persona necesita las credenciales de Instagram y WhatsApp, y esos dos
+  // módulos ya importan este. Ver la cabecera de aquel módulo.
+  controllers: [AgentController, AgentAdminController],
   providers: [
     AgentToolsService,
     AgentBudgetService,
