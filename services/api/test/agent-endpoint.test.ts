@@ -154,7 +154,11 @@ describe('agent endpoint — who is allowed to reach it', () => {
     const res = await post(AGENT_DOMAINS[0], { message: '¿tienen camisas?' });
 
     expect(res.status).toBe(201);
-    expect(res.body.text).toBe('¡Claro que sí!');
+    // La respuesta del modelo va al final: delante lleva la revelación de
+    // experiencia automatizada que el bucle antepone al abrir la conversación
+    // (ver agent-disclosure.test.ts y agent-loop.test.ts).
+    expect(res.body.text.endsWith('¡Claro que sí!')).toBe(true);
+    expect(res.body.text).toContain('el asistente virtual de');
     expect(res.body.conversationId).toBeTruthy();
   });
 
@@ -245,7 +249,10 @@ describe('agent endpoint — the SSE stream', () => {
     expect(names.at(-1)).toBe('done');
 
     const done = events.find(([name]) => name === 'done')?.[1];
-    expect(done?.text).toBe('Te dejé el carrito listo.');
+    // Con la revelación delante: el widget recibe por SSE exactamente el mismo
+    // texto que se persiste y que se mandaría por WhatsApp o Instagram.
+    expect(done?.text.endsWith('Te dejé el carrito listo.')).toBe(true);
+    expect(done?.text).toContain('el asistente virtual de');
     expect(done?.conversationId).toBe(events[0][1].conversationId);
   });
 
@@ -312,8 +319,10 @@ describe('agent endpoint — the per-conversation throttle', () => {
     const repeat = await post(AGENT_DOMAINS[0], { message: '¿envían a Cali?', conversationId });
 
     expect(repeat.body.throttled).toBe(true);
-    // From the shopper's side the second tap looks like it simply worked.
-    expect(repeat.body.text).toBe('Sí, tenemos envío a Cali.');
+    // From the shopper's side the second tap looks like it simply worked:
+    // byte por byte la misma respuesta, revelación incluida.
+    expect(repeat.body.text).toBe(first.body.text);
+    expect(repeat.body.text).toContain('Sí, tenemos envío a Cali.');
     // And it cost nothing: no second model call, and no duplicate row in the
     // transcript the merchant reads.
     expect(createCalls).toHaveLength(1);

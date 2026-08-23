@@ -127,7 +127,9 @@ describe('agent loop — a plain answer', () => {
 
     const reply = await agent.respond({ tenantId, message: 'hola' });
 
-    expect(reply.text).toBe('¡Hola! ¿En qué te ayudo?');
+    // El texto del modelo cierra la respuesta; delante va la revelación de
+    // experiencia automatizada (su propio describe, más abajo).
+    expect(reply.text.endsWith('¡Hola! ¿En qué te ayudo?')).toBe(true);
     expect(reply.budgetExhausted).toBe(false);
 
     const messages = await prisma.message.findMany({
@@ -474,6 +476,152 @@ describe('agent loop — the plan decides which tools exist', () => {
     // breakpoint. The prompt text is the first block's `text`.
     expect(systemText(createCalls[0])).not.toContain('escalate_to_human');
     expect(systemText(createCalls[1])).toContain('escalate_to_human');
+  });
+});
+
+describe('agent loop — la revelación de experiencia automatizada', () => {
+  /**
+   * Lo que un revisor de Meta comprueba abriendo una conversación: que el
+   * primer mensaje que recibe dice que quien contesta es un sistema
+   * automático.
+   *
+   * Estas pruebas no miran el prompt. Miran lo que SALE del bucle, que es lo
+   * único que el comprador ve y lo único que un revisor puede observar — y por
+   * eso la revelación la antepone el código y no el modelo: aquí el modelo
+   * está guionizado para no decir absolutamente nada sobre sí mismo, y aun así
+   * tiene que aparecer.
+   */
+
+  /** El texto fijo que le toca a este inquilino de fixture. */
+  async function revelacionEsperada() {
+    const { buildAutomationDisclosure } = await import('../src/agent/system-prompt');
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    return buildAutomationDisclosure({
+      storeName: tenant.name,
+      agentConfig: tenant.agentConfig,
+      handoffEnabled: false,
+    });
+  }
+
+  it('abre toda conversación nueva revelando que es automática', async () => {
+    scripted = [textResponse('Claro, tenemos camisas.')];
+
+    const reply = await agent.respond({ tenantId, message: 'hola' });
+
+    expect(reply.text.startsWith(await revelacionEsperada())).toBe(true);
+    expect(reply.text).toContain('Claro, tenemos camisas.');
+  });
+
+  it('la deja escrita en el transcripto, que es la prueba de qué vio el comprador', async () => {
+    scripted = [textResponse('Claro que sí.')];
+
+    const reply = await agent.respond({ tenantId, message: 'hola' });
+
+    const assistant = await prisma.message.findFirst({
+      where: { conversationId: reply.conversationId, role: 'assistant' },
+    });
+    expect(assistant?.content).toContain('el asistente virtual de Tienda Loop');
+  });
+
+  it('NO la repite en los mensajes siguientes de la misma conversación', async () => {
+    // El otro lado del requisito: un aviso en cada mensaje arruina la venta y
+    // no añade cumplimiento.
+    scripted = [textResponse('primera'), textResponse('segunda'), textResponse('tercera')];
+
+    const uno = await agent.respond({ tenantId, message: 'hola' });
+    const dos = await agent.respond({ tenantId, conversationId: uno.conversationId, message: '¿y en talla M?' });
+    const tres = await agent.respond({ tenantId, conversationId: uno.conversationId, message: '¿y el envío?' });
+
+    expect(uno.text).toContain('asistente virtual');
+    expect(dos.text).toBe('segunda');
+    expect(tres.text).toBe('tercera');
+  });
+
+  it('la repite cuando el hilo se retoma tras un día entero de silencio', async () => {
+    // Meta la exige «tras un lapso significativo de tiempo», y 24 h es la
+    // ventana de mensajería que la propia plataforma considera sesión cerrada.
+    scripted = [textResponse('primera'), textResponse('al día siguiente')];
+
+    const uno = await agent.respond({ tenantId, message: 'hola' });
+    // Se envejece la respuesta del agente, que es el reloj que mira el bucle.
+    await prisma.message.updateMany({
+      where: { conversationId: uno.conversationId, role: 'assistant' },
+      data: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+    });
+
+    const dos = await agent.respond({ tenantId, conversationId: uno.conversationId, message: 'sigo aquí' });
+
+    expect(dos.text.startsWith(await revelacionEsperada())).toBe(true);
+    expect(dos.text).toContain('al día siguiente');
+  });
+
+  it('revela aunque el modelo no diga una sola palabra en todo el turno', async () => {
+    // Un turno que agota el tope pidiendo herramientas y nunca concluye. Sin
+    // esto la conversación quedaría marcada como revelada sin haber enviado
+    // nada, y el comprador no vería el aviso nunca.
+    scripted = Array.from({ length: 4 }, () => toolUseResponse('search_products', { query: 'x', limit: 1 }));
+
+    const reply = await agent.respond({ tenantId, message: 'busca sin parar' });
+
+    expect(reply.text).toBe(await revelacionEsperada());
+  });
+
+  it('revela también en la respuesta fija de presupuesto agotado', async () => {
+    // Ese camino no llama al modelo, así que ninguna instrucción del prompt
+    // podría haberla puesto: para el comprador sigue siendo un mensaje
+    // automático, y puede ser el primero que reciba.
+    const month = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`;
+    await prisma.agentUsage.create({ data: { tenantId, month, messagesCount: 30, creditsUsed: 30 } });
+
+    const reply = await agent.respond({ tenantId, message: 'hola' });
+
+    expect(reply.budgetExhausted).toBe(true);
+    expect(createCalls).toHaveLength(0);
+    expect(reply.text).toContain('el asistente virtual de Tienda Loop');
+    expect(reply.text).toContain('no puedo responderte por chat');
+    // Y sin ofrecer nada que no vaya a poder cumplir: pasado el techo no hay
+    // turno siguiente. La vía humana de ese mensaje es el propio texto fijo.
+    expect(reply.text).not.toContain('una persona del equipo');
+    expect(reply.text).toContain('Escríbele directamente a la tienda');
+  });
+
+  it('promete traspaso a una persona solo si el plan lo incluye', async () => {
+    // La vía de escalado tiene que ser verdad: la tienda de fixture no tiene
+    // `humanHandoff`, así que le ofrece el contacto de la tienda y no un
+    // traspaso que nadie va a atender.
+    const conHandoff = await prisma.tenant.create({
+      data: {
+        slug: `agent-revelacion-${Date.now()}`,
+        name: 'Con Handoff Rev',
+        status: 'live',
+        limits: { create: { productsMax: 10, aiCreditsMonth: 10, staffSeats: 1, humanHandoff: true } },
+      },
+    });
+    scripted = [textResponse('a'), textResponse('b')];
+
+    const sin = await agent.respond({ tenantId, message: 'hola' });
+    const con = await agent.respond({ tenantId: conHandoff.id, message: 'hola' });
+
+    expect(sin.text).toContain('datos de contacto de la tienda');
+    expect(con.text).not.toContain('datos de contacto de la tienda');
+    expect(con.text).toContain('una persona del equipo');
+  });
+
+  it('revela aunque el comerciante le ponga nombre de persona al agente', async () => {
+    const disfrazada = await prisma.tenant.create({
+      data: {
+        slug: `agent-maria-${Date.now()}`,
+        name: 'Tienda María',
+        status: 'live',
+        agentConfig: { agentName: 'María', tone: 'juvenil' },
+        limits: { create: { productsMax: 10, aiCreditsMonth: 10, staffSeats: 1 } },
+      },
+    });
+    scripted = [textResponse('¡claro!')];
+
+    const reply = await agent.respond({ tenantId: disfrazada.id, message: 'hola' });
+
+    expect(reply.text).toContain('Soy María, el asistente virtual de Tienda María');
   });
 });
 

@@ -5,7 +5,7 @@ import { AGENT_TOOL_JSON_SCHEMAS, AGENT_TOOL_NAMES } from '@ventia/core';
 import { AgentToolsService } from './agent-tools.service';
 import { AgentBudgetService, BUDGET_EXHAUSTED_REPLY } from './agent-budget.service';
 import { AgentThrottleService, THROTTLED_REPLY } from './agent-throttle.service';
-import { buildSystemPrompt } from './system-prompt';
+import { buildAutomationDisclosure, buildSystemPrompt, needsDisclosure } from './system-prompt';
 
 /**
  * Where a conversation's shopper is standing, as the orders/carts side names it.
@@ -98,6 +98,12 @@ const HISTORY_LIMIT = 20;
 
 export interface AgentReply {
   conversationId: string;
+  /** Lo que se le manda al comprador, ya con la revelación de experiencia
+   * automatizada antepuesta cuando este turno abre una sesión (ver
+   * `system-prompt.ts`). Va dentro de `text` y no en un campo aparte a
+   * propósito: los tres transportes —widget, WhatsApp, Instagram— envían
+   * `text`, así que ninguno puede olvidarse de la revelación, que es
+   * exactamente el fallo que la política castiga. */
   text: string;
   /** Tool results from this turn, so a caller can render product cards or a
    * cart link rather than re-deriving them from prose. */
@@ -228,6 +234,17 @@ export class AgentService {
       // like it worked. Falling back to the throttle text covers the case
       // where there is no previous answer yet (the first turn is still in
       // flight), which is exactly when repeating is least useful.
+      //
+      // Este camino sale ANTES de la revelación a propósito, y no abre un
+      // hueco de cumplimiento: por construcción nunca es el primer mensaje
+      // contestado de una conversación. `rate_limited` exige más de veinte
+      // mensajes previos en el mismo hilo, y `duplicate` exige el mismo texto
+      // dentro de treinta segundos — o sea, un turno anterior. Cuando ese
+      // turno anterior ya respondió, su texto (que es el que se repite aquí)
+      // lleva la revelación dentro; y cuando todavía está en vuelo, la
+      // revelación llega con él segundos después. A cambio, el camino que
+      // existe para que una tormenta de reintentos no cueste nada sigue sin
+      // costar ni una consulta más.
       const text =
         throttled.kind === 'duplicate' ? ((await this.lastAssistantText(tenantId, conversation.id)) ?? THROTTLED_REPLY) : THROTTLED_REPLY;
       emit({ type: 'message', text });
@@ -256,30 +273,78 @@ export class AgentService {
     });
 
     const budget = await this.budget.check(tenantId);
+
+    // ## La revelación de que esto es un sistema automático
+    //
+    // La política de experiencias automatizadas de Meta la exige al principio
+    // de cada hilo, y es causa de rechazo en la revisión de Instagram y de
+    // WhatsApp. La antepone ESTE código, no el prompt: `system-prompt.ts`
+    // explica por qué («el modelo tiene instrucciones de decirlo» no se
+    // demuestra ante un revisor; «el sistema lo antepone siempre» sí), y el
+    // efecto práctico es que sale igual por los tres caminos de salida que
+    // tiene este método — el modelo, el tope de presupuesto y un turno sin
+    // texto—, sin que ningún transporte tenga que acordarse de añadirla.
+    //
+    // La ficha del inquilino se carga aquí arriba, antes de la rama de
+    // presupuesto, precisamente por eso: la respuesta fija de presupuesto
+    // agotado también es un mensaje automático, y también puede ser lo primero
+    // que lea un comprador.
+    const tenant = await platformDb.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    // Cuándo habló el agente por última vez AQUÍ. Es el único estado que hace
+    // falta: no hay columna «ya revelado» que pueda desincronizarse de la
+    // conversación, y el propio transcripto es la prueba de qué vio el
+    // comprador. Ojo con el orden: se lee después de guardar el mensaje del
+    // comprador, que es de rol `user` y por tanto no interfiere.
+    const lastAssistant = await this.lastAssistantMessage(tenantId, conversation.id);
+    const disclosure = needsDisclosure(lastAssistant?.createdAt ?? null)
+      ? buildAutomationDisclosure({
+          storeName: tenant.name,
+          agentConfig: tenant.agentConfig,
+          handoffEnabled: budget.handoffEnabled,
+          // Pasado el techo no va a haber turno siguiente, así que ofrecer
+          // «dímelo y te paso con alguien» justo antes de «no puedo
+          // responderte por chat» sería una promesa vacía. Ahí la salida
+          // humana la da el propio texto fijo. La revelación no se recorta.
+          includeEscalation: budget.allowed,
+        })
+      : null;
+    /** Antepone la revelación cuando toca, como párrafo propio. El párrafo
+     * importa: los renderizadores de WhatsApp e Instagram parten por `\n\n`
+     * antes que por cualquier otro separador, así que en un mensaje largo la
+     * revelación sale como el PRIMER cuerpo enviado y no pegada a la mitad de
+     * una frase. */
+    const conRevelacion = (text: string): string => {
+      if (!disclosure) return text;
+      const cuerpo = text.trim();
+      return cuerpo ? `${disclosure}\n\n${cuerpo}` : disclosure;
+    };
+
     if (!budget.allowed) {
       // The hard cap: no model call at all, one fixed sentence. SPEC.md §7 is
       // explicit that this has no exceptions, which is why it sits here rather
       // than as an instruction in the prompt — a prompt rule is a request, and
       // the thing being enforced is a bill.
+      // Revelada igual que cualquier otra respuesta: para quien escribe esto
+      // sigue siendo un mensaje automático, y puede ser el primero que reciba.
+      const textoPresupuesto = conRevelacion(BUDGET_EXHAUSTED_REPLY);
       await db.message.create({
         data: {
           tenantId,
           conversationId: conversation.id,
           role: 'assistant',
-          content: BUDGET_EXHAUSTED_REPLY,
+          content: textoPresupuesto,
         },
       });
-      emit({ type: 'message', text: BUDGET_EXHAUSTED_REPLY });
+      emit({ type: 'message', text: textoPresupuesto });
       return {
         conversationId: conversation.id,
-        text: BUDGET_EXHAUSTED_REPLY,
+        text: textoPresupuesto,
         toolResults: [],
         budgetExhausted: true,
         throttled: false,
       };
     }
 
-    const tenant = await platformDb.tenant.findUniqueOrThrow({ where: { id: tenantId } });
     const system = buildSystemPrompt({
       storeName: tenant.name,
       agentConfig: tenant.agentConfig,
@@ -394,12 +459,17 @@ export class AgentService {
       });
     }
 
+    // Un turno sin texto (el modelo solo pidió herramientas hasta agotar el
+    // tope) se queda al menos con la revelación en vez de con nada: los
+    // renderizadores descartan un cuerpo vacío, y ese descarte habría dejado
+    // la conversación marcada como revelada sin que se enviara nada.
+    const outgoing = conRevelacion(finalText);
     await db.message.create({
       data: {
         tenantId,
         conversationId: conversation.id,
         role: 'assistant',
-        content: finalText,
+        content: outgoing,
         inputTokens,
         outputTokens,
       },
@@ -414,23 +484,32 @@ export class AgentService {
       'shopperMessage',
     );
 
-    emit({ type: 'message', text: finalText });
+    emit({ type: 'message', text: outgoing });
     return {
       conversationId: conversation.id,
-      text: finalText,
+      text: outgoing,
       toolResults,
       budgetExhausted: false,
       throttled: false,
     };
   }
 
-  /** The most recent thing the agent said in this conversation, used to answer
-   * a duplicate message without spending a turn on it. */
-  private async lastAssistantText(tenantId: string, conversationId: string): Promise<string | null> {
-    const row = await tenantDb(tenantId).message.findFirst({
+  /** La última fila que escribió el agente en esta conversación. Dos usos: qué
+   * dijo (para contestar un duplicado sin gastar un turno) y CUÁNDO lo dijo
+   * (para decidir si este turno abre una sesión nueva y toca revelar). */
+  private async lastAssistantMessage(tenantId: string, conversationId: string) {
+    return tenantDb(tenantId).message.findFirst({
       where: { tenantId, conversationId, role: 'assistant' },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /** The most recent thing the agent said in this conversation, used to answer
+   * a duplicate message without spending a turn on it. Ya lleva incorporada la
+   * revelación si ese mensaje era el primero de la sesión, que es justo lo que
+   * hace seguro repetirlo tal cual. */
+  private async lastAssistantText(tenantId: string, conversationId: string): Promise<string | null> {
+    const row = await this.lastAssistantMessage(tenantId, conversationId);
     return row && row.content.trim().length > 0 ? row.content : null;
   }
 

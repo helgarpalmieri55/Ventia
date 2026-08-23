@@ -240,10 +240,14 @@ describe('POST /webhooks/instagram/graph — enrutamiento', () => {
     // Y la respuesta salió de verdad hacia la cuenta correcta.
     expect(sent).toHaveLength(1);
     expect(sent[0].url).toBe(`https://graph.facebook.com/v21.0/${IG_ACCOUNT_ID}/messages`);
-    expect(sent[0].body).toEqual({
-      recipient: { id: SHOPPER_IGSID },
-      message: { text: '¡Claro! Tenemos varias.' },
-    });
+    const body = sent[0].body as { recipient: { id: string }; message: { text: string } };
+    expect(body.recipient).toEqual({ id: SHOPPER_IGSID });
+    // Lo PRIMERO que le llega a la persona por Instagram es la revelación de
+    // experiencia automatizada, y después la respuesta del modelo. Es lo que
+    // un revisor de Meta comprueba abriendo un DM, así que se afirma sobre el
+    // cuerpo que sale de verdad por la Graph API y no sobre el turno interno.
+    expect(body.message.text.startsWith('Hola, soy Asesor, el asistente virtual de')).toBe(true);
+    expect(body.message.text.endsWith('¡Claro! Tenemos varias.')).toBe(true);
   });
 
   it('NUNCA enruta una entrega a un inquilino que no es dueño de la cuenta', async () => {
