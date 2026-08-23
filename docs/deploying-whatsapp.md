@@ -1,5 +1,10 @@
 # Connecting a Meta WhatsApp app
 
+> Recording the Meta App Review screencasts? Start from
+> [`docs/grabacion-app-review.md`](grabacion-app-review.md) (Spanish) instead — it
+> covers the public tunnel, what to paste where, and the screencast script.
+> This document is the deploy-time reference it builds on.
+
 Written for the deploy where a real Meta app exists. Everything in
 `packages/whatsapp/src/cloud.ts` was built from Meta's published docs and
 tested against the payload examples in those docs — **not** against live
